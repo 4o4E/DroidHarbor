@@ -1,0 +1,1218 @@
+openapi: 3.1.0
+info:
+  title: DroidHarbor API
+  version: 0.0.0-dev
+  description: 管理会话、调用凭证、设备与租约、原生 ADB 通道、状态通知、共享预览及人工媒体会话接口。运行能力由 capabilities 和实际状态反馈；接口存在不等于已完成真机或生产网络兼容验收。
+servers:
+  - url: /
+    description: 当前部署的 HTTPS origin
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: 进程存活，不代表设备或媒体就绪
+      security: []
+      responses:
+        '200':
+          description: 进程正在响应
+  /api/v1/admin/sessions:
+    post:
+      operationId: createAdminSession
+      summary: 管理员令牌交换网页会话
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  writeOnly: true
+      responses:
+        '201':
+          description: 创建 Secure、HttpOnly、SameSite=Strict 会话 Cookie；返回 sessionId、expiresAt 和 csrfToken，不回显管理令牌
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, expiresAt, csrfToken]
+                properties:
+                  sessionId: {type: string}
+                  expiresAt: {type: string, format: date-time}
+                  csrfToken: {type: string}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/admin/sessions/current:
+    get:
+      operationId: getAdminSession
+      summary: 查询当前网页会话并获取 CSRF token
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 返回 sessionId 和 csrfToken
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, csrfToken]
+                properties:
+                  sessionId: {type: string}
+                  csrfToken: {type: string}
+        '401': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteAdminSession
+      summary: 幂等退出，撤销当前网页会话
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '204': {description: 已退出或没有 Cookie}
+        '403': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/callers:
+    get:
+      operationId: listCallers
+      summary: 管理员查询调用凭证元数据，不返回秘密
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 包含已撤销凭证；revokedAt 为已持久化的撤销时间
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [callers]
+                properties:
+                  callers:
+                    type: array
+                    items: {$ref: '#/components/schemas/Caller'}
+        '401': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createCaller
+      summary: 创建命名调用凭证，秘密仅在本次成功响应交付
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  description: 去掉首尾空白后须为 1 至 120 个字符；名称不是身份。
+      responses:
+        '201':
+          description: 凭证与操作记录已原子提交；响应丢失后不能从列表找回秘密
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Caller'
+                  - type: object
+                    required: [token]
+                    properties:
+                      token:
+                        type: string
+                        readOnly: true
+                        description: 不透明 bearer 凭证，不放入 URL 或日志。
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/callers/{id}:
+    delete:
+      operationId: revokeCaller
+      summary: 撤销调用凭证；重复撤销已存在的凭证幂等成功
+      description: 先在运行态拒绝该调用方及关联任务，再持久化。写库失败返回 503，当前进程仍拒绝访问，须修复后显式重试。204 不表示设备资源已经清理或已回池。
+      security: [{adminSession: []}]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '204': {description: 撤销已持久化，关联租约结束并进入统一回收路径；不保证立即回池}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/capabilities:
+    get:
+      operationId: getCapabilities
+      summary: 查询当前版本真正可调用的能力
+      description: 接受管理员会话或有效调用/任务 bearer。显式 Authorization 无效时不回退到 Cookie。响应不含任务身份、设备 endpoint、凭证或摘要；不声明尚未实现的 ADB/媒体协议版本。
+      security: [{adminSession: []}, {callerOrTask: []}]
+      responses:
+        '200':
+          description: 功能为 false 表示当前不可用，不表示已完成兼容
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [apiMajor, platform, features, limits]
+                properties:
+                  apiMajor: {type: integer, const: 1}
+                  platform:
+                    type: object
+                    required: [os, arch]
+                    properties:
+                      os: {type: string}
+                      arch: {type: string}
+                  features:
+                    type: object
+                    additionalProperties: {type: boolean}
+                    required: [adminSessions, callerCredentials, deviceDiscovery, leaseClaim, remoteAdb, webRTC, fileTransfers, appium, uiautomator2]
+                    properties:
+                      adminSessions: {type: boolean}
+                      callerCredentials: {type: boolean}
+                      deviceDiscovery: {type: boolean}
+                      leaseClaim: {type: boolean}
+                      remoteAdb: {type: boolean}
+                      webRTC: {type: boolean}
+                      fileTransfers: {type: boolean}
+                      appium: {type: boolean}
+                      uiautomator2: {type: boolean}
+                  limits:
+                    type: object
+                    properties:
+                      fileTransfer:
+                        type: object
+                        required: [maxUploadBytes, maxActive, maxCommandOutput]
+                        properties:
+                          maxUploadBytes: {type: integer, minimum: 1, maximum: 1073741824}
+                          maxActive: {type: integer, minimum: 1, maximum: 64}
+                          maxCommandOutput: {type: integer, minimum: 1, maximum: 1048576}
+        '401': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/device-discovery:
+    get:
+      operationId: discoverDevices
+      summary: 管理员读取当前 ADB 发现快照，不操作未登记手机
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 当前完整快照；空数组仅表示已连接的 ADB Server 没有设备
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      type: object
+                      required: [serial, state, transportId]
+                      properties:
+                        serial: {type: string}
+                        state: {type: string}
+                        transportId: {type: integer, minimum: 0}
+                        model: {type: string}
+                        product: {type: string}
+        '401': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices:
+    get:
+      operationId: listDevices
+      summary: 管理员完整设备视图或调用凭证选机摘要
+      description: 任务秘密不能枚举设备池。调用凭证响应不含 links、version、维护意图、真实 serial/endpoint 或其他任务信息。discoveryReady=false 时连接观测不可用，不把持久化状态冒充在线。
+      security: [{adminSession: []}, {callerOrTask: []}]
+      responses:
+        '200':
+          description: 设备列表及发现源是否就绪
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices, discoveryReady]
+                properties:
+                  devices: {type: array, items: {$ref: '#/components/schemas/Device'}}
+                  discoveryReady: {type: boolean}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    post:
+      operationId: registerDevice
+      summary: 登记稳定设备及第一条链路，初始维护且尚未核验
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [displayName, kind, endpoint]
+              properties:
+                displayName: {type: string, description: 去掉首尾空白后 1 至 120 个字符}
+                kind: {type: string, enum: [usb, wifi]}
+                endpoint: {type: string, description: USB serial 或含端口的 Wi-Fi 地址；不是稳定设备身份}
+      responses:
+        '201': {$ref: '#/components/responses/Registered'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getDevice
+      summary: 按与设备列表相同的信息边界查询单台设备
+      security: [{adminSession: []}, {callerOrTask: []}]
+      responses:
+        '200':
+          description: 当前设备视图
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device, discoveryReady]
+                properties:
+                  device: {$ref: '#/components/schemas/Device'}
+                  discoveryReady: {type: boolean}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: updateDevice
+      summary: 按预期配置版本修改信息或启停分配
+      description: 名称/标签与分配启停分别提交；后者含撤销及外部回收，不能伪装成与标签修改原子完成。版本包含本次启动标识，重启或冲突后必须刷新。回收失败也可能已持久化维护意图，失败后须读取最新视图。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [version]
+              properties:
+                version: {type: string, minLength: 1}
+                displayName: {type: string}
+                tags: {type: array, items: {type: string}}
+                maintenanceRequested: {type: boolean}
+              oneOf:
+                - required: [maintenanceRequested]
+                  properties: {displayName: false, tags: false}
+                - properties: {maintenanceRequested: false}
+                  anyOf: [{required: [displayName]}, {required: [tags]}]
+      responses:
+        '204': {description: 修改完成；读取设备视图确认当前分配状态}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/preview:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getDevicePreview
+      summary: 管理员读取当前已核验链路的共享低分辨率预览
+      description: |
+        仅管理员 Cookie 可访问；调用凭证或任务 bearer 本身不授予截图权限。
+        读取既有已核验链路，不自动连接、登记或创建租约。
+        同一完整链路身份的并发请求共用采集，采集开始间隔至少五秒；
+        失败、离线或链路变化时不返回旧画面。空闲时不主动截图。
+        JPEG 最长边不超过 480 像素，保留比例；不是原始 PNG 截图接口。
+        Capture 时间属于实际采集，不是本次 HTTP 响应时间。
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 已重新核验会话及链路身份的 JPEG，Cache-Control 为 private, no-store
+          headers:
+            X-DroidHarbor-Captured-At:
+              schema: {type: string, format: date-time}
+              description: 实际采集完成时间，缓存命中时保持不变
+            X-DroidHarbor-Device-ID:
+              schema: {type: string}
+              description: 所属设备
+            X-DroidHarbor-Link-Generation:
+              schema: {type: string, pattern: '^[0-9]+$'}
+              description: 本次进程内选定链路代次
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/links:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: addDeviceLink
+      summary: 为已有设备登记另一条待核验链路
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind, endpoint]
+              properties:
+                kind: {type: string, enum: [usb, wifi]}
+                endpoint: {type: string}
+      responses:
+        '201': {$ref: '#/components/responses/Registered'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/links/{linkId}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - $ref: '#/components/parameters/LinkID'
+    patch:
+      operationId: patchDeviceLink
+      summary: 更新 Wi-Fi 连接地址，保留设备和链路身份
+      description: 须提供当前设备 version。更新后立即撤销旧链路代次，保留硬件身份记录，新地址重新 connect/verify 后才可使用；不切换或释放现有租约。旧地址不再被该链路占用。不能修改 USB serial 或链路种类。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [version, endpoint]
+              properties:
+                version: {type: string}
+                endpoint: {type: string}
+      responses:
+        '204': {description: 地址已更新，新的链路归属仍待核验}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/links/{linkId}/pair:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - $ref: '#/components/parameters/LinkID'
+    post:
+      operationId: pairDeviceLink
+      summary: 显式通过服务端 ADB 配对，不保存配对码
+      description: pairingEndpoint 的端口与已登记的连接端口独立。配对成功不等于链路已连接或设备身份已核验。不能确认结果时返回 ADB_RESULT_UNKNOWN，不自动重试。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [pairingEndpoint, pairingCode]
+              properties:
+                pairingEndpoint: {type: string}
+                pairingCode: {type: string, writeOnly: true}
+      responses:
+        '204': {description: ADB 配对成功且结果已记录}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/links/{linkId}/connect:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - $ref: '#/components/parameters/LinkID'
+    post:
+      operationId: connectDeviceLink
+      summary: 显式连接已登记 Wi-Fi endpoint，不自动核准新设备身份
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '204': {description: 已确认 ADB 连接结果并保存当前地址映射；当前在线状态仍以发现快照为准}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/links/{linkId}/verify:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - $ref: '#/components/parameters/LinkID'
+    post:
+      operationId: verifyDeviceLink
+      summary: 从指定 transport 读取并交叉核对设备身份
+      description: 同设备双链路须硬件 serial 与制造商/型号/product 相符；其他 deviceId 已登记同 serial 则冲突，不能形成第二个可分配名额。核验不会自行解除维护。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '200':
+          description: 身份核验已持久化；仅管理员可见
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [serial, manufacturer, model, product, android, sdk]
+                properties:
+                  serial: {type: string}
+                  manufacturer: {type: string}
+                  model: {type: string}
+                  product: {type: string}
+                  android: {type: string}
+                  sdk: {type: string}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/recover:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: retryDeviceRecovery
+      summary: 管理员显式重新核验平台资源清理及健康状态
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '204': {description: 本次核验完成；离线设备不保证 available，读取设备视图确认}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/leases:
+    post:
+      operationId: claimLease
+      summary: 调用凭证原子绑定任务秘密并认领全部标签匹配的设备
+      description: 不要求浏览器 Origin。每次初始租约 900 秒，无 ttl 参数。taskId 按调用方隔离；秘密首次绑定后不能替换或由调用凭证找回。相同幂等键与参数返回原租约，包括已结束的结果；不得自动换机重试。
+      security: [{callerOrTask: []}]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [taskId, taskSecret]
+              properties:
+                taskId: {type: string, minLength: 1}
+                taskSecret: {type: string, pattern: '^[0-9a-fA-F]{64}$', writeOnly: true}
+                requiredTags: {type: array, items: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/Lease'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/leases/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getLease
+      summary: 对应任务或管理员查询租约；共享调用凭证和其他任务无权访问
+      security: [{callerOrTask: []}, {adminSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Lease'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: releaseLease
+      summary: 对应任务或管理员幂等结束租约
+      description: 任务 bearer 不要求 Origin/CSRF；使用管理员 Cookie 时两者必需。先取消运行授权，持久化失败也不恢复权限。回收中返回 202，使用本资源 GET 查询，不假报设备已回池。
+      security: [{callerOrTask: []}, {adminSession: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Lease'}
+        '202': {$ref: '#/components/responses/Lease'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/leases/{id}/renew:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: renewLease
+      summary: 仅对应任务显式续租，更新为服务端处理时间加 900 秒
+      description: 不自动续租、不叠加剩余时间、不接受 ttl；已结束、过期或撤销后拒绝。无正文或空 JSON 对象均可，未知字段拒绝；不要求浏览器 Origin。
+      security: [{callerOrTask: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Lease'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/leases/{id}/connections:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: createAdbConnection
+      summary: 对应任务登记一次性原生 ADB 连接
+      description: 必须使用本任务凭证。同一幂等键和公钥返回原记录，不复活已关闭连接；不同请求不能复用键。创建不续租，实际能力取目标设备与网关实现的交集。
+      security: [{callerOrTask: []}]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, pattern: '^[0-9a-fA-F]{64}$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [protocolMajor, adbPublicKey]
+              properties:
+                protocolMajor: {type: integer, const: 1}
+                adbPublicKey: {type: string, description: 官方 adb keygen 生成的 .pub 内容；私钥不得上传}
+      responses:
+        '200': {$ref: '#/components/responses/Connection'}
+        '201': {$ref: '#/components/responses/Connection'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/leases/{id}/connections/{connectionId}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - $ref: '#/components/parameters/ConnectionID'
+    get:
+      operationId: getAdbConnection
+      summary: 对应任务查询自己的连接，包括结束后的清理状态
+      security: [{callerOrTask: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Connection'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: closeAdbConnection
+      summary: 对应任务幂等关闭连接，不释放租约
+      description: 关闭真实通道并等待子流退出后才返回 closed；失败不宣称清理完成。不会清理手机应用和业务文件。
+      security: [{callerOrTask: []}]
+      responses:
+        '200': {$ref: '#/components/responses/Connection'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/leases/{id}/connections/{connectionId}/tunnel:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+      - $ref: '#/components/parameters/ConnectionID'
+    get:
+      operationId: openAdbTunnel
+      summary: 用本任务凭证升级一次性 WSS 二进制通道
+      description: |
+        要求 WebSocket 子协议 droidharbor.adb.v1。Authorization 使用任务 bearer，
+        URL 不接受查询参数；原生 CLI 不发送 Origin，浏览器 Origin 必须与平台配置完全一致。
+        通道承载原生 ADB 字节流，WebSocket 帧边界不是 ADB 包边界。
+        WSS 建立后仍要求登记公钥的原生 ADB AUTH；同一连接记录不得重复建流。
+        租约结束、链路变化或平台重启均使旧通道失效，不自动重连或重放。
+      security: [{callerOrTask: []}]
+      responses:
+        '101':
+          description: WebSocket 升级成功；传输开始，不代表原生 ADB AUTH 已通过
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '426': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/events:
+    get:
+      operationId: streamStateEvents
+      summary: 管理员或任务订阅授权范围内的状态失效通知
+      description: |
+        管理员看到管理范围变更；任务只收到自己的租约和分配设备通知，
+        共享 caller 凭证无权订阅。显式 Authorization 无效时不回退到 Cookie。
+        每次连接首先发送 resync，必须随后读取权威快照。
+        Last-Event-ID 不提供持久化重放保证；重新连接、bootId 改变或版本缺口均重新读取快照。
+        SSE event 名为 change，data 是 JSON，且仅有 eventId、bootId、
+        entityVersion、entityType、entityId。entityType 为 resync/device/lease/caller；
+        resync 的 entityId 为 snapshot。entityVersion 是 boot 内单调递增的通知序号，
+        不承诺不同授权范围内连续，不是设备配置 PATCH 所用 version。
+        taskId、路由设备字段、凭证和 endpoint 不进入公共通知。
+        每次事件及空闲时最多五秒重新核验授权；授权失效后关闭流。
+        订阅上限 256、每订阅队列 32；慢接收端关闭并要求重连读取快照，不静默丢失后继续。
+      security: [{adminSession: []}, {callerOrTask: []}]
+      responses:
+        '200':
+          description: text/event-stream；不缓存。心跳是注释，不包含状态或秘密
+          content:
+            text/event-stream:
+              schema: {type: string}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: createMediaSession
+      summary: 创建独立人工观看或控制会话，共享设备采集
+      description: |
+        仅管理员 Cookie；不接受 bearer。请求不创建、续期或暂停 AI 租约。
+        offer 必须包含 recvonly H.264 视频和可靠有序的 droidharbor.control.v1 DataChannel，不含音频。
+        answer 包含完整本地 ICE 候选；只使用显式配置的 UDP endpoint，无 STUN/TURN 或协议降级。
+        201 表示会话与信令已建立，不代表浏览器已解码呈现画面。
+        DataChannel 逻辑消息为四字节大端长度加 UTF-8 JSON；单条逻辑消息不超过 2 MiB，
+        每个二进制 DataChannel chunk 不超过 16 KiB，不接受文本消息；可跨 chunk 拆分长度头和正文。
+        客户端发送 ControlEnvelope；sequence 在同一会话内严格递增。
+        服务端在需要确认画面时发送 frame-boundary，含 captureEpoch 和
+        payload.timestamp/width/height/keyFrame；不是逐帧通知。
+        客户端必须在实际呈现新代次画面后，以 requestVideoFrameCallback 的 rtpTimestamp
+        发送 frame-ready，不能把收到信令、视频 track 或 frame-boundary 当成已经呈现。
+        确认可以是该代次关键帧之后实际发送的帧，不要求浏览器恰好报告 IDR 本身。
+        旧代次输入拒绝；帧确认不包含设备操作，确认失败不能重放此前的设备输入。
+        dispatched 只表示已交给设备通道；unknown/RESULT_UNKNOWN 不是确定失败，禁止自动重试。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mode, offer]
+              properties:
+                mode: {type: string, enum: [readonly, control]}
+                offer: {type: string, maxLength: 65536}
+      responses:
+        '201':
+          description: 本次人工会话，不在 URL 中携带凭证
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MediaSession'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/candidates:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: addMediaCandidate
+      summary: 为本人会话提交远端 ICE candidate
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [candidate]
+              properties:
+                candidate: {type: string}
+                sdpMid: {type: [string, 'null']}
+                sdpMLineIndex: {type: [integer, 'null'], minimum: 0, maximum: 65535}
+                usernameFragment: {type: [string, 'null']}
+      responses:
+        '204': {description: candidate 已提交，不代表媒体路径可用}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    delete:
+      operationId: endMediaSession
+      summary: 关闭本人会话并释放该会话持有的输入
+      description: 最后一个观看者结束时回收共享采集；不释放其他人的输入，不撤销 AI 租约。回收无法确认时明确失败。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '204': {description: 人工会话已关闭并完成所需回收}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/{id}/video-settings:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getVideoSettings
+      summary: 读取共享采集的请求配置、实际生效配置和状态
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: effective 为空表示当前没有已确认的生效画面
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VideoSnapshot'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: patchVideoSettings
+      summary: 按预期 revision 修改共享采集参数
+      description: |
+        提交 sessionId 时核验所属控制会话，只读会话拒绝；不提交时是管理员配置操作。
+        readonly 是人工会话模式，不是管理员账号的全局降权。
+        仅修改提交字段；影响该设备全部观看者，无观看者时保存为下次采集配置。
+        参数已持久化但重建采集失败可能返回 503；应读取快照，不重放输入或自动降档。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [revision]
+              properties:
+                sessionId: {type: string}
+                revision: {type: integer, minimum: 1}
+                maxSize: {type: integer, minimum: 1, maximum: 65535}
+                maxFps: {type: integer, minimum: 1, maximum: 2147483647}
+                bitRate: {type: integer, minimum: 1, maximum: 2147483647}
+      responses:
+        '200':
+          description: 最新请求配置与生效状态；不承诺手机支持任意合法整数
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/VideoSnapshot'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/screenshot:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getOriginalScreenshot
+      summary: 下载本人有效观看会话的原始设备 PNG
+      description: 允许只读。按需原生截图，不缩放、不重编码、不复用预览或陈旧视频帧；读取期间继续核验原会话及固定链路，响应中断不能当作完整图片。
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 原始 PNG 附件，private/no-store，含 Content-Length 和实际尺寸响应头
+          headers:
+            X-DroidHarbor-Image-Width:
+              schema: {type: integer, minimum: 1}
+            X-DroidHarbor-Image-Height:
+              schema: {type: integer, minimum: 1}
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/transfers:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: createTransfer
+      summary: 为本人控制会话创建文件上传或 APK 安装任务
+      description: 只读拒绝。普通文件默认目标为 /sdcard/Download/，同名覆盖须明确设置 overwrite；APK 按 scrcpy 默认使用 pm install -r，允许替换同包应用，忽略 overwrite 且不接受 targetPath。容量由 capabilities 公布，不承诺无限队列。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [fileName, purpose, size]
+              properties:
+                fileName: {type: string}
+                purpose: {type: string, enum: [file, apk]}
+                size: {type: integer, minimum: 0, maximum: 1073741824}
+                targetPath: {type: string}
+                overwrite: {type: boolean, default: false, description: 仅控制普通文件覆盖；APK 忽略该字段}
+      responses:
+        '201':
+          description: 创建 staging 任务，不代表已接收或写入设备
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Transfer'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/transfers/{id}/content:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    put:
+      operationId: uploadTransfer
+      summary: 流式上传完整原始文件字节，然后启动设备侧操作
+      description: |
+        Content-Length 必须与创建时的 size 一致；不接受 multipart、压缩 Content-Encoding 或断点续传。
+        接收端每次读取刷新 60 秒闲置 deadline，不设置最低吞吐量。
+        202 只表示本地 staging 完成，应 GET 查询最终状态；不能把它当作 APK 安装成功。
+        失去原控制会话或固定链路即取消，不重绑其他设备或重放副作用。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+        - name: Content-Length
+          in: header
+          required: true
+          schema: {type: integer, minimum: 0, maximum: 1073741824}
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        '202':
+          description: 字节已接收，设备任务的当前快照
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Transfer'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '411': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '500': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/transfers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getTransfer
+      summary: 查询本人控制会话的传输进度与真实结果
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 上传/设备字节进度及最终结果，unknown 禁止被当作可安全重试
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Transfer'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: cancelTransfer
+      summary: 取消后续传输并回收平台 staging 文件
+      description: 不保证撤回已写入的设备文件或已开始的安装，不删除任意手机源文件、不卸载应用；结果不明时保留 unknown。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      responses:
+        '204': {description: 取消与本地回收已处理，最终设备结果仍须读取快照}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    adminSession:
+      type: apiKey
+      in: cookie
+      name: __Host-droidharbor
+    callerOrTask:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: {type: string}
+    LinkID:
+      name: linkId
+      in: path
+      required: true
+      schema: {type: string}
+    ConnectionID:
+      name: connectionId
+      in: path
+      required: true
+      schema: {type: string}
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      schema: {type: string, format: uri}
+      description: 必须与服务配置的 HTTPS origin 完全相同。
+    CSRFToken:
+      name: X-CSRF-Token
+      in: header
+      required: true
+      schema: {type: string}
+  responses:
+    Registered:
+      description: 登记成功，不表示手机已授权、身份核验成功或可分配
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [deviceId, linkId]
+            properties:
+              deviceId: {type: string}
+              linkId: {type: string}
+    Lease:
+      description: 本任务授权范围内的租约及当前设备分配状态
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Lease'
+    Connection:
+      description: 原生 ADB 连接记录；pending 等待建流，closing/failed 均不表示清理完成
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Connection'
+    Error:
+      description: 请求失败，响应头 X-Request-ID 与正文一致；没有成功回退。
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, message, requestId]
+            properties:
+              code: {type: string}
+              message: {type: string}
+              requestId: {type: string}
+  schemas:
+    MediaSession:
+      type: object
+      required: [sessionId, deviceId, mode, answer, controlProtocol]
+      properties:
+        sessionId: {type: string}
+        deviceId: {type: string}
+        mode: {type: string, enum: [readonly, control]}
+        answer: {type: string}
+        controlProtocol: {type: string, const: droidharbor.control.v1}
+    ControlEnvelope:
+      type: object
+      additionalProperties: false
+      required: [sessionId, captureEpoch, sequence, type, payload]
+      description: 通过可靠有序 DataChannel 发送，不是 HTTP requestBody。readonly 仅允许连接与画面确认，不授予设备写入或剪贴板操作。
+      properties:
+        sessionId: {type: string}
+        captureEpoch: {type: integer, minimum: 0}
+        sequence: {type: integer, minimum: 1}
+        type:
+          type: string
+          enum: [ping, frame-ready, request-frame, key, touch, scroll, mouseButton, text, clipboard.get, clipboard.set, clipboard.paste, displayPower, back, home, recent, notification, settings, collapse, rotate, resetVideo, release]
+        payload:
+          type: object
+          description: |
+            无参数操作发送 {}，不能省略或为 null。frame-ready 必须含 timestamp。
+            key 包含 keyCode/action，可含 repeat/metaState；按下为 0，释放为 1。
+            touch 包含 pointerId/action/x/y/width/height/pressure，scroll 包含
+            x/y/width/height/hScroll/vScroll，可含 buttons；坐标和尺寸属于已确认的当前画面。
+            mouseButton 包含 button/action；right 为返回或唤醒，middle 为 Home，
+            back 为第四键 Recent，forward 为第五键通知面板。
+            text、clipboard.set 和 clipboard.paste 包含 text；displayPower 必须包含布尔 on。
+            release 只释放当前会话持有的输入；不替其他会话释放。
+    VideoParameters:
+      type: object
+      required: [maxSize, maxFps, bitRate]
+      properties:
+        maxSize: {type: integer, minimum: 1}
+        maxFps: {type: integer, minimum: 1}
+        bitRate: {type: integer, minimum: 1}
+    VideoSnapshot:
+      type: object
+      required: [requested, effective, status, revision, captureEpoch]
+      properties:
+        requested: {$ref: '#/components/schemas/VideoParameters'}
+        effective:
+          type: [object, 'null']
+          required: [width, height, framesPerSecond, encodedBitsPerSecond, revision]
+          properties:
+            width: {type: integer, minimum: 1}
+            height: {type: integer, minimum: 1}
+            framesPerSecond: {type: number, minimum: 0}
+            encodedBitsPerSecond: {type: integer, minimum: 0}
+            revision: {type: integer, minimum: 1}
+        status: {type: string, enum: [idle, pending, starting, running, reconfiguring, stopping, failed]}
+        revision: {type: integer, minimum: 1}
+        captureEpoch: {type: integer, minimum: 0}
+        errorCode: {type: string}
+    Transfer:
+      type: object
+      required: [transferId, fileName, purpose, state, bytesReceived, bytesTransferred, size, overwrite, createdAt, updatedAt]
+      properties:
+        transferId: {type: string}
+        fileName: {type: string}
+        purpose: {type: string, enum: [file, apk]}
+        targetPath: {type: string}
+        state: {type: string, enum: [uploading, transferring, installing, succeeded, failed, cancelled, unknown]}
+        bytesReceived: {type: integer, minimum: 0}
+        bytesTransferred: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 0}
+        overwrite: {type: boolean}
+        exitCode: {type: integer, minimum: 0, maximum: 255}
+        stdout: {type: string, description: 有界原生结果，只对所属控制会话返回，不写普通日志}
+        stderr: {type: string}
+        result: {type: string}
+        errorCode: {type: string}
+        error: {type: string}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    Lease:
+      type: object
+      required: [leaseId, deviceId, generation, bootId, status, claimedAt, expiresAt, endedAt, allocationState]
+      properties:
+        leaseId: {type: string}
+        deviceId: {type: string}
+        generation: {type: integer, minimum: 1}
+        bootId: {type: string}
+        status: {type: string, enum: [active, ended]}
+        claimedAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+        endedAt: {type: [string, 'null'], format: date-time}
+        endReason: {type: string}
+        allocationState: {type: string, enum: [available, leased, reclaiming, quarantined, maintenance]}
+    Connection:
+      type: object
+      required: [connectionId, leaseId, deviceId, generation, bootId, protocolMajor, status, expiresAt, features, tunnelPath]
+      properties:
+        connectionId: {type: string}
+        leaseId: {type: string}
+        deviceId: {type: string}
+        generation: {type: integer, minimum: 1}
+        bootId: {type: string}
+        protocolMajor: {type: integer, const: 1}
+        status: {type: string, enum: [pending, active, closing, closed, failed]}
+        expiresAt: {type: string, format: date-time}
+        features: {type: array, items: {type: string}}
+        tunnelPath: {type: string, description: 同一平台的相对路径，不含凭证}
+    Device:
+      type: object
+      required: [deviceId, displayName, tags, connectionState, allocationState]
+      properties:
+        deviceId: {type: string}
+        displayName: {type: string}
+        tags: {type: array, items: {type: string}}
+        connectionState: {type: string, enum: [online, offline, unauthorized]}
+        allocationState: {type: string, enum: [available, leased, reclaiming, quarantined, maintenance]}
+        version: {type: string, description: 仅管理员可见的配置修改版本；不表示媒体或连接版本}
+        maintenanceRequested: {type: boolean, description: 仅管理员可见}
+        links:
+          type: array
+          description: 仅管理员可见
+          items:
+            type: object
+            required: [linkId, kind, endpoint, connectionState, identityVerified]
+            properties:
+              linkId: {type: string}
+              kind: {type: string, enum: [usb, wifi]}
+              endpoint: {type: string}
+              connectionState: {type: string, enum: [online, offline, unauthorized]}
+              identityVerified: {type: boolean, description: 已持久化的身份绑定；当前在线还需重新核验 transport}
+              lastError: {type: string}
+    Caller:
+      type: object
+      required: [id, name, createdAt, revokedAt]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        createdAt: {type: string, format: date-time}
+        revokedAt:
+          type: [string, 'null']
+          format: date-time

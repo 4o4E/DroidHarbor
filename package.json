@@ -1,0 +1,14 @@
+{
+  "name": "droidharbor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "DroidHarbor 设备池开发与 OpenSpec 工具入口",
+  "scripts": {
+    "spec": "openspec",
+    "web:dev": "npm --prefix web run dev --",
+    "web:build": "npm --prefix web run build"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.16.0"
+  }
+}

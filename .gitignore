@@ -1,0 +1,9 @@
+node_modules/
+.tools/
+.local/
+bin/
+web/dist/
+*.db
+*.db-shm
+*.db-wal
+.env.local
