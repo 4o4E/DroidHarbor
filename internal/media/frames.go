@@ -161,6 +161,9 @@ func (h *hub) failSource(source *capture.Stream, err error) {
 		members = append(members, s)
 	}
 	h.mu.Unlock()
+	if err != nil {
+		h.manager.deps.Logger.Error("media_source_failed", "deviceId", h.deviceID, "code", errorCode(err), "error", err.Error())
+	}
 	h.cancelAllClipboard()
 	h.manager.notifyDevice(h.deviceID)
 	for _, s := range members {
@@ -363,8 +366,15 @@ func validateH264Config(data []byte) error {
 		if len(nal) != 0 {
 			switch nal[0] & 31 {
 			case 7:
-				if len(nal) < 4 || nal[1] != 66 {
-					return problem(422, "UNSUPPORTED_H264_PROFILE", "设备未输出所请求的 H.264 baseline profile")
+				if len(nal) < 4 {
+					return problem(503, "INVALID_VIDEO_CONFIG", "H.264 SPS 不完整")
+				}
+				// Android encoders commonly emit Main/High even when a baseline
+				// profile is requested; browsers decode all three.
+				switch nal[1] {
+				case 66, 77, 100:
+				default:
+					return problem(422, "UNSUPPORTED_H264_PROFILE", "设备输出的 H.264 profile 不受支持")
 				}
 				sps = true
 			case 8:

@@ -157,7 +157,14 @@ func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, boot
 		}
 		result, err := m.adb.RunShell(deadline, link.TransportID, probeCommand, 32, func() error { return m.authorizeCleanup(deadline, link, id, bootID, loc) })
 		if err != nil {
-			return errors.New("capture process ownership probe failed")
+			// The process may be exiting while the probe runs; retry read-only
+			// ownership checks within the bounded cleanup window.
+			select {
+			case <-deadline.Done():
+				return errors.New("capture process ownership probe failed")
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
 		}
 		if result.ExitCode != 0 {
 			return errors.New("capture process ownership probe returned an invalid status")
@@ -204,7 +211,10 @@ func processProbeCommand(loc locator) string {
 
 func helperProbeCommand(jar string) string {
 	q := shellQuote("CLASSPATH=" + jar)
-	return `uid=$(id -u) || { printf ERROR; exit; }; for env in /proc/[0-9]*/environ; do [ -e "$env" ] || continue; proc=${env%/environ}; status=$(awk '$1 == "Uid:" { print $2; exit }' "$proc/status") || { [ -e "$proc" ] && { printf ERROR; exit; }; continue; }; [ -e "$proc" ] || continue; [ -n "$status" ] || { printf ERROR; exit; }; [ "$status" = "$uid" ] || continue; [ -r "$env" ] || { [ -e "$proc" ] && { printf ERROR; exit; }; continue; }; contents=$(tr '\000' '\n' < "$env") || { [ -e "$proc" ] && { printf ERROR; exit; }; continue; }; printf '%s\n' "$contents" | grep -Fqx ` + q + ` && { printf FOUND; exit; }; done; printf ABSENT`
+	// Android's adbd runs as the shell uid but its environ is root-owned and
+	// unreadable. Only app_process/scrcpy-server can carry the cleanup helper,
+	// so inspect the readable cmdline before requiring environ access.
+	return `uid=$(id -u) || { printf ERROR; exit; }; for env in /proc/[0-9]*/environ; do [ -e "$env" ] || continue; proc=${env%/environ}; first=; IFS= read -r first < "$proc/cmdline" 2>/dev/null; case "$first" in app_process*|scrcpy-server*) ;; *) continue;; esac; status=$(awk '$1 == "Uid:" { print $2; exit }' "$proc/status") || { [ -e "$proc" ] && { printf ERROR; exit; }; continue; }; [ -e "$proc" ] || continue; [ -n "$status" ] || { printf ERROR; exit; }; [ "$status" = "$uid" ] || continue; [ -r "$env" ] || { [ -e "$proc" ] && { printf ERROR; exit; }; continue; }; contents=$(tr '\000' '\n' < "$env") || { [ -e "$proc" ] && { printf ERROR; exit; }; continue; }; printf '%s\n' "$contents" | grep -Fqx ` + q + ` && { printf FOUND; exit; }; done; printf ABSENT`
 }
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }

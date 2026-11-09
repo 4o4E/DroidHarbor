@@ -22,13 +22,16 @@ type readyIdentity struct {
 
 var errSocketNotListening = errors.New("scrcpy abstract socket is not listening")
 
-func startupCommand(jar, ownerNonce, gateNonce string, scid int32, settings Settings) (string, error) {
+func startupCommand(jar, gateNonce string, scid int32, settings Settings) (string, error) {
 	args, err := serverOptions(scid, settings)
 	if err != nil {
 		return "", err
 	}
-	quoted := make([]string, 0, len(args)+5)
-	quoted = append(quoted, "app_process", "--nice-name=droidharbor-"+ownerNonce, "/system/bin", "com.genymobile.scrcpy.Server", "5.0.1")
+	// Android's app_process rejects --nice-name on tested Android 13/16
+	// devices and exits before the server runs. Ownership verification uses
+	// the JAR environment plus PID/start ticks instead of a process name.
+	quoted := make([]string, 0, len(args)+4)
+	quoted = append(quoted, "app_process", "/system/bin", "com.genymobile.scrcpy.Server", "5.0.1")
 	quoted = append(quoted, args...)
 	for i := range quoted {
 		quoted[i] = "'" + strings.ReplaceAll(quoted[i], "'", "'\\''") + "'"

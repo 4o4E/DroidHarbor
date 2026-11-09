@@ -7,3 +7,4 @@ web/dist/
 *.db-shm
 *.db-wal
 .env.local
+.workspace/

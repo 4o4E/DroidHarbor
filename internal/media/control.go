@@ -91,14 +91,19 @@ func rtcCallbacks(s *session) rtc.Callbacks {
 }
 
 func (s *session) onPeerReady() {
+	requested := false
 	s.mu.Lock()
 	if !s.peerReadyClosed && s.ctx.Err() == nil {
 		s.peerReadyClosed = true
 		s.awaitingKey = true
 		s.waitingSince = time.Now()
 		close(s.peerReady)
+		requested = true
 	}
 	s.mu.Unlock()
+	if requested {
+		go s.resetDeviceVideo()
+	}
 }
 
 func (s *session) enqueueControl(data []byte) {
@@ -427,11 +432,32 @@ func (s *session) requestKeyFrame() {
 				delete(s.frameGenerations, frame)
 			default:
 				s.mu.Unlock()
+				go s.resetDeviceVideo()
 				return
 			}
 		}
 	}
 	s.mu.Unlock()
+}
+
+// resetDeviceVideo forces the scrcpy encoder to emit a fresh key frame. The
+// server's default I-frame interval is ten seconds, longer than the viewer
+// key-frame timeout, so a new or recovering viewer must request one.
+func (s *session) resetDeviceVideo() {
+	h := s.hub
+	h.mu.Lock()
+	source := h.source
+	h.mu.Unlock()
+	if source == nil || s.ctx.Err() != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, controlTimeout)
+	defer cancel()
+	// RESET_VIDEO restarts capture for all viewers; it is not a device write,
+	// so read-only viewers must be able to request a fresh key frame too.
+	if err := source.Send(ctx, scrcpy.ControlMessage{Type: scrcpy.ControlResetVideo}, func() error { return s.check(ctx, false) }); err != nil && s.ctx.Err() == nil {
+		s.manager.deps.Logger.Warn("media_keyframe_request_failed", "sessionId", s.id, "deviceId", h.deviceID, "error", err.Error())
+	}
 }
 
 func (s *session) frameCurrent(frame *videoFrame, generation uint64) bool {

@@ -238,6 +238,9 @@ func (m *Manager) Close(ctx context.Context) error {
 func (s *session) beginEnd(reason error) {
 	s.endOnce.Do(func() {
 		s.cancel()
+		if reason != nil {
+			s.manager.deps.Logger.Info("media_session_ended", "sessionId", s.id, "deviceId", s.hub.deviceID, "error", reason.Error())
+		}
 		// At most one finisher per reserved session. Its capacity slot is retained
 		// until cleanup completes; peer callbacks never wait on device cleanup.
 		go s.finish(reason)
@@ -304,6 +307,7 @@ func (s *session) finish(reason error) {
 	code := errorCode(reason)
 	status := "succeeded"
 	if cleanupErr != nil {
+		s.manager.deps.Logger.Warn("media_session_cleanup_failed", "sessionId", s.id, "deviceId", h.deviceID, "error", cleanupErr.Error())
 		status = "failed"
 		code = "SESSION_CLEANUP_FAILED"
 	}

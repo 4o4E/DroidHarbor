@@ -294,7 +294,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	if err != nil {
 		return nil, err
 	}
-	cmd, err := startupCommand(jar, nonce, gateNonce, scid, settings)
+	cmd, err := startupCommand(jar, gateNonce, scid, settings)
 	if err != nil {
 		return nil, err
 	}
