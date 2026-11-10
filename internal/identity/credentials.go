@@ -1,4 +1,4 @@
-// Package identity 使用高熵随机凭证；磁盘和数据库只保存服务端摘要。
+// Package identity 使用高熵随机凭证；凭证文件和数据库保存摘要，首次管理员 token 由启动日志交付。
 package identity
 
 import (

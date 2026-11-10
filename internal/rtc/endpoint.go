@@ -28,7 +28,7 @@ var h264Feedback = []webrtc.RTCPFeedback{
 
 type Config struct {
 	ListenAddress string
-	AdvertisedIP  string
+	AdvertisedIP  string // Optional candidate-address override; empty gathers local IPv4 addresses.
 }
 
 type Callbacks struct {
@@ -53,15 +53,18 @@ func New(config Config) (*Endpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	advertised, err := parseAdvertisedIP(config.AdvertisedIP)
-	if err != nil {
-		return nil, err
-	}
-	if advertised.IsLoopback() && !listenIP.IsLoopback() && !listenIP.IsUnspecified() {
-		return nil, errors.New("a loopback advertised IP requires a loopback or wildcard listener")
-	}
-	if listenIP.IsLoopback() && !advertised.IsLoopback() {
-		return nil, errors.New("a loopback listener requires a loopback advertised IP")
+	var advertised net.IP
+	if config.AdvertisedIP != "" {
+		advertised, err = parseAdvertisedIP(config.AdvertisedIP)
+		if err != nil {
+			return nil, err
+		}
+		if advertised.IsLoopback() && !listenIP.IsLoopback() && !listenIP.IsUnspecified() {
+			return nil, errors.New("a loopback advertised IP requires a loopback or wildcard listener")
+		}
+		if listenIP.IsLoopback() && !advertised.IsLoopback() {
+			return nil, errors.New("a loopback listener requires a loopback advertised IP")
+		}
 	}
 
 	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: listenIP, Port: port})
@@ -94,17 +97,19 @@ func New(config Config) (*Endpoint, error) {
 	settings.SetICEUDPMux(mux)
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	settings.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-	if err = settings.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
-		External:        []string{advertised.String()},
-		AsCandidateType: webrtc.ICECandidateTypeHost,
-		Mode:            webrtc.ICEAddressRewriteReplace,
-		Networks:        []webrtc.NetworkType{webrtc.NetworkTypeUDP4},
-	}); err != nil {
-		_ = mux.Close()
-		return nil, fmt.Errorf("configure advertised ICE address: %w", err)
+	if advertised != nil {
+		if err = settings.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
+			External:        []string{advertised.String()},
+			AsCandidateType: webrtc.ICECandidateTypeHost,
+			Mode:            webrtc.ICEAddressRewriteReplace,
+			Networks:        []webrtc.NetworkType{webrtc.NetworkTypeUDP4},
+		}); err != nil {
+			_ = mux.Close()
+			return nil, fmt.Errorf("configure advertised ICE address: %w", err)
+		}
 	}
-	settings.SetIncludeLoopbackCandidate(advertised.IsLoopback())
-	if advertised.IsLoopback() {
+	settings.SetIncludeLoopbackCandidate(advertised == nil || advertised.IsLoopback())
+	if listenIP.IsLoopback() || advertised.IsLoopback() {
 		settings.SetRemoteIPFilter(func(ip net.IP) bool { return ip.To4() != nil && ip.IsLoopback() })
 	}
 	api := webrtc.NewAPI(
@@ -406,13 +411,17 @@ func constrainLocalCandidates(answer string, advertised net.IP) (string, error) 
 			continue
 		}
 		fields := strings.Fields(strings.TrimPrefix(line, "a="))
-		if len(fields) < 8 || !strings.EqualFold(fields[2], "udp") || fields[6] != "typ" || fields[7] != "host" || !advertised.Equal(net.ParseIP(fields[4])) {
+		if len(fields) < 8 || !strings.EqualFold(fields[2], "udp") || fields[6] != "typ" || fields[7] != "host" {
+			return "", errors.New("Pion gathered a candidate outside the configured UDP host endpoint")
+		}
+		ip := net.ParseIP(fields[4])
+		if ip == nil || ip.To4() == nil || strings.Contains(fields[4], ":") || ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) || (advertised != nil && !advertised.Equal(ip)) {
 			return "", errors.New("Pion gathered a candidate outside the configured UDP host endpoint")
 		}
 		found = true
 	}
 	if !found {
-		return "", errors.New("Pion gathered no UDP host candidate for the configured advertised IP")
+		return "", errors.New("Pion gathered no usable UDP4 host candidate")
 	}
 	return answer, nil
 }

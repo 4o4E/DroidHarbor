@@ -41,9 +41,8 @@ func TestEnvPathsAreLocalToConfigAndEnvironmentOverridesFile(t *testing.T) {
 	}
 }
 
-func TestEnvErrorsNameTheRequiredSettingWithoutExposingValues(t *testing.T) {
+func TestEnvErrorsNameSettingWithoutExposingValues(t *testing.T) {
 	for _, test := range []struct{ name, data, want string }{
-		{"required", "DROIDHARBOR_RTC_ADVERTISED_IP=\n", "DROIDHARBOR_RTC_ADVERTISED_IP"},
 		{"ipv4", "DROIDHARBOR_RTC_ADVERTISED_IP=::1\n", "IPv4"},
 		{"duration", "DROIDHARBOR_RTC_ADVERTISED_IP=127.0.0.1\nDROIDHARBOR_ADB_TIMEOUT=secret-value-marker\n", "DROIDHARBOR_ADB_TIMEOUT"},
 		{"syntax", "DROIDHARBOR_BROKEN='secret-value-marker", "格式无效"},

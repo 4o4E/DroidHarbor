@@ -90,6 +90,30 @@ func TestLocalAnswerRejectsUnexpectedNetworkCandidates(t *testing.T) {
 	}
 }
 
+func TestAutomaticAnswerKeepsIPv4HostCandidatesOnly(t *testing.T) {
+	answer := "v=0\r\n" +
+		"a=candidate:1 1 udp 2130706431 127.0.0.1 5000 typ host\r\n" +
+		"a=candidate:2 1 udp 2130706430 192.0.2.10 5000 typ host\r\n"
+	if got, err := constrainLocalCandidates(answer, nil); err != nil || got != answer {
+		t.Fatalf("automatic address selection lost a local or LAN candidate: %q, %v", got, err)
+	}
+	for _, candidate := range []string{
+		"a=candidate:3 1 tcp 2130706429 192.0.2.10 5000 typ host\r\n",
+		"a=candidate:3 1 udp 2130706429 ::1 5000 typ host\r\n",
+		"a=candidate:3 1 udp 2130706429 0.0.0.0 5000 typ host\r\n",
+		"a=candidate:3 1 udp 2130706429 224.0.0.1 5000 typ host\r\n",
+		"a=candidate:3 1 udp 2130706429 255.255.255.255 5000 typ host\r\n",
+		"a=candidate:3 1 udp 2130706429 192.0.2.10 5000 typ srflx\r\n",
+	} {
+		if _, err := constrainLocalCandidates(answer+candidate, nil); err == nil {
+			t.Errorf("accepted a candidate outside the automatic IPv4 UDP host policy: %q", candidate)
+		}
+	}
+	if _, err := constrainLocalCandidates("v=0\r\n", nil); err == nil {
+		t.Fatal("automatic address selection accepted an answer without a media endpoint")
+	}
+}
+
 func TestFramingHandlesSplitHeadersAndChunksWithoutAliasing(t *testing.T) {
 	peer := testPeer()
 	payload := make([]byte, 20_001)

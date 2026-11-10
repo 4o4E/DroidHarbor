@@ -131,8 +131,8 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if options.sessionTTL <= 0 {
 		return errors.New("DROIDHARBOR_ADMIN_SESSION_TTL 必须是正数时长")
 	}
-	if options.adbAddress == "" || options.rtcListen == "" || options.rtcAdvertisedIP == "" || options.transferTempDir == "" {
-		return errors.New("请在 .env 配置 ADB、WebRTC IPv4 地址和文件暂存目录")
+	if options.adbAddress == "" || options.rtcListen == "" || options.transferTempDir == "" {
+		return errors.New("请在 .env 配置 ADB、WebRTC UDP 监听地址和文件暂存目录")
 	}
 	if err = os.MkdirAll(options.transferTempDir, 0700); err != nil {
 		return fmt.Errorf("创建文件暂存目录失败：%w", err)
@@ -158,16 +158,18 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		if initErr != nil {
 			return fmt.Errorf("首次创建管理员凭证失败：%w", initErr)
 		}
-		// First-start bootstrap uses stdout only; secrets never reach the runtime log.
-		if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"event": "administrator_initialized", "adminToken": token, "credentialFile": options.adminFile}); err != nil {
-			return fmt.Errorf("输出首次管理员令牌失败：%w", err)
+		// First-start credentials must remain visible even when INFO runtime logs are filtered.
+		record := slog.NewRecord(time.Now(), slog.LevelInfo, "admin_credentials_initialized", 0)
+		record.AddAttrs(slog.String("adminToken", token), slog.String("credentialFile", options.adminFile))
+		if err := logger.Handler().Handle(ctx, record); err != nil {
+			return fmt.Errorf("输出首次管理员初始化日志失败：%w", err)
 		}
-		logger.Info("admin_credentials_initialized")
 		credential, err = identity.Load(options.adminFile)
 	}
 	if err != nil {
 		return err
 	}
+	logger.Info("admin_credentials_ready", "credentialFile", options.adminFile)
 	stage = "configure_adb_client"
 	adbClient, err := adb.NewClient(options.adbAddress, options.adbTimeout)
 	if err != nil {
@@ -183,6 +185,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if err != nil {
 		return errors.Join(err, processLock.Close())
 	}
+	logger.Info("database_ready", "database", options.database, "schemaVersion", storage.SchemaVersion)
 	transferConfig := transfers.Config{
 		TempDir:          options.transferTempDir,
 		MaxUploadBytes:   options.transferMaxUpload,

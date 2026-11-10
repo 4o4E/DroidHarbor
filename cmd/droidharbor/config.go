@@ -85,11 +85,10 @@ func loadServeOptions(path string) (serveOptions, error) {
 	options.logLevel = get("DROIDHARBOR_LOG_LEVEL", "info")
 	options.web = localPath("DROIDHARBOR_WEB_DIR", "")
 	options.scrcpyServer = localPath("DROIDHARBOR_SCRCPY_SERVER", "")
-	if options.rtcAdvertisedIP == "" {
-		return options, errors.New("必填项 DROIDHARBOR_RTC_ADVERTISED_IP 为空；请在 .env 填写浏览器可达的本机 IPv4，本机访问可填 127.0.0.1")
-	}
-	if ip := net.ParseIP(options.rtcAdvertisedIP); ip == nil || ip.To4() == nil {
-		return options, errors.New("DROIDHARBOR_RTC_ADVERTISED_IP 必须是 IPv4 地址")
+	if options.rtcAdvertisedIP != "" {
+		if ip := net.ParseIP(options.rtcAdvertisedIP); ip == nil || ip.To4() == nil {
+			return options, errors.New("DROIDHARBOR_RTC_ADVERTISED_IP 必须是 IPv4 地址")
+		}
 	}
 	for _, value := range []struct {
 		name, fallback string
