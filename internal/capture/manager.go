@@ -105,16 +105,16 @@ type Stream struct {
 
 func New(ctx context.Context, db *sql.DB, client *adb.Client, source Source, config Config, logger *slog.Logger) (*Manager, error) {
 	if ctx == nil {
-		return nil, errors.New("capture manager context is required")
+		return nil, diagnostics.New("capture manager context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if db == nil || client == nil || source == nil {
-		return nil, errors.New("capture dependencies are required")
+		return nil, diagnostics.New("capture dependencies are required")
 	}
 	if logger == nil {
-		return nil, errors.New("capture logger is required")
+		return nil, diagnostics.New("capture logger is required")
 	}
 	artifact, err := loadServerArtifact(config.ServerPath)
 	if err != nil {
@@ -140,18 +140,18 @@ func (m *Manager) SetBootID(id string) {
 // current boot identity is established and before capture starts are allowed.
 func (m *Manager) SetResourceFailure(failure func(context.Context, string) error) error {
 	if failure == nil {
-		return errors.New("capture resource failure callback is required")
+		return diagnostics.New("capture resource failure callback is required")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.bootID == "" {
-		return errors.New("capture boot identity must be bound before resource failure callback")
+		return diagnostics.New("capture boot identity must be bound before resource failure callback")
 	}
 	if m.closed {
-		return errors.New("capture manager is closed")
+		return diagnostics.New("capture manager is closed")
 	}
 	if m.resourceFailure != nil {
-		return errors.New("capture resource failure callback already bound")
+		return diagnostics.New("capture resource failure callback already bound")
 	}
 	m.resourceFailure = failure
 	return nil
@@ -162,42 +162,48 @@ func (m *Manager) notifyResourceFailure(ctx context.Context, deviceID string) er
 	failure := m.resourceFailure
 	m.mu.Unlock()
 	if failure == nil {
-		return errors.New("capture resource failure callback is not bound")
+		return diagnostics.New("capture resource failure callback is not bound")
 	}
 	return failure(ctx, deviceID)
 }
 
-func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings, authorizeStartup func() error) (*Stream, error) {
+func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings, authorizeStartup func() error) (result *Stream, startErr error) {
+	stage := "preconditions"
+	defer func() {
+		if startErr != nil {
+			startErr = diagnostics.WrapStage("capture_start."+stage, startErr)
+		}
+	}()
 	if ctx == nil {
-		return nil, errors.New("capture startup context is required")
+		return nil, diagnostics.New("capture startup context is required")
 	}
 	if authorizeStartup == nil {
-		return nil, errors.New("capture startup authorization is required")
+		return nil, diagnostics.New("capture startup authorization is required")
 	}
 	if deviceID == "" {
-		return nil, errors.New("device ID is required")
+		return nil, diagnostics.New("device ID is required")
 	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return nil, errors.New("capture manager is closed")
+		return nil, diagnostics.New("capture manager is closed")
 	}
 	if m.bootID == "" {
 		m.mu.Unlock()
-		return nil, errors.New("capture manager boot identity is not bound")
+		return nil, diagnostics.New("capture manager boot identity is not bound")
 	}
 	if m.resourceFailure == nil {
 		m.mu.Unlock()
-		return nil, errors.New("capture resource failure callback is not bound")
+		return nil, diagnostics.New("capture resource failure callback is not bound")
 	}
 	if m.recovering[deviceID] {
 		m.mu.Unlock()
-		return nil, errors.New("capture device recovery is in progress")
+		return nil, diagnostics.New("capture device recovery is in progress")
 	}
 	for _, current := range m.streams {
 		if current.deviceID == deviceID {
 			m.mu.Unlock()
-			return nil, errors.New("capture already exists for device")
+			return nil, diagnostics.New("capture already exists for device")
 		}
 	}
 	m.mu.Unlock()
@@ -206,12 +212,13 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	if err := authorizeStartup(); err != nil {
 		return nil, err
 	}
+	stage = "read_link"
 	link, linkCtx, err := m.source.ReadLink(startCtx, deviceID)
 	if err != nil {
 		return nil, err
 	}
 	if link.DeviceID != deviceID || link.TransportID == 0 || linkCtx == nil || !m.source.HasLink(link) {
-		return nil, errors.New("verified device link unavailable")
+		return nil, diagnostics.New("verified device link unavailable")
 	}
 	id := identity.Secret()
 	nonce, err := randomHex(16)
@@ -234,7 +241,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		m.mu.Unlock()
 		stopLink()
 		cancelStream()
-		return nil, errors.New("capture ownership changed during startup")
+		return nil, diagnostics.New("capture ownership changed during startup")
 	}
 	m.streams[deviceID] = s
 	m.mu.Unlock()
@@ -263,12 +270,13 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	stopStreamIO := context.AfterFunc(s.ctx, cancelIO)
 	defer cancelIO()
 	defer stopStreamIO()
+	stage = "resource_journal"
 	var outstanding bool
 	if err := m.db.QueryRowContext(ioCtx, `SELECT EXISTS(SELECT 1 FROM owned_resources WHERE device_id=? AND owner_kind=? AND kind=? AND state!='cleaned')`, deviceID, ownerKind, resourceKind).Scan(&outstanding); err != nil {
 		return nil, err
 	}
 	if outstanding {
-		return nil, errors.New("unrecovered capture resource exists for device")
+		return nil, diagnostics.New("unrecovered capture resource exists for device")
 	}
 	if err := m.register(ioCtx, s); err != nil {
 		return nil, err
@@ -287,6 +295,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		}
 		return nil
 	}
+	stage = "push_server"
 	if err := m.adb.Push(ioCtx, link.TransportID, jar, 0644, time.Now().UTC(), bytes.NewReader(m.server), authorized, nil); err != nil {
 		_ = m.markFailureBounded(s, "PUSH_FAILED")
 		return nil, err
@@ -299,6 +308,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	if err != nil {
 		return nil, err
 	}
+	stage = "open_shell"
 	shell, err := m.adb.Open(s.ctx, link.TransportID, "shell,v2,raw:"+cmd, authorized)
 	if err != nil {
 		_ = m.markFailureBounded(s, "SHELL_OPEN_FAILED")
@@ -307,6 +317,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	s.connMu.Lock()
 	s.shell = shell
 	s.connMu.Unlock()
+	stage = "bootstrap_ready"
 	ready, err := readReady(startCtx, shell)
 	if err != nil {
 		_ = m.markFailureBounded(s, "GATE_FAILED")
@@ -315,12 +326,14 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	s.resource.BootUUID, s.resource.PID, s.resource.StartTicks = ready.boot, ready.pid, ready.ticks
 	if !validBootUUID(ready.boot) || ready.pid <= 0 || ready.ticks == 0 {
 		_ = m.markFailureBounded(s, "INVALID_PROCESS_IDENTITY")
-		return nil, errors.New("invalid capture process identity")
+		return nil, diagnostics.New("invalid capture process identity")
 	}
+	stage = "persist_process"
 	if err := m.updateLocator(ioCtx, s); err != nil {
 		s.resource = resource
 		return nil, err
 	}
+	stage = "release_bootstrap"
 	if err := writeShellStdin(shell, []byte(gateNonce+"\n")); err != nil {
 		_ = m.markFailureBounded(s, "GATE_WRITE_FAILED")
 		return nil, err
@@ -333,12 +346,13 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		_ = m.markFailureBounded(s, "GO_UNCERTAIN")
 		return nil, err
 	}
+	stage = "socket_ready"
 	for i := 0; i < 40; i++ {
 		if err := ioCtx.Err(); err != nil {
 			return nil, err
 		}
 		if !m.source.HasLink(link) {
-			return nil, errors.New("pinned device link lost during startup")
+			return nil, diagnostics.New("pinned device link lost during startup")
 		}
 		err := m.probeReady(ioCtx, s, authorized)
 		if err == nil {
@@ -348,7 +362,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 			return nil, err
 		}
 		if i == 39 {
-			return nil, errors.New("scrcpy server readiness deadline exceeded")
+			return nil, diagnostics.New("scrcpy server readiness deadline exceeded")
 		}
 		timer := time.NewTimer(100 * time.Millisecond)
 		select {
@@ -358,6 +372,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		case <-timer.C:
 		}
 	}
+	stage = "open_video"
 	video, err := m.adb.Open(s.ctx, link.TransportID, "localabstract:"+socket, authorized)
 	if err != nil {
 		return nil, err
@@ -371,9 +386,11 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		}
 		defer video.SetDeadline(time.Time{})
 	}
+	stage = "video_dummy"
 	if err := scrcpy.ReadDummy(video); err != nil {
 		return nil, err
 	}
+	stage = "open_control"
 	control, err := m.adb.Open(s.ctx, link.TransportID, "localabstract:"+socket, authorized)
 	if err != nil {
 		return nil, err
@@ -381,13 +398,15 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	s.connMu.Lock()
 	s.control = control
 	s.connMu.Unlock()
+	stage = "video_preamble"
 	metadata, err := scrcpy.ReadPreamble(video)
 	if err != nil {
 		return nil, err
 	}
 	if metadata.Codec != scrcpy.CodecH264 {
-		return nil, errors.New("scrcpy server did not negotiate H.264")
+		return nil, diagnostics.New("scrcpy server did not negotiate H.264")
 	}
+	stage = "activate"
 	if err := m.activate(ioCtx, s); err != nil {
 		return nil, err
 	}
@@ -395,6 +414,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	go s.readFrames()
 	go s.readMessages()
 	go s.drainShell()
+	stage = "deliver"
 	stopStartup()
 	if err := startCtx.Err(); err != nil {
 		return nil, err
@@ -408,7 +428,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	m.mu.Lock()
 	if m.closed || m.streams[deviceID] != s {
 		m.mu.Unlock()
-		return nil, errors.New("capture ownership changed before delivery")
+		return nil, diagnostics.New("capture ownership changed before delivery")
 	}
 	s.live = true
 	m.mu.Unlock()
@@ -442,7 +462,7 @@ func (m *Manager) updateLocator(ctx context.Context, s *Stream) error {
 		return err
 	}
 	if n != 1 {
-		return errors.New("capture ownership journal changed")
+		return diagnostics.New("capture ownership journal changed")
 	}
 	return nil
 }
@@ -456,7 +476,7 @@ func (m *Manager) activate(ctx context.Context, s *Stream) error {
 		return err
 	}
 	if n != 1 {
-		return errors.New("capture ownership journal changed before activation")
+		return diagnostics.New("capture ownership journal changed before activation")
 	}
 	return nil
 }

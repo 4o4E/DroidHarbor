@@ -16,7 +16,7 @@ import (
 	"droidharbor/internal/leases"
 )
 
-var ErrCleanupDeferred = errors.New("capture cleanup deferred")
+var ErrCleanupDeferred = diagnostics.New("capture cleanup deferred")
 
 func (m *Manager) recordCleanupFailure(id, code string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
@@ -31,13 +31,13 @@ func (s *Stream) authorizeSystem() error {
 		return err
 	}
 	if !s.manager.source.HasLink(s.link) {
-		return errors.New("pinned capture link lost")
+		return diagnostics.New("pinned capture link lost")
 	}
 	s.manager.mu.Lock()
 	owner := !s.manager.closed && s.manager.streams[s.deviceID] == s
 	s.manager.mu.Unlock()
 	if !owner {
-		return errors.New("capture is no longer registered owner")
+		return diagnostics.New("capture is no longer registered owner")
 	}
 	return nil
 }
@@ -47,22 +47,22 @@ func (m *Manager) authorizeCleanup(ctx context.Context, link leases.Link, id, bo
 		return err
 	}
 	if !m.source.HasLink(link) {
-		return errors.New("cleanup link is no longer verified")
+		return diagnostics.New("cleanup link is no longer verified")
 	}
 	var owner, device, storedBoot, kind, state, encoded string
 	err := m.db.QueryRowContext(ctx, `SELECT owner_id,device_id,boot_id,kind,state,locator FROM owned_resources WHERE id=? AND owner_kind=?`, id, ownerKind).Scan(&owner, &device, &storedBoot, &kind, &state, &encoded)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("capture cleanup ownership missing")
+		return diagnostics.New("capture cleanup ownership missing")
 	}
 	if err != nil {
 		return err
 	}
 	if owner != id || device != link.DeviceID || storedBoot != bootID || kind != resourceKind || state == "cleaned" {
-		return errors.New("capture cleanup ownership changed")
+		return diagnostics.New("capture cleanup ownership changed")
 	}
 	var current locator
 	if json.Unmarshal([]byte(encoded), &current) != nil || current != loc {
-		return errors.New("capture cleanup locator changed")
+		return diagnostics.New("capture cleanup locator changed")
 	}
 	return nil
 }
@@ -82,11 +82,11 @@ func (m *Manager) cleanup(ctx context.Context, s *Stream) (cleanupErr error) {
 		}
 	}()
 	if ctx == nil {
-		return errors.New("cleanup context is required")
+		return diagnostics.New("cleanup context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		m.recordCleanupFailure(s.id, "CLEANUP_DEFERRED")
-		return fmt.Errorf("%w: %v", ErrCleanupDeferred, err)
+		return errors.Join(ErrCleanupDeferred, err)
 	}
 	if !m.source.HasLink(s.link) {
 		m.recordCleanupFailure(s.id, "LINK_UNAVAILABLE")
@@ -101,12 +101,12 @@ func (m *Manager) cleanup(ctx context.Context, s *Stream) (cleanupErr error) {
 		return err
 	}
 	if n != 1 {
-		return errors.New("capture ownership changed before cleanup")
+		return diagnostics.New("capture ownership changed before cleanup")
 	}
 	if err := m.cleanupLocator(ctx, s.link, s.id, m.bootID, s.resource); err != nil {
 		if !m.source.HasLink(s.link) {
 			m.recordCleanupFailure(s.id, "LINK_UNAVAILABLE")
-			return fmt.Errorf("%w: %v", ErrCleanupDeferred, err)
+			return errors.Join(ErrCleanupDeferred, err)
 		}
 		m.recordCleanupFailure(s.id, "CLEANUP_FAILED")
 		return err
@@ -120,7 +120,7 @@ func (m *Manager) cleanup(ctx context.Context, s *Stream) (cleanupErr error) {
 		return err
 	}
 	if n != 1 {
-		return errors.New("capture ownership changed before cleanup completion")
+		return diagnostics.New("capture ownership changed before cleanup completion")
 	}
 	return nil
 }
@@ -130,29 +130,55 @@ func (m *Manager) setCleanupFailure(ctx context.Context, id, code string) error 
 	return err
 }
 
-func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, bootID string, loc locator) error {
+func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, bootID string, loc locator) (cleanupErr error) {
+	stage := "validate"
+	defer func() {
+		if cleanupErr != nil {
+			cleanupErr = diagnostics.WrapStage("capture_cleanup."+stage, cleanupErr)
+		}
+	}()
 	if loc.SCID <= 0 || loc.Socket != fmt.Sprintf("scrcpy_%08x", uint32(loc.SCID)) {
-		return errors.New("invalid scrcpy resource locator")
+		return diagnostics.New("invalid scrcpy resource locator")
 	}
 	name := strings.TrimSuffix(strings.TrimPrefix(loc.Jar, "/data/local/tmp/droidharbor-"), ".jar")
 	if len(name) != 32 {
-		return errors.New("invalid scrcpy artifact locator")
+		return diagnostics.New("invalid scrcpy artifact locator")
 	}
 	if _, err := hex.DecodeString(name); err != nil {
-		return errors.New("invalid scrcpy artifact locator")
+		return diagnostics.New("invalid scrcpy artifact locator")
 	}
 	if loc.Jar != "/data/local/tmp/droidharbor-"+name+".jar" {
-		return errors.New("invalid scrcpy artifact path")
+		return diagnostics.New("invalid scrcpy artifact path")
 	}
 	if loc.PID == 0 {
 		if loc.BootUUID != "" || loc.StartTicks != 0 {
-			return errors.New("invalid pending scrcpy process identity")
+			return diagnostics.New("invalid pending scrcpy process identity")
 		}
 	} else if loc.PID < 1 || !validBootUUID(loc.BootUUID) || loc.StartTicks == 0 {
-		return errors.New("invalid scrcpy process identity")
+		return diagnostics.New("invalid scrcpy process identity")
 	}
 	deadline, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
+	var pause *time.Timer
+	defer func() {
+		if pause != nil {
+			pause.Stop()
+		}
+	}()
+	waitForExit := func() error {
+		if pause == nil {
+			pause = time.NewTimer(100 * time.Millisecond)
+		} else {
+			pause.Reset(100 * time.Millisecond)
+		}
+		select {
+		case <-deadline.Done():
+			return deadline.Err()
+		case <-pause.C:
+			return nil
+		}
+	}
+	stage = "process_exit"
 	probeCommand := processProbeCommand(loc)
 	for {
 		if err := m.authorizeCleanup(deadline, link, id, bootID, loc); err != nil {
@@ -162,46 +188,61 @@ func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, boot
 		if err != nil {
 			// The process may be exiting while the probe runs; retry read-only
 			// ownership checks within the bounded cleanup window.
-			select {
-			case <-deadline.Done():
-				return errors.New("capture process ownership probe failed")
-			case <-time.After(100 * time.Millisecond):
-				continue
+			if waitErr := waitForExit(); waitErr != nil {
+				return errors.Join(diagnostics.New("capture process ownership probe failed"), err, waitErr)
 			}
+			continue
 		}
 		if result.ExitCode != 0 {
-			return errors.New("capture process ownership probe returned an invalid status")
+			return diagnostics.New("capture process ownership probe returned an invalid status")
 		}
 		status := strings.TrimSpace(string(result.Stdout))
 		if status == "GONE" {
 			break
 		}
 		if status != "MATCH" {
-			return errors.New("capture process identity could not be verified")
+			return diagnostics.New("capture process identity could not be verified")
 		}
-		select {
-		case <-deadline.Done():
-			return errors.New("capture process remained alive through cleanup deadline")
-		case <-time.After(100 * time.Millisecond):
+		if err := waitForExit(); err != nil {
+			return errors.Join(diagnostics.New("capture process remained alive through cleanup deadline"), err)
 		}
 	}
-	if err := m.authorizeCleanup(deadline, link, id, bootID, loc); err != nil {
-		return err
+	// The scrcpy helper restores device settings asynchronously after its
+	// parent exits. A matching helper is still owned work, not a failed cleanup.
+	stage = "helper_exit"
+	for {
+		if err := m.authorizeCleanup(deadline, link, id, bootID, loc); err != nil {
+			return err
+		}
+		helperResult, err := m.adb.RunShell(deadline, link.TransportID, helperProbeCommand(loc.Jar), 32, func() error { return m.authorizeCleanup(deadline, link, id, bootID, loc) })
+		if err != nil {
+			return errors.Join(diagnostics.New("scrcpy cleanup helper ownership probe failed"), err)
+		}
+		if helperResult.ExitCode != 0 {
+			return diagnostics.New("scrcpy cleanup helper ownership probe returned an invalid status")
+		}
+		status := strings.TrimSpace(string(helperResult.Stdout))
+		if status == "ABSENT" {
+			break
+		}
+		if status != "FOUND" {
+			return diagnostics.New("scrcpy cleanup helper identity could not be verified")
+		}
+		if err := waitForExit(); err != nil {
+			return errors.Join(diagnostics.New("scrcpy cleanup helper remained alive through cleanup deadline"), err)
+		}
 	}
-	helperResult, err := m.adb.RunShell(deadline, link.TransportID, helperProbeCommand(loc.Jar), 32, func() error { return m.authorizeCleanup(deadline, link, id, bootID, loc) })
-	if err != nil {
-		return errors.New("scrcpy cleanup helper ownership probe failed")
-	}
-	if helperResult.ExitCode != 0 || strings.TrimSpace(string(helperResult.Stdout)) != "ABSENT" {
-		return errors.New("scrcpy cleanup helper remains or could not be verified")
-	}
+	stage = "remove_artifact"
 	if err := m.authorizeCleanup(deadline, link, id, bootID, loc); err != nil {
 		return err
 	}
 	removeCommand := "rm -f -- " + shellQuote(loc.Jar) + "; [ ! -e " + shellQuote(loc.Jar) + " ] && printf REMOVED"
 	removeResult, err := m.adb.RunShell(deadline, link.TransportID, removeCommand, 32, func() error { return m.authorizeCleanup(deadline, link, id, bootID, loc) })
-	if err != nil || removeResult.ExitCode != 0 || strings.TrimSpace(string(removeResult.Stdout)) != "REMOVED" {
-		return errors.New("owned scrcpy artifact removal could not be verified")
+	if err != nil {
+		return errors.Join(diagnostics.New("owned scrcpy artifact removal could not be verified"), err)
+	}
+	if removeResult.ExitCode != 0 || strings.TrimSpace(string(removeResult.Stdout)) != "REMOVED" {
+		return diagnostics.New("owned scrcpy artifact removal could not be verified")
 	}
 	return nil
 }
@@ -224,7 +265,7 @@ func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'
 
 func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 	if ctx == nil {
-		return false, errors.New("capture recovery context is required")
+		return false, diagnostics.New("capture recovery context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -232,7 +273,7 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return false, errors.New("capture manager is closed")
+		return false, diagnostics.New("capture manager is closed")
 	}
 	if current := m.streams[deviceID]; current != nil {
 		live := current.live
@@ -282,14 +323,14 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 	}
 	for _, x := range items {
 		if x.owner != x.id || x.boot == "" {
-			return false, errors.New("invalid capture resource ownership journal")
+			return false, diagnostics.New("invalid capture resource ownership journal")
 		}
 		var loc locator
 		if err = json.Unmarshal([]byte(x.encoded), &loc); err != nil {
 			return false, err
 		}
 		if loc.PID != 0 && (!validBootUUID(loc.BootUUID) || loc.StartTicks == 0) {
-			return false, errors.New("invalid capture process identity journal")
+			return false, diagnostics.New("invalid capture process identity journal")
 		}
 		cleaning, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaning',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND locator=? AND state!='cleaned'`, x.id, ownerKind, x.id, deviceID, x.boot, resourceKind, x.encoded)
 		if err != nil {
@@ -300,11 +341,11 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 			return false, err
 		}
 		if n != 1 {
-			return false, errors.New("capture resource journal changed before recovery")
+			return false, diagnostics.New("capture resource journal changed before recovery")
 		}
 		if err = m.cleanupLocator(ctx, link, x.id, x.boot, loc); err != nil {
 			if !m.source.HasLink(link) {
-				err = fmt.Errorf("%w: %v", ErrCleanupDeferred, err)
+				err = errors.Join(ErrCleanupDeferred, err)
 			}
 			m.recordCleanupFailure(x.id, "RECOVERY_DEFERRED")
 			if errors.Is(err, ErrCleanupDeferred) {
@@ -321,7 +362,7 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 			return false, err
 		}
 		if n != 1 {
-			return false, fmt.Errorf("capture resource journal changed during recovery")
+			return false, diagnostics.New("capture resource journal changed during recovery")
 		}
 	}
 	return true, nil

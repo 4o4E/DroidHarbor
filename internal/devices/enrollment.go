@@ -395,6 +395,55 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 	return evidence, nil
 }
 
+// Refresh reconciles an already registered phone after its authorization was
+// handled on-device. It neither pairs/connects endpoints nor changes allocation.
+func (r *Registry) Refresh(ctx context.Context, actorID, deviceID string) error {
+	if err := r.refreshInventory(ctx); err != nil {
+		return err
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT l.id,coalesce(l.observed_serial,l.endpoint) FROM devices d LEFT JOIN device_links l ON l.device_id=d.id WHERE d.id=? ORDER BY CASE WHEN l.kind='usb' THEN 0 ELSE 1 END,l.id`, deviceID)
+	if err != nil {
+		return err
+	}
+	found, online, candidate := false, false, ""
+	for rows.Next() {
+		var linkID, serial sql.NullString
+		if err = rows.Scan(&linkID, &serial); err != nil {
+			rows.Close()
+			return err
+		}
+		found = true
+		if !linkID.Valid {
+			continue
+		}
+		r.mu.RLock()
+		if current := r.live[linkID.String]; current != nil && current.ctx.Err() == nil {
+			online = true
+		}
+		observed, exists := r.discovered[serial.String]
+		if candidate == "" && r.ready && exists && !r.ambiguous[serial.String] && observed.State == "device" && observed.TransportID != 0 {
+			candidate = linkID.String
+		}
+		r.mu.RUnlock()
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	if !found {
+		return &Error{Code: "DEVICE_NOT_FOUND", Message: "设备不存在", Status: 404}
+	}
+	if !online {
+		if candidate == "" {
+			return &Error{Code: "DEVICE_DISCONNECTED", Message: "手机仍未授权或链路未连接；请完成手机确认后再同步", Status: 503}
+		}
+		if _, err = r.Verify(ctx, actorID, deviceID, candidate); err != nil {
+			return err
+		}
+	}
+	r.logger.Info("device_state_refreshed", "deviceId", deviceID)
+	return nil
+}
+
 // Persist the action before external I/O. Until a confirmed result is durable,
 // a crash or canceled request must leave an unknown result, not a false failure
 // that encourages automatic replay. Neither endpoint nor pairing code is logged.

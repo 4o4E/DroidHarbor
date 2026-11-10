@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CompositionEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type WheelEvent } from 'react'
-import { Alert, AlertDescription } from '@/components/ui/alert'
+import { useErrorNotification } from '@/lib/notifications'
 import type { ControlReply, MediaSession, SessionMode } from './types'
 
 type VideoSurfaceProps = {
@@ -80,6 +80,8 @@ function describeReply(reply: ControlReply): string {
 
 export function VideoSurface({ session, mode, rotation = 0, mirrored = false, paused = false, className }: VideoSurfaceProps) {
   const [controlError, setControlError] = useState('')
+  useErrorNotification('画面操作异常', controlError)
+  useErrorNotification('媒体会话异常', session.error)
   const pointersRef = useRef(new Map<number, PointerPosition>())
   const mouseButtonsRef = useRef(new Map<number, string>())
   const keysRef = useRef(new Map<string, number>())
@@ -402,8 +404,6 @@ export function VideoSurface({ session, mode, rotation = 0, mirrored = false, pa
 
   return (
     <div className={`flex h-full min-h-0 min-w-0 flex-col ${className ?? ''}`}>
-      {session.error && <Alert variant="destructive" className="mb-2 shrink-0"><AlertDescription>{session.error}</AlertDescription></Alert>}
-      {controlError && <Alert variant="destructive" className="mb-2 shrink-0"><AlertDescription>{controlError}</AlertDescription></Alert>}
       <div
         ref={surfaceRef}
         className="relative flex min-h-0 min-w-0 flex-1 touch-none items-center justify-center overflow-hidden bg-black outline-none"

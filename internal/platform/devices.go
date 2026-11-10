@@ -162,6 +162,21 @@ func (s *Server) patchDevice(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
+func (s *Server) refreshDevice(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.authorize(w, r, true)
+	if !ok {
+		return
+	}
+	if !s.decode(w, r, &struct{}{}, true) {
+		return
+	}
+	if err := s.Devices.Refresh(r.Context(), actor, r.PathValue("id")); err != nil {
+		s.domainError(w, r, err)
+		return
+	}
+	w.WriteHeader(204)
+}
+
 func (s *Server) recoverDevice(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorize(w, r, true); !ok {
 		return

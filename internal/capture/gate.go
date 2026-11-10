@@ -3,7 +3,6 @@ package capture
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 )
 
 type readyIdentity struct {
@@ -20,7 +20,7 @@ type readyIdentity struct {
 	ticks uint64
 }
 
-var errSocketNotListening = errors.New("scrcpy abstract socket is not listening")
+var errSocketNotListening = diagnostics.New("scrcpy abstract socket is not listening")
 
 func startupCommand(jar, gateNonce string, scid int32, settings Settings) (string, error) {
 	args, err := serverOptions(scid, settings)
@@ -63,32 +63,32 @@ func readReady(ctx context.Context, conn net.Conn) (readyIdentity, error) {
 				}
 				line = append(line, b)
 				if len(line) > maxShellLine {
-					return readyIdentity{}, errors.New("capture bootstrap line exceeds limit")
+					return readyIdentity{}, diagnostics.New("capture bootstrap line exceeds limit")
 				}
 			}
 		case 2:
 			continue
 		case 3:
-			return readyIdentity{}, errors.New("foreground scrcpy shell exited before readiness")
+			return readyIdentity{}, diagnostics.New("foreground scrcpy shell exited before readiness")
 		default:
-			return readyIdentity{}, errors.New("foreground shell sent an invalid shell-v2 packet")
+			return readyIdentity{}, diagnostics.New("foreground shell sent an invalid shell-v2 packet")
 		}
 	}
-	return readyIdentity{}, errors.New("capture bootstrap line exceeds limit")
+	return readyIdentity{}, diagnostics.New("capture bootstrap line exceeds limit")
 }
 
 func parseReadyLine(line string) (readyIdentity, error) {
 	parts := strings.Fields(line)
 	if len(parts) != 4 || parts[0] != "DHREADY" {
-		return readyIdentity{}, errors.New("invalid capture bootstrap line")
+		return readyIdentity{}, diagnostics.New("invalid capture bootstrap line")
 	}
 	pid, err := strconv.Atoi(parts[1])
 	if err != nil || pid < 1 {
-		return readyIdentity{}, errors.New("invalid capture process PID")
+		return readyIdentity{}, diagnostics.New("invalid capture process PID")
 	}
 	ticks, err := strconv.ParseUint(parts[3], 10, 64)
 	if err != nil || ticks == 0 {
-		return readyIdentity{}, errors.New("invalid capture process start time")
+		return readyIdentity{}, diagnostics.New("invalid capture process start time")
 	}
 	return readyIdentity{pid: pid, boot: parts[2], ticks: ticks}, nil
 }
@@ -127,14 +127,14 @@ func (m *Manager) probeReady(ctx context.Context, s *Stream, authorize func() er
 		return err
 	}
 	if result.ExitCode != 0 {
-		return fmt.Errorf("scrcpy readiness probe exited with status %d", result.ExitCode)
+		return diagnostics.New(fmt.Sprintf("scrcpy readiness probe exited with status %d", result.ExitCode))
 	}
 	output := strings.TrimSpace(string(result.Stdout))
 	if output == "" {
 		return errSocketNotListening
 	}
 	if output != "READY" {
-		return errors.New("invalid scrcpy readiness probe response")
+		return diagnostics.New("invalid scrcpy readiness probe response")
 	}
 	return nil
 }

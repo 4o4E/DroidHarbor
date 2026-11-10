@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Cable, Check, RefreshCw, ShieldAlert, Wifi } from 'lucide-react'
+import { Cable, RefreshCw, ShieldAlert, Wifi } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -9,6 +9,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { toast } from '@/components/ui/toast'
 import { api, ApiError, errorMessage } from '@/lib/api'
 import type { Device, DeviceLink } from '@/lib/types'
 
@@ -31,11 +32,8 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
   const [pairing, setPairing] = useState<Record<string, { endpoint: string; code: string }>>({})
   const [newLinkKind, setNewLinkKind] = useState<LinkKind>('wifi')
   const [newLinkEndpoint, setNewLinkEndpoint] = useState('')
-  const [mainError, setMainError] = useState('')
-  const [mainSuccess, setMainSuccess] = useState('')
   const [busy, setBusy] = useState('')
   const [maintenanceConfirmation, setMaintenanceConfirmation] = useState(false)
-  const [conflict, setConflict] = useState(false)
 
   useEffect(() => {
     if (!open || !device) return
@@ -45,26 +43,25 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
     setPairing({})
     setNewLinkKind('wifi')
     setNewLinkEndpoint('')
-    setMainError('')
-    setMainSuccess('')
     setMaintenanceConfirmation(false)
-    setConflict(false)
   }, [open, device?.deviceId, device?.version])
 
   async function perform<T>(action: string, request: () => Promise<T>, success: string | ((result: T) => string)) {
     if (busy) return
     setBusy(action)
-    setMainError('')
-    setMainSuccess('')
-    setConflict(false)
     try {
       const result = await request()
-      setMainSuccess(typeof success === 'function' ? success(result) : success)
+      const message = typeof success === 'function' ? success(result) : success
       await onChanged()
+      toast.add({ title: '操作完成', description: message, type: 'success' })
     } catch (error) {
       const unknown = error instanceof ApiError && (error.code === 'RESULT_UNKNOWN' || error.code === 'ADB_RESULT_UNKNOWN')
-      if (error instanceof ApiError && error.status === 409) setConflict(true)
-      setMainError(unknown ? `操作结果未确认：${errorMessage(error)} 请重新读取设备状态。` : errorMessage(error))
+      toast.add({
+        title: unknown ? '操作结果未确认' : '操作未完成',
+        description: unknown ? `${errorMessage(error)} 请重新读取设备状态。` : errorMessage(error),
+        type: 'error', timeout: 0,
+        actionProps: error instanceof ApiError && (error.status === 409 || unknown) ? { children: '重新读取', onClick: () => void refreshAfterConflict() } : undefined,
+      })
     } finally {
       setBusy('')
     }
@@ -76,15 +73,14 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
     const name = displayName.trim()
     const tags = [...new Set(tagsText.split(',').map(tag => tag.trim()).filter(Boolean))]
     if (!name || name.length > 120) {
-      setMainError('设备名称去首尾空白后须为 1–120 个字符。')
+      toast.add({ title: '请检查设备名称', description: '设备名称去首尾空白后须为 1–120 个字符。', type: 'warning' })
       return
     }
     const body: { version: string; displayName?: string; tags?: string[] } = { version: device.version }
     if (name !== device.displayName) body.displayName = name
     if (tags.length !== device.tags.length || tags.some((tag, index) => tag !== device.tags[index])) body.tags = tags
     if (body.displayName === undefined && body.tags === undefined) {
-      setMainSuccess('设备名称和标签没有变化。')
-      setMainError('')
+      toast.add({ title: '设备名称和标签没有变化', type: 'info' })
       return
     }
     await perform('details', () => api<void>('/devices/' + encodeURIComponent(device.deviceId), { method: 'PATCH', body }), '设备名称/标签已提交。')
@@ -128,7 +124,7 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
     const pairingEndpoint = values.endpoint.trim()
     const pairingCode = values.code.trim()
     if (!pairingEndpoint || !pairingCode) {
-      setMainError('请填写手机显示的临时配对地址与配对码。')
+      toast.add({ title: '请填写手机显示的临时配对地址与配对码', type: 'warning' })
       return
     }
     setPairing(current => ({ ...current, [link.linkId]: { endpoint: '', code: '' } }))
@@ -151,8 +147,12 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
   }
 
   async function refreshAfterConflict() {
-    await onChanged()
-    setMainSuccess('设备状态已重新读取。')
+    try {
+      await onChanged()
+      toast.add({ title: '设备状态已重新读取', type: 'success' })
+    } catch (error) {
+      toast.add({ title: '无法重新读取设备', description: errorMessage(error), type: 'error', timeout: 0 })
+    }
   }
 
   return <>
@@ -161,9 +161,6 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader><DialogTitle>管理设备</DialogTitle><DialogDescription>{device?.displayName ?? ''}</DialogDescription></DialogHeader>
         {device && <div className="flex flex-col gap-5">
-          {mainError && <Alert variant="destructive"><ShieldAlert /><AlertTitle>操作未确认</AlertTitle><AlertDescription>{mainError}</AlertDescription></Alert>}
-          {mainSuccess && <Alert><Check /><AlertTitle>操作结果</AlertTitle><AlertDescription>{mainSuccess}</AlertDescription></Alert>}
-          {conflict && <Alert variant="destructive"><AlertTitle>设备版本冲突</AlertTitle><AlertDescription>请重新读取设备状态后再提交。</AlertDescription><Button className="mt-3" size="sm" variant="outline" onClick={() => void refreshAfterConflict()} disabled={Boolean(busy)}><RefreshCw data-icon="inline-start" />重新读取设备</Button></Alert>}
 
           <Card size="sm">
             <CardHeader><CardTitle>设备信息</CardTitle></CardHeader>
@@ -217,8 +214,6 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
   const [kind, setKind] = useState<LinkKind>('usb')
   const [endpoint, setEndpoint] = useState('')
   const [discovery, setDiscovery] = useState<DiscoveredDevice[] | null>(null)
-  const [discoveryError, setDiscoveryError] = useState('')
-  const [failure, setFailure] = useState('')
   const [registered, setRegistered] = useState<{ deviceId: string; linkId: string } | null>(null)
   const [pending, setPending] = useState('')
 
@@ -228,19 +223,16 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     setKind('usb')
     setEndpoint('')
     setDiscovery(null)
-    setDiscoveryError('')
-    setFailure('')
     setRegistered(null)
   }, [open])
 
   async function readDiscovery() {
     setPending('discovery')
-    setDiscoveryError('')
     try {
       const response = await api<DiscoveredResponse>('/device-discovery')
       setDiscovery(response.devices)
     } catch (error) {
-      setDiscoveryError(errorMessage(error))
+      toast.add({ title: '无法读取发现快照', description: errorMessage(error), type: 'error', timeout: 0 })
     } finally {
       setPending('')
     }
@@ -252,7 +244,6 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     const address = endpoint.trim()
     if (!name || !address || pending) return
     setPending(registered ? 'verify' : 'register')
-    setFailure('')
     let created = registered
     let failureMessage = ''
     try {
@@ -273,8 +264,11 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     } catch (error) {
       failureMessage += `${failureMessage ? ' ' : ''}设备列表刷新失败：${errorMessage(error)}`
     }
-    if (failureMessage) setFailure(failureMessage)
-    else onOpenChange(false)
+    if (failureMessage) toast.add({ title: '设备接入未完成', description: failureMessage, type: 'error', timeout: 0 })
+    else {
+      toast.add({ title: '设备已登记并完成身份核验', type: 'success' })
+      onOpenChange(false)
+    }
     setPending('')
   }
 
@@ -286,8 +280,6 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
   return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }}>
     <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto" showCloseButton={!pending}>
       <DialogHeader><DialogTitle>登记设备</DialogTitle><DialogDescription>登记所选设备并核验身份；核验成功后即可投屏。</DialogDescription></DialogHeader>
-      {failure && <Alert variant="destructive"><ShieldAlert /><AlertTitle>操作未完成</AlertTitle><AlertDescription>{failure}</AlertDescription></Alert>}
-      {discoveryError && <Alert variant="destructive"><AlertTitle>无法读取发现快照</AlertTitle><AlertDescription>{discoveryError}</AlertDescription></Alert>}
       <div className="flex flex-col gap-3">
         <Button type="button" variant="outline" disabled={Boolean(pending) || Boolean(registered)} onClick={() => void readDiscovery()}>
           <RefreshCw data-icon="inline-start" />{pending === 'discovery' ? '正在读取…' : '读取已发现设备'}

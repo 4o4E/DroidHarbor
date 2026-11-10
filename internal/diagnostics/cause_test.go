@@ -28,7 +28,8 @@ func TestCausePreservesSystemDiagnosisWithoutPayloads(t *testing.T) {
 	failure := errors.Join(
 		fmt.Errorf("secret-command-marker: %w", sqlErr),
 		&fs.PathError{Op: "open", Path: "secret-path-marker", Err: syscall.EACCES},
-		errors.New("secret-clipboard-marker"),
+		WrapStage("capture_cleanup.helper_exit", errors.New("secret-clipboard-marker")),
+		New("fixed-diagnostic-marker"),
 	)
 	var output bytes.Buffer
 	slog.New(slog.NewJSONHandler(&output, nil)).Error("operation_failed", "cause", Cause(failure))
@@ -61,6 +62,19 @@ func TestCausePreservesSystemDiagnosisWithoutPayloads(t *testing.T) {
 	}
 	if file.Operation != "open" || file.Cause.Errno != int(syscall.EACCES) || file.Cause.Message != syscall.EACCES.Error() {
 		t.Fatalf("lost OS diagnosis: %s", output.String())
+	}
+	var staged struct {
+		Stage string                     `json:"stage"`
+		Cause map[string]json.RawMessage `json:"cause"`
+	}
+	if err := json.Unmarshal(entry.Cause["cause2"], &staged); err != nil {
+		t.Fatal(err)
+	}
+	if staged.Stage != "capture_cleanup.helper_exit" || staged.Cause["message"] != nil {
+		t.Fatalf("stage metadata trusted an arbitrary wrapped error: %s", output.String())
+	}
+	if !strings.Contains(output.String(), "fixed-diagnostic-marker") {
+		t.Fatalf("fixed internal diagnosis was hidden: %s", output.String())
 	}
 	for _, secret := range []string{"sensitive_sql_identifier_marker", "secret-command-marker", "secret-path-marker", "secret-clipboard-marker"} {
 		if strings.Contains(output.String(), secret) {

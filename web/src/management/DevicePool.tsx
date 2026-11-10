@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Cable, CircleDot, LayoutGrid, MonitorSmartphone, Plus, Search, Unplug, Wifi } from 'lucide-react'
+import { Cable, CircleDot, LayoutGrid, MonitorSmartphone, Plus, RefreshCw, Search, Unplug, Wifi } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -16,6 +16,8 @@ type Props = {
   onOpen: (device: Device) => void
   onManage: (device: Device) => void
   onAdd: () => void
+  onSync: (device: Device) => void
+  syncingDeviceId: string | null
 }
 
 function isOffline(device: Device) {
@@ -30,7 +32,7 @@ function badgeVariant(device: Device): 'default' | 'secondary' | 'destructive' |
   return 'outline'
 }
 
-export function DevicePool({ devices, onOpen, onManage, onAdd }: Props) {
+export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDeviceId }: Props) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const counts = useMemo(() => ({
@@ -97,7 +99,10 @@ export function DevicePool({ devices, onOpen, onManage, onAdd }: Props) {
             </div>
             <div className="flex min-h-5 flex-wrap gap-1.5">{device.tags.map(tag => <Badge key={tag} variant="outline">{tag}</Badge>)}</div>
           </CardContent>
-          <CardFooter><Button className="relative" variant="ghost" size="sm" aria-label={`管理${deviceName(device)}`} onClick={() => onManage(device)}>管理</Button></CardFooter>
+          <CardFooter className="gap-2">
+            {device.connectionState !== 'online' && device.links.some(link => link.connectionState === 'online' || link.connectionState === 'unauthorized') && <Button className="relative" variant="outline" size="sm" aria-label={`同步${deviceName(device)}状态`} disabled={syncingDeviceId !== null} onClick={() => onSync(device)}><RefreshCw data-icon="inline-start" className={syncingDeviceId === device.deviceId ? 'animate-spin' : undefined} />{syncingDeviceId === device.deviceId ? '同步中…' : '同步状态'}</Button>}
+            <Button className="relative" variant="ghost" size="sm" aria-label={`管理${deviceName(device)}`} onClick={() => onManage(device)}>管理</Button>
+          </CardFooter>
         </Card>)}
       </div> : <Empty className="border">
         <EmptyHeader><EmptyMedia variant="icon"><Search /></EmptyMedia><EmptyTitle>{devices.length ? '没有匹配的设备' : '尚无已登记设备'}</EmptyTitle><EmptyDescription>{devices.length ? '试试其他名称、链接地址、标签或状态。' : '通过明确登记添加经授权的设备链路。'}</EmptyDescription></EmptyHeader>

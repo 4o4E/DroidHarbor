@@ -11,6 +11,25 @@ import (
 	"syscall"
 )
 
+type fixedError struct{ message string }
+
+func (e *fixedError) Error() string { return e.message }
+
+// New marks fixed, code-defined diagnostic text as safe for runtime logs.
+// Device output, SQL values and credentials remain ordinary wrapped causes.
+func New(message string) error { return &fixedError{message: message} }
+
+type stageError struct {
+	stage string
+	cause error
+}
+
+func (e *stageError) Error() string { return e.stage + ": " + e.cause.Error() }
+func (e *stageError) Unwrap() error { return e.cause }
+
+// WrapStage adds a code-defined operation stage without trusting cause text.
+func WrapStage(stage string, cause error) error { return &stageError{stage: stage, cause: cause} }
+
 // Cause preserves the error chain, SQLite result code and OS/network operation.
 // Arbitrary error text may contain SQL values, shell commands or device payloads;
 // only known payload-free system errors are rendered verbatim.
@@ -23,6 +42,10 @@ func Cause(err error) slog.Value {
 		attrs = append(attrs, slog.Int("code", coded.Code()))
 	}
 	switch value := err.(type) {
+	case *fixedError:
+		attrs = append(attrs, slog.String("message", value.Error()))
+	case *stageError:
+		attrs = append(attrs, slog.String("stage", value.stage))
 	case syscall.Errno:
 		attrs = append(attrs, slog.Int("errno", int(value)), slog.String("message", value.Error()))
 	case *net.OpError:

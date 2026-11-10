@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, Camera, ChevronDown, ChevronLeft, Circle, Expand, ExternalLink, FlipHorizontal2, Monitor, Pause, Play, Power, RefreshCw, RotateCcw, RotateCw, Square, Unplug, Volume2 } from 'lucide-react'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { toast } from '@/components/ui/toast'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -32,7 +32,6 @@ export function Workbench(props: WorkbenchProps) {
 }
 
 function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange, onBack }: WorkbenchProps) {
-  const [popupBlocked, setPopupBlocked] = useState(false)
   const [sessionAllowed, setSessionAllowed] = useState(true)
   const hasBeenOnline = useRef(device.connectionState === 'online')
   const needsVerification = deviceNeedsVerification(device)
@@ -40,7 +39,6 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
   const [displayRotation, setDisplayRotation] = useState(0)
   const [mirrored, setMirrored] = useState(false)
   const [paused, setPaused] = useState(false)
-  const [actionError, setActionError] = useState('')
   const [actionBusy, setActionBusy] = useState(false)
   const [previewFrames, setPreviewFrames] = useState<Record<string, { capturedAt: string | null; linkGeneration: string | null }>>({})
   const videoAreaRef = useRef<HTMLDivElement | null>(null)
@@ -74,28 +72,28 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
     const url = new URL(window.location.href)
     url.search = new URLSearchParams({ view: 'compact', device: device.deviceId, mode }).toString()
     const popup = window.open('about:blank', '_blank', 'popup,width=324,height=760')
-    if (!popup) { setPopupBlocked(true); return }
+    if (!popup) {
+      toast.add({ title: '浏览器阻止了小窗', description: '允许此网站打开弹窗后，再点击“独立小窗”。', type: 'error', timeout: 0, actionProps: { children: '重新打开', onClick: openCompact } })
+      return
+    }
     popup.opener = null
     popup.location.replace(url)
-    setPopupBlocked(false)
   }
 
   const runCommand = async (type: string, payload: Record<string, unknown> = {}) => {
     if (!canControl || actionBusy) return false
     setActionBusy(true)
-    setActionError('')
     try {
       const reply = await session.command(type, payload)
       if (!['succeeded', 'waiting-key-frame', 'dispatched'].includes(reply.status)) throw new Error(reply.message || reply.code || `设备拒绝了 ${reply.type} 操作（${reply.status}）`)
       return true
-    } catch (error) { setActionError(errorMessage(error)); return false }
+    } catch (error) { toast.add({ title: '设备操作未完成', description: errorMessage(error), type: 'error', timeout: 0 }); return false }
     finally { setActionBusy(false) }
   }
 
   const pressVolume = async (keyCode: number) => {
     if (!canControl || actionBusy) return
     setActionBusy(true)
-    setActionError('')
     try {
       const down = await session.command('key', { keyCode, action: 0 })
       if (!['succeeded', 'waiting-key-frame', 'dispatched'].includes(down.status)) throw new Error(down.message || down.code || `设备拒绝了按键（${down.status}）`)
@@ -103,22 +101,21 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
       if (!['succeeded', 'waiting-key-frame', 'dispatched'].includes(up.status)) throw new Error(up.message || up.code || `设备拒绝了按键（${up.status}）`)
     } catch (error) {
       session.release()
-      setActionError(errorMessage(error))
+      toast.add({ title: '按键操作未完成', description: errorMessage(error), type: 'error', timeout: 0 })
     } finally { setActionBusy(false) }
   }
 
   const takeScreenshot = async () => {
     if (!session.sessionId) return
-    setActionError('')
     try { await downloadScreenshot(session.sessionId) }
-    catch (error) { setActionError(errorMessage(error)) }
+    catch (error) { toast.add({ title: '截图失败', description: errorMessage(error), type: 'error', timeout: 0 }) }
   }
 
   const requestFullscreen = async () => {
     const container = videoAreaRef.current
     if (!container) return
     try { await container.requestFullscreen() }
-    catch (error) { setActionError(errorMessage(error)) }
+    catch (error) { toast.add({ title: '无法进入全屏', description: errorMessage(error), type: 'error', timeout: 0 }) }
   }
 
   const stateLabel = device.connectionState !== 'online'
@@ -143,7 +140,6 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
           <Button variant="outline" onClick={openCompact}><ExternalLink data-icon="inline-start" />独立小窗</Button>
         </div>
       </div>
-      {popupBlocked && <Alert variant="destructive"><AlertTitle>浏览器阻止了小窗</AlertTitle><AlertDescription>允许此网站打开弹窗后，再点击“独立小窗”。</AlertDescription></Alert>}
       <div className="grid grid-cols-[88px_minmax(0,1fr)] items-start gap-3 md:grid-cols-[220px_minmax(0,1fr)] md:gap-5">
         <aside className="sticky top-4 min-w-0" aria-label="设备预览列表">
           <ToggleGroup orientation="vertical" variant="outline" className="max-h-[calc(100svh-160px)] w-full flex-col overflow-y-auto" value={[device.deviceId]} onValueChange={value => {
@@ -193,7 +189,6 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
               <Button size="icon-lg" variant="ghost" disabled={!canControl || actionBusy} aria-label="重置视频" title="重置视频" onClick={() => void runCommand('resetVideo')}><RefreshCw /></Button>
               <Button size="icon-lg" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={() => { setSessionAllowed(false); window.setTimeout(() => setSessionAllowed(true), 0) }}><RotateCw /></Button>
             </div>
-            {actionError && <Alert variant="destructive" className="mx-3 mb-3"><AlertDescription>{actionError}</AlertDescription></Alert>}
           </section>
           <div className="flex min-w-0 flex-col gap-4">
             <Card>

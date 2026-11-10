@@ -249,6 +249,11 @@ func (r *Registry) watch() {
 
 func (r *Registry) publish(devices []adb.Device, epoch context.Context) {
 	r.mu.Lock()
+	r.publishLocked(devices, epoch)
+	r.mu.Unlock()
+}
+
+func (r *Registry) publishLocked(devices []adb.Device, epoch context.Context) {
 	r.version++
 	r.ready = true
 	r.epoch = epoch
@@ -271,7 +276,31 @@ func (r *Registry) publish(devices []adb.Device, epoch context.Context) {
 		}
 	}
 	r.enqueueLocked()
-	r.mu.Unlock()
+}
+
+// A manual refresh keeps the tracker's lifetime and never overwrites a newer
+// inventory generation with the result of a slower one-shot query.
+func (r *Registry) refreshInventory(ctx context.Context) error {
+	r.mu.RLock()
+	ready, epoch, version := r.ready, r.epoch, r.version
+	r.mu.RUnlock()
+	if !ready {
+		return &Error{Code: "ADB_UNAVAILABLE", Message: "ADB 设备发现尚未就绪", Status: 503}
+	}
+	devices, err := r.client.Devices(ctx)
+	if err != nil {
+		return &Error{Code: "ADB_UNAVAILABLE", Message: "无法读取 ADB 最新设备状态", Status: 503, Cause: err}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.ready || epoch.Err() != nil {
+		return &Error{Code: "ADB_UNAVAILABLE", Message: "ADB 设备发现连接已中断", Status: 503}
+	}
+	if r.version != version {
+		return &Error{Code: "DEVICE_STATE_CHANGED", Message: "设备状态已变化，请重新同步", Status: 409}
+	}
+	r.publishLocked(devices, epoch)
+	return nil
 }
 
 func (r *Registry) enqueueLocked() {

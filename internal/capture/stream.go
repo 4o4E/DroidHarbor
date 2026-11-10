@@ -14,7 +14,7 @@ import (
 	"droidharbor/internal/scrcpy"
 )
 
-var ErrResultUnknown = errors.New("scrcpy control result unknown")
+var ErrResultUnknown = diagnostics.New("scrcpy control result unknown")
 
 func (s *Stream) ID() string                            { return s.id }
 func (s *Stream) Link() leases.Link                     { return s.link }
@@ -26,10 +26,10 @@ func (s *Stream) cleanupError() error                   { s.mu.Lock(); defer s.m
 
 func (s *Stream) Send(ctx context.Context, msg scrcpy.ControlMessage, authorizeOperation func() error) error {
 	if ctx == nil {
-		return errors.New("capture operation context is required")
+		return diagnostics.New("capture operation context is required")
 	}
 	if authorizeOperation == nil {
-		return errors.New("capture operation authorization is required")
+		return diagnostics.New("capture operation authorization is required")
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -53,7 +53,7 @@ func (s *Stream) Send(ctx context.Context, msg scrcpy.ControlMessage, authorizeO
 		return err
 	}
 	if s.control == nil {
-		return errors.New("capture control socket is closed")
+		return diagnostics.New("capture control socket is closed")
 	}
 	payload, err := scrcpy.AppendControl(s.controlBuffer[:0], msg)
 	if err != nil {
@@ -195,7 +195,7 @@ func (s *Stream) requestStop(err error) {
 func (s *Stream) finish(ctx context.Context) error {
 	if ctx == nil {
 		s.scheduleFinalizer()
-		return errors.New("capture cleanup context is required")
+		return diagnostics.New("capture cleanup context is required")
 	}
 	for {
 		select {
@@ -301,7 +301,7 @@ func (s *Stream) readMessages() {
 		case <-s.ctx.Done():
 			return
 		default:
-			s.requestStop(errors.New("capture device-message consumer exceeded bounded queue"))
+			s.requestStop(diagnostics.New("capture device-message consumer exceeded bounded queue"))
 			go s.finishAsync()
 			return
 		}
@@ -331,12 +331,12 @@ func (s *Stream) drainShell() {
 					exitCode = int(packet.Data[0])
 				}
 				s.manager.logger.Warn("scrcpy_server_exited", "deviceId", s.deviceID, "captureId", s.id, "exitCode", exitCode)
-				s.requestStop(errors.New("foreground scrcpy shell exited"))
+				s.requestStop(diagnostics.New("foreground scrcpy shell exited"))
 				go s.finishAsync()
 			}
 			return
 		default:
-			s.requestStop(errors.New("foreground shell sent a client-only shell-v2 packet"))
+			s.requestStop(diagnostics.New("foreground shell sent a client-only shell-v2 packet"))
 			go s.finishAsync()
 			return
 		}

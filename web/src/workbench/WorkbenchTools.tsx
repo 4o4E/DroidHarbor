@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
@@ -9,6 +9,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { api, apiResponse, ApiError, errorMessage } from '@/lib/api'
 import { useVideoSettings } from '@/lib/queries'
+import { useErrorNotification } from '@/lib/notifications'
 import type { Device, SessionMode, Transfer, VideoParameters, VideoSnapshot } from '@/lib/types'
 import type { MediaSession } from '@/media/types'
 import { Clipboard, FileUp, Keyboard, Settings2 } from 'lucide-react'
@@ -33,14 +34,10 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
   const [dirty, setDirty] = useState<Partial<VideoParameters>>({})
   const [baseRevision, setBaseRevision] = useState<number | null>(null)
   const [saving, setSaving] = useState(false)
-  const [qualityError, setQualityError] = useState('')
-  const [qualityConflict, setQualityConflict] = useState(false)
   const [text, setText] = useState('')
   const [clipboardText, setClipboardText] = useState('')
   const [clipboardRead, setClipboardRead] = useState(false)
   const [commandBusy, setCommandBusy] = useState(false)
-  const [commandError, setCommandError] = useState('')
-  const [commandFeedback, setCommandFeedback] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const [purpose, setPurpose] = useState<'file' | 'apk'>('file')
@@ -50,9 +47,26 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
   const [uploadBusy, setUploadBusy] = useState(false)
   const [cancelBusy, setCancelBusy] = useState(false)
   const [refreshBusy, setRefreshBusy] = useState(false)
-  const [transferError, setTransferError] = useState('')
+  const [transferError, setTransferError] = useState<unknown>(null)
   const uploadController = useRef<AbortController | null>(null)
   const transferQueryController = useRef<AbortController | null>(null)
+  const lastTransferNotice = useRef('')
+  useErrorNotification('无法读取画质设置', settings.error)
+  useErrorNotification('无法读取传输状态', transferError)
+
+  useEffect(() => {
+    if (!transfer || !terminalTransfer(transfer)) return
+    const key = `${transfer.transferId}:${transfer.state}`
+    if (lastTransferNotice.current === key) return
+    lastTransferNotice.current = key
+    const failed = transfer.state === 'failed' || transfer.state === 'unknown'
+    toast.add({
+      title: `传输结果：${transferStateLabels[transfer.state]}`,
+      description: transfer.error || transfer.result || undefined,
+      type: failed ? 'error' : transfer.state === 'succeeded' ? 'success' : 'info',
+      timeout: failed ? 0 : undefined,
+    })
+  }, [transfer])
 
   useEffect(() => {
     if (settings.data && Object.keys(dirty).length === 0) setDraft(settings.data.requested)
@@ -68,10 +82,10 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
         const next = await api<Transfer>(`/transfers/${encodeURIComponent(transfer.transferId)}`, { signal: controller.signal })
         if (active) {
           setTransfer(next)
-          setTransferError('')
+          setTransferError(null)
         }
       } catch (error) {
-        if (active && !controller.signal.aborted) setTransferError(errorMessage(error))
+        if (active && !controller.signal.aborted) setTransferError(error)
       } finally {
         if (active && !controller.signal.aborted) timer = window.setTimeout(() => void refresh(), 1000)
       }
@@ -96,14 +110,11 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
       else changed[key] = next[key]
       return changed
     })
-    setQualityConflict(false)
-    setQualityError('')
   }
 
   const saveQuality = async () => {
     if (!settings.data || !Object.keys(dirty).length || mode !== 'control' || !session.sessionId) return
     setSaving(true)
-    setQualityError('')
     try {
       const snapshot = await api<VideoSnapshot>(`/devices/${encodeURIComponent(device.deviceId)}/video-settings`, {
         method: 'PATCH', body: { sessionId: session.sessionId, revision: baseRevision ?? settings.data.revision, ...dirty },
@@ -112,35 +123,32 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
       setDraft(snapshot.requested)
       setDirty({})
       setBaseRevision(null)
-      setQualityConflict(false)
+      toast.add({ title: '画质设置已提交', type: 'success' })
     } catch (error) {
-      setQualityError(errorMessage(error))
-      if (error instanceof ApiError && error.status === 409) setQualityConflict(true)
+      toast.add({
+        title: '画质设置未完成', description: errorMessage(error), type: 'error', timeout: 0,
+        actionProps: error instanceof ApiError && error.status === 409 ? { children: '读取最新设置', onClick: () => void refreshQuality() } : undefined,
+      })
     } finally { setSaving(false) }
   }
 
   const refreshQuality = async () => {
-    setQualityError('')
     try {
       await settings.refetch({ throwOnError: true })
       setDirty({})
       setBaseRevision(null)
-      setQualityConflict(false)
-    } catch (error) { setQualityError(errorMessage(error)) }
+      toast.add({ title: '画质设置已重新读取', type: 'success' })
+    } catch (error) { toast.add({ title: '无法读取画质设置', description: errorMessage(error), type: 'error', timeout: 0 }) }
   }
 
   const command = async (type: string, payload?: Record<string, unknown>) => {
     setCommandBusy(true)
-    setCommandError('')
-    setCommandFeedback('')
     try {
       const reply = await session.command(type, payload)
       if (!['succeeded', 'waiting-key-frame', 'dispatched', 'received', 'acknowledged'].includes(reply.status)) throw new Error(reply.message || reply.code || `设备拒绝了 ${reply.type} 操作（${reply.status}）`)
-      setCommandFeedback(reply.status === 'dispatched' ? '命令已派发，尚未确认手机端完成。' : reply.status === 'acknowledged' ? '设备已确认收到命令；这不表示目标应用已应用内容。' : reply.status === 'received' ? '已收到设备剪贴板内容。' : '')
+      const feedback = reply.status === 'dispatched' ? '命令已派发，尚未确认手机端完成。' : reply.status === 'acknowledged' ? '设备已确认收到命令；这不表示目标应用已应用内容。' : reply.status === 'received' ? '已收到设备剪贴板内容。' : ''
+      if (feedback) toast.add({ title: '设备操作', description: feedback, type: 'info' })
       return reply
-    } catch (error) {
-      setCommandError(errorMessage(error))
-      throw error
     } finally { setCommandBusy(false) }
   }
 
@@ -149,7 +157,7 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
     const controller = new AbortController()
     uploadController.current = controller
     setUploadBusy(true)
-    setTransferError('')
+    setTransferError(null)
     try {
       const created = await api<Transfer>(`/sessions/${encodeURIComponent(session.sessionId)}/transfers`, {
         method: 'POST', body: {
@@ -173,7 +181,7 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
       setFile(null)
       if (fileInput.current) fileInput.current.value = ''
     } catch (error) {
-      if (!controller.signal.aborted) setTransferError(errorMessage(error))
+      if (!controller.signal.aborted) toast.add({ title: '上传或传输未完成', description: errorMessage(error), type: 'error', timeout: 0 })
     } finally {
       if (uploadController.current === controller) uploadController.current = null
       setUploadBusy(false)
@@ -187,27 +195,25 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
     const controller = new AbortController()
     transferQueryController.current = controller
     setCancelBusy(true)
-    setTransferError('')
+    setTransferError(null)
     try {
       await api<void>(`/transfers/${encodeURIComponent(transfer.transferId)}`, { method: 'DELETE' })
       if (controller.signal.aborted) return
       const next = await api<Transfer>(`/transfers/${encodeURIComponent(transfer.transferId)}`, { signal: controller.signal })
       if (!controller.signal.aborted) setTransfer(next)
     } catch (error) {
-      if (!controller.signal.aborted) setTransferError(errorMessage(error))
+      if (!controller.signal.aborted) toast.add({ title: '取消状态未确认', description: errorMessage(error), type: 'error', timeout: 0 })
     } finally {
       if (transferQueryController.current === controller) transferQueryController.current = null
       setCancelBusy(false)
     }
   }
   const copyPhoneClipboardToBrowser = async () => {
-    setCommandError('')
-    setCommandFeedback('')
     try {
       if (!navigator.clipboard?.writeText) throw new Error('当前浏览器不支持复制到系统剪贴板。')
       await navigator.clipboard.writeText(clipboardText)
-      setCommandFeedback('设备剪贴板内容已复制到电脑剪贴板。')
-    } catch (error) { setCommandError(errorMessage(error)) }
+      toast.add({ title: '设备文本已复制到电脑剪贴板', type: 'success' })
+    } catch (error) { toast.add({ title: '复制到电脑剪贴板失败', description: errorMessage(error), type: 'error', timeout: 0 }) }
   }
 
 
@@ -217,12 +223,12 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
     const controller = new AbortController()
     transferQueryController.current = controller
     setRefreshBusy(true)
-    setTransferError('')
+    setTransferError(null)
     try {
       const next = await api<Transfer>(`/transfers/${encodeURIComponent(transfer.transferId)}`, { signal: controller.signal })
       if (!controller.signal.aborted) setTransfer(next)
     } catch (error) {
-      if (!controller.signal.aborted) setTransferError(errorMessage(error))
+      if (!controller.signal.aborted) toast.add({ title: '无法读取传输结果', description: errorMessage(error), type: 'error', timeout: 0 })
     } finally {
       if (transferQueryController.current === controller) transferQueryController.current = null
       setRefreshBusy(false)
@@ -242,31 +248,26 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
       <TabsContent value="quality" className="pt-4">
         <FieldGroup>
           {settings.isLoading && <p className="text-sm text-muted-foreground">正在读取画质设置…</p>}
-          {settings.isError && <Alert variant="destructive"><AlertDescription>{errorMessage(settings.error)}</AlertDescription></Alert>}
           {parameters && <>
             <Field><FieldLabel htmlFor="resolution">长边上限 <span className="ml-auto tabular-nums">{parameters.maxSize} px</span></FieldLabel><Slider id="resolution" aria-label="长边上限" value={[parameters.maxSize]} min={480} max={2560} step={16} disabled={readonly || saving} onValueChange={value => editQuality('maxSize', Array.isArray(value) ? value[0] : value)} /><FieldDescription>保持手机画面比例</FieldDescription></Field>
             <Field><FieldLabel htmlFor="fps">帧率上限 <span className="ml-auto tabular-nums">{parameters.maxFps} fps</span></FieldLabel><Slider id="fps" aria-label="帧率上限" value={[parameters.maxFps]} min={5} max={60} step={1} disabled={readonly || saving} onValueChange={value => editQuality('maxFps', Array.isArray(value) ? value[0] : value)} /></Field>
             <Field><FieldLabel htmlFor="bitrate">目标码率 <span className="ml-auto tabular-nums">{(parameters.bitRate / 1_000_000).toFixed(1)} Mbps</span></FieldLabel><Slider id="bitrate" aria-label="目标码率" value={[Math.min(12, Math.max(1, parameters.bitRate / 1_000_000))]} min={1} max={12} step={1} disabled={readonly || saving} onValueChange={value => editQuality('bitRate', (Array.isArray(value) ? value[0] : value) * 1_000_000)} /><FieldDescription>修改将影响此设备的所有观看者</FieldDescription></Field>
             {current?.effective && <p className="text-xs text-muted-foreground">实际 {current.effective.width} × {current.effective.height} · {current.effective.framesPerSecond.toFixed(1)} fps · {(current.effective.encodedBitsPerSecond / 1_000_000).toFixed(2)} Mbps</p>}
             {current && <p className="text-xs text-muted-foreground">采集状态：{captureStatusLabels[current.status]}{current.errorCode ? ` · ${current.errorCode}` : ''}</p>}
-            {qualityError && <Alert variant="destructive"><AlertDescription>{qualityError}</AlertDescription></Alert>}
-            {qualityConflict && <Button type="button" variant="outline" onClick={() => void refreshQuality()}>读取最新设置</Button>}
             <Button type="button" disabled={readonly || saving || !dirtyKeys} onClick={() => void saveQuality()}>{saving ? '正在应用…' : '应用到设备'}</Button>
           </>}
         </FieldGroup>
       </TabsContent>
       <TabsContent value="text" className="pt-4"><FieldGroup>
         <Field><FieldLabel htmlFor="device-text">发送文本</FieldLabel><Input id="device-text" value={text} onChange={event => setText(event.currentTarget.value)} placeholder="输入或粘贴文本" disabled={readonly || commandBusy} /><FieldDescription>发送前请选中手机输入框</FieldDescription></Field>
-        {commandError && <Alert variant="destructive"><AlertDescription>{commandError}</AlertDescription></Alert>}
-        {commandFeedback && <p className="text-sm text-muted-foreground" aria-live="polite">{commandFeedback}</p>}
-        <Button type="button" disabled={readonly || commandBusy || !text} onClick={() => void command('text', { text }).then(reply => { if (reply.status === 'dispatched' || reply.payload?.applied === true) setText('') }).catch(() => undefined)}><Keyboard data-icon="inline-start" />发送到设备</Button>
-        <Button type="button" variant="outline" disabled={readonly || commandBusy} onClick={() => void command('clipboard.get', {}).then(reply => { const received = reply.payload?.text; if (typeof received === 'string') { setClipboardText(received); setClipboardRead(true) } }).catch(() => undefined)}>读取手机剪贴板</Button>
+        <Button type="button" disabled={readonly || commandBusy || !text} onClick={() => void command('text', { text }).then(reply => { if (reply.status === 'dispatched' || reply.payload?.applied === true) setText('') }).catch(reportCommandError)}><Keyboard data-icon="inline-start" />发送到设备</Button>
+        <Button type="button" variant="outline" disabled={readonly || commandBusy} onClick={() => void command('clipboard.get', {}).then(reply => { const received = reply.payload?.text; if (typeof received === 'string') { setClipboardText(received); setClipboardRead(true) } }).catch(reportCommandError)}>读取手机剪贴板</Button>
         <Field>
           <FieldLabel htmlFor="clipboard-input">设备剪贴板文本</FieldLabel>
           <Input id="clipboard-input" value={clipboardText} onChange={event => setClipboardText(event.currentTarget.value)} disabled={readonly || commandBusy} />
           <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" disabled={readonly || commandBusy} onClick={() => void command('clipboard.set', { text: clipboardText }).catch(() => undefined)}>写入手机剪贴板</Button>
-            <Button type="button" variant="outline" disabled={readonly || commandBusy || !clipboardText} onClick={() => void command('clipboard.paste', { text: clipboardText }).catch(() => undefined)}>粘贴到设备</Button>
+            <Button type="button" variant="outline" disabled={readonly || commandBusy} onClick={() => void command('clipboard.set', { text: clipboardText }).catch(reportCommandError)}>写入手机剪贴板</Button>
+            <Button type="button" variant="outline" disabled={readonly || commandBusy || !clipboardText} onClick={() => void command('clipboard.paste', { text: clipboardText }).catch(reportCommandError)}>粘贴到设备</Button>
             {clipboardRead && <Button type="button" variant="outline" onClick={() => void copyPhoneClipboardToBrowser()}>复制文本到电脑剪贴板</Button>}
           </div>
           <FieldDescription>粘贴前先在设备画面中选中输入框；写入时留空可清空手机剪贴板。</FieldDescription>
@@ -287,7 +288,6 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
           {transfer.result && <p>{transfer.result}</p>}{transfer.error && <p className="text-destructive">{transfer.error}</p>}
           {transfer.stdout && <pre className="max-h-24 overflow-auto whitespace-pre-wrap">{transfer.stdout}</pre>}{transfer.stderr && <pre className="max-h-24 overflow-auto whitespace-pre-wrap text-destructive">{transfer.stderr}</pre>}
         </div>}
-        {transferError && <Alert variant="destructive"><AlertTitle>传输状态</AlertTitle><AlertDescription>{transferError}</AlertDescription></Alert>}
         <div className="flex flex-wrap gap-2"><Button type="button" disabled={transferLocked || !file} onClick={() => void startTransfer()}><FileUp data-icon="inline-start" />{uploadBusy ? '正在上传…' : refreshBusy ? '正在读取状态…' : purpose === 'apk' ? '上传并安装 APK' : '上传文件'}</Button>
           {transfer && !terminalTransfer(transfer) && <Button type="button" variant="outline" disabled={cancelBusy} onClick={() => void cancelTransfer()}>{cancelBusy ? '正在取消…' : '取消后续传输'}</Button>}
           {transfer && <Button type="button" variant="outline" disabled={refreshBusy || cancelBusy} onClick={() => void refreshTransfer()}>{refreshBusy ? '正在刷新…' : '刷新结果'}</Button>}
@@ -295,4 +295,8 @@ export function WorkbenchTools({ device, mode, session }: WorkbenchToolsProps) {
       </FieldGroup></TabsContent>
     </Tabs>
   )
+}
+
+function reportCommandError(error: unknown) {
+  toast.add({ title: '设备操作未完成', description: errorMessage(error), type: 'error', timeout: 0 })
 }

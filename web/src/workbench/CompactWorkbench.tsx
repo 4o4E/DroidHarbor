@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Camera, ChevronLeft, Circle, Expand, Monitor, RotateCw, Square, Unplug, X, ZoomIn, ZoomOut } from 'lucide-react'
-import { Alert, AlertAction, AlertDescription } from '@/components/ui/alert'
+import { Camera, ChevronLeft, Circle, Expand, Monitor, RotateCw, Square, Unplug, ZoomIn, ZoomOut } from 'lucide-react'
+import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { VideoSurface } from '@/media/VideoSurface'
@@ -10,6 +10,7 @@ import { useDevices, usePlatformEvents } from '@/lib/queries'
 import { deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { errorMessage } from '@/lib/api'
 import { downloadScreenshot } from '@/lib/screenshots'
+import { useErrorNotification } from '@/lib/notifications'
 
 type CompactWorkbenchProps = { initialDeviceId: string | null; initialMode: string | null }
 
@@ -17,10 +18,11 @@ export function CompactWorkbench({ initialDeviceId, initialMode }: CompactWorkbe
   const { session, loading: authLoading, error: authError } = useAuth()
   const devicesQuery = useDevices()
   const events = usePlatformEvents()
-  const [resizeError, setResizeError] = useState('')
   const invalidMode = initialMode !== null && initialMode !== 'readonly' && initialMode !== 'control'
   const device = devicesQuery.data?.find(item => item.deviceId === initialDeviceId)
   const mode: SessionMode = initialMode === 'control' ? 'control' : 'readonly'
+  useErrorNotification('设备状态通知异常', events.error)
+  useErrorNotification('无法读取设备', devicesQuery.error)
 
   useEffect(() => {
     document.title = device && !invalidMode ? `${deviceName(device)}${mode === 'control' ? '' : ' · 只读'}` : '页面不可用'
@@ -32,18 +34,17 @@ export function CompactWorkbench({ initialDeviceId, initialMode }: CompactWorkbe
   if (devicesQuery.isError) return <Unavailable invalidMode={false} message={errorMessage(devicesQuery.error)} />
   if (!device) return <Unavailable invalidMode={false} message="没有找到指定设备，请从设备池选择设备。" />
 
-  return <CompactSession key={device.deviceId} device={device} mode={mode} resizeError={resizeError} setResizeError={setResizeError} eventStatus={events.status} />
+  return <CompactSession key={device.deviceId} device={device} mode={mode} />
 }
 
 function Unavailable({ invalidMode, message }: { invalidMode: boolean; message?: string }) {
   return <main className="p-4"><Empty className="border"><EmptyHeader><EmptyMedia variant="icon"><Unplug /></EmptyMedia><EmptyTitle>无法打开工作台</EmptyTitle><EmptyDescription>{message || (invalidMode ? '查看模式无效，请从设备池重新打开。' : '没有找到指定设备，请从设备池选择设备。')}</EmptyDescription></EmptyHeader><EmptyContent><Button nativeButton={false} render={<a href="/" />} variant="outline">返回设备池</Button></EmptyContent></Empty></main>
 }
 
-function CompactSession({ device, mode, resizeError, setResizeError, eventStatus }: { device: Device; mode: SessionMode; resizeError: string; setResizeError: (value: string) => void; eventStatus: string }) {
+function CompactSession({ device, mode }: { device: Device; mode: SessionMode }) {
   const [sessionAllowed, setSessionAllowed] = useState(true)
   const hasBeenOnline = useRef(device.connectionState === 'online')
   const needsVerification = deviceNeedsVerification(device)
-  const [actionError, setActionError] = useState('')
   const [busy, setBusy] = useState(false)
   const cancelResize = useRef<(() => void) | null>(null)
   const screenAreaRef = useRef<HTMLDivElement | null>(null)
@@ -73,7 +74,6 @@ function CompactSession({ device, mode, resizeError, setResizeError, eventStatus
 
   const resizeWindow = (fraction: number) => {
     cancelResize.current?.()
-    setResizeError('')
     const chromeWidth = Math.max(0, window.outerWidth - window.innerWidth)
     const chromeHeight = Math.max(0, window.outerHeight - window.innerHeight)
     const maximumPictureHeight = Math.min(
@@ -84,7 +84,7 @@ function CompactSession({ device, mode, resizeError, setResizeError, eventStatus
     const width = Math.round(pictureHeight * ratio)
     const height = pictureHeight + 40
     if (pictureHeight < 120 || width + chromeWidth > window.screen.availWidth) {
-      setResizeError('当前屏幕可用空间不足，无法调整到该尺寸。')
+      toast.add({ title: '无法调整小窗尺寸', description: '当前屏幕可用空间不足，无法调整到该尺寸。', type: 'error', timeout: 0 })
       return
     }
     const finish = () => {
@@ -97,7 +97,7 @@ function CompactSession({ device, mode, resizeError, setResizeError, eventStatus
     }
     const timer = window.setTimeout(() => {
       finish()
-      if (Math.abs(window.innerWidth - width) > 2 || Math.abs(window.innerHeight - height) > 2) setResizeError('浏览器未允许调整到目标尺寸。可手动调整窗口，或从工作台重新打开小窗。')
+      if (Math.abs(window.innerWidth - width) > 2 || Math.abs(window.innerHeight - height) > 2) toast.add({ title: '无法调整小窗尺寸', description: '浏览器未允许调整到目标尺寸。可手动调整窗口，或从工作台重新打开小窗。', type: 'error', timeout: 0 })
     }, 1000)
     cancelResize.current = finish
     window.addEventListener('resize', observeResize)
@@ -108,20 +108,18 @@ function CompactSession({ device, mode, resizeError, setResizeError, eventStatus
   const runCommand = async (type: string) => {
     if (!canControl || busy) return
     setBusy(true)
-    setActionError('')
     try {
       const reply = await session.command(type, {})
       if (!['succeeded', 'waiting-key-frame', 'dispatched'].includes(reply.status)) throw new Error(reply.message || reply.code || `设备拒绝了 ${reply.type} 操作（${reply.status}）`)
     }
-    catch (error) { setActionError(errorMessage(error)) }
+    catch (error) { toast.add({ title: '设备操作未完成', description: errorMessage(error), type: 'error', timeout: 0 }) }
     finally { setBusy(false) }
   }
 
   const screenshot = async () => {
     if (!session.sessionId) return
-    setActionError('')
     try { await downloadScreenshot(session.sessionId) }
-    catch (error) { setActionError(errorMessage(error)) }
+    catch (error) { toast.add({ title: '截图失败', description: errorMessage(error), type: 'error', timeout: 0 }) }
   }
 
   return (
@@ -133,9 +131,6 @@ function CompactSession({ device, mode, resizeError, setResizeError, eventStatus
             {!session.ready && <div className="pointer-events-none absolute inset-0 flex items-center justify-center"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState === 'online' ? session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{needsVerification ? '在主页面核验设备身份后即可投屏。' : session.error || deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
           </div>
         </div>
-        {resizeError && <Alert variant="destructive"><AlertDescription>{resizeError}</AlertDescription><AlertAction><Button size="icon-xs" variant="ghost" aria-label="关闭提示" onClick={() => setResizeError('')}><X /></Button></AlertAction></Alert>}
-        {(actionError || session.error) && <Alert variant="destructive"><AlertDescription>{actionError || session.error}</AlertDescription></Alert>}
-        {eventStatus === 'disconnected' && <Alert variant="destructive"><AlertDescription>设备状态事件暂时断开，当前画面状态可能不是最新。</AlertDescription></Alert>}
         <div className="flex h-10 shrink-0 items-center overflow-x-auto border-t px-2" aria-label="小窗底部操作">
           <div className="mx-auto flex shrink-0 items-center gap-1">
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>

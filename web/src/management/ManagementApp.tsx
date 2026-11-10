@@ -7,9 +7,11 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { toast } from '@/components/ui/toast'
 import { useAuth } from '@/lib/auth'
-import { errorMessage } from '@/lib/api'
+import { api, errorMessage } from '@/lib/api'
 import { useDevices, usePlatformEvents } from '@/lib/queries'
+import { useErrorNotification } from '@/lib/notifications'
 import type { Device, SessionMode } from '@/lib/types'
 import { AdminLogin } from './AdminLogin'
 import { CallersPanel } from './CallersPanel'
@@ -36,17 +38,37 @@ function AuthenticatedManagement() {
   const [managedDeviceId, setManagedDeviceId] = useState<string | null>(null)
   const [deviceDialogOpen, setDeviceDialogOpen] = useState(false)
   const [addDeviceOpen, setAddDeviceOpen] = useState(false)
-  const [logoutError, setLogoutError] = useState('')
+  const [syncingDeviceId, setSyncingDeviceId] = useState<string | null>(null)
   const selectedDevice = devices.data?.find(device => device.deviceId === selectedId) ?? null
   const managedDevice = devices.data?.find(device => device.deviceId === managedDeviceId) ?? null
+  useErrorNotification('状态通知异常', events.error)
+  useErrorNotification('无法读取设备', devices.error)
 
   async function handleLogout() {
-    setLogoutError('')
     try {
       await logout()
     } catch (error) {
-      setLogoutError(errorMessage(error))
+      toast.add({ title: '退出登录未确认', description: errorMessage(error), type: 'error', timeout: 0 })
     }
+  }
+
+  async function syncDevice(device: Device) {
+    if (syncingDeviceId) return
+    setSyncingDeviceId(device.deviceId)
+    let failure = ''
+    try {
+      await api<void>('/devices/' + encodeURIComponent(device.deviceId) + '/refresh', { method: 'POST' })
+    } catch (error) {
+      failure = errorMessage(error)
+    }
+    try {
+      await devices.refetch({ throwOnError: true })
+    } catch (error) {
+      failure += `${failure ? ' ' : ''}设备列表读取失败：${errorMessage(error)}`
+    }
+    if (failure) toast.add({ title: '状态同步未完成', description: failure, type: 'error', timeout: 0 })
+    else toast.add({ title: '设备状态已同步', type: 'success' })
+    setSyncingDeviceId(null)
   }
 
   function openWorkbench(device: Device) {
@@ -76,12 +98,10 @@ function AuthenticatedManagement() {
           </div>
         </header>
         <main className="mx-auto w-full max-w-[1440px] px-4 py-6 sm:px-8 sm:py-8">
-          {logoutError && <Alert variant="destructive" className="mb-6"><AlertTitle>退出登录未确认</AlertTitle><AlertDescription>{logoutError}</AlertDescription></Alert>}
-          {events.error && <Alert variant="destructive" className="mb-6"><AlertTitle>状态通知异常</AlertTitle><AlertDescription>{events.error}</AlertDescription></Alert>}
           {!devices.discoveryReady && !devices.isPending && <Alert variant="destructive" className="mb-6"><AlertTitle>设备发现源不可用</AlertTitle><AlertDescription>设备连接状态暂不可用。</AlertDescription></Alert>}
-          {devices.error && <Alert variant="destructive" className="mb-6"><AlertTitle>无法读取设备</AlertTitle><AlertDescription>{errorMessage(devices.error)}</AlertDescription><Button className="mt-3" variant="outline" size="sm" onClick={() => void devices.refetch()}><RefreshCw data-icon="inline-start" />重新读取</Button></Alert>}
+          {devices.isError && <Button className="mb-6" variant="outline" size="sm" onClick={() => void devices.refetch()}><RefreshCw data-icon="inline-start" />重新读取设备</Button>}
           <TabsContent value="devices" className="flex flex-col gap-6">
-            {devices.isPending ? <Card><CardHeader><CardTitle>正在读取设备池</CardTitle><CardDescription>设备加载中。</CardDescription></CardHeader></Card> : devices.data && <DevicePool devices={devices.data} onOpen={openWorkbench} onManage={device => { setManagedDeviceId(device.deviceId); setDeviceDialogOpen(true) }} onAdd={() => setAddDeviceOpen(true)} />}
+            {devices.isPending ? <Card><CardHeader><CardTitle>正在读取设备池</CardTitle><CardDescription>设备加载中。</CardDescription></CardHeader></Card> : devices.data && <DevicePool devices={devices.data} onOpen={openWorkbench} onManage={device => { setManagedDeviceId(device.deviceId); setDeviceDialogOpen(true) }} onAdd={() => setAddDeviceOpen(true)} onSync={device => void syncDevice(device)} syncingDeviceId={syncingDeviceId} />}
           </TabsContent>
           <TabsContent value="workbench">
             {selectedDevice ? <Workbench key={selectedDevice.deviceId} device={selectedDevice} devices={devices.data ?? []} onDeviceChange={changeWorkbenchDevice} mode={mode} onModeChange={setMode} onBack={() => setPage('devices')} /> : <Empty className="border"><EmptyHeader><EmptyMedia variant="icon"><Smartphone /></EmptyMedia><EmptyTitle>尚未选择设备</EmptyTitle><EmptyDescription>从设备池选择一台设备后进入工作台。</EmptyDescription></EmptyHeader><Button variant="outline" onClick={() => setPage('devices')}>返回设备池</Button></Empty>}

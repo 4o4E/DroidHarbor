@@ -1,18 +1,20 @@
 import { useState, type FormEvent } from 'react'
-import { KeyRound, ShieldCheck } from 'lucide-react'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { ShieldCheck } from 'lucide-react'
+import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/auth'
 import { errorMessage } from '@/lib/api'
+import { useErrorNotification } from '@/lib/notifications'
 
 export function AdminLogin() {
   const { login, error: restoreError } = useAuth()
   const [token, setToken] = useState('')
   const [failure, setFailure] = useState('')
   const [pending, setPending] = useState(false)
+  useErrorNotification('无法恢复管理员会话', restoreError)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -23,7 +25,9 @@ export function AdminLogin() {
       await login(token.trim())
       setToken('')
     } catch (error) {
-      setFailure(errorMessage(error))
+      const message = errorMessage(error)
+      setFailure(message)
+      toast.add({ title: '无法登录', description: message, type: 'error', timeout: 0 })
     } finally {
       setPending(false)
     }
@@ -38,7 +42,6 @@ export function AdminLogin() {
           <CardDescription>使用管理员访问令牌建立安全会话。</CardDescription>
         </CardHeader>
         <CardContent>
-          {(failure || restoreError) && <Alert variant="destructive" className="mb-4"><KeyRound /><AlertTitle>无法登录</AlertTitle><AlertDescription>{failure || restoreError}</AlertDescription></Alert>}
           <form onSubmit={submit}>
             <FieldGroup>
               <Field>

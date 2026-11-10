@@ -83,6 +83,7 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux.HandleFunc("POST /api/v1/devices/{id}/links/{linkId}/pair", s.pairDeviceLink)
 	mux.HandleFunc("POST /api/v1/devices/{id}/links/{linkId}/connect", s.connectDeviceLink)
 	mux.HandleFunc("POST /api/v1/devices/{id}/links/{linkId}/verify", s.verifyDeviceLink)
+	mux.HandleFunc("POST /api/v1/devices/{id}/refresh", s.refreshDevice)
 	mux.HandleFunc("POST /api/v1/devices/{id}/recover", s.recoverDevice)
 	mux.HandleFunc("POST /api/v1/leases", s.claimLease)
 	mux.HandleFunc("GET /api/v1/leases/{id}", s.getLease)

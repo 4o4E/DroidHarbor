@@ -3,10 +3,11 @@ package adb
 import (
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"droidharbor/internal/diagnostics"
 )
 
 const (
@@ -36,17 +37,17 @@ func ReadShellPacket(r io.Reader, scratch []byte, maxBytes uint32) (ShellPacket,
 	}
 	id := header[0]
 	if id != shellStdin && id != shellStdout && id != shellStderr && id != shellExit && id != shellCloseStdin && id != shellWindowSize {
-		return ShellPacket{}, errors.New("invalid shell_v2 packet id")
+		return ShellPacket{}, diagnostics.New("invalid shell_v2 packet id")
 	}
 	n := binary.LittleEndian.Uint32(header[1:])
 	if n > maxBytes || n > shellMaxPacket {
-		return ShellPacket{}, errors.New("shell_v2 packet exceeds limit")
+		return ShellPacket{}, diagnostics.New("shell_v2 packet exceeds limit")
 	}
 	if id == shellExit && n != 1 {
-		return ShellPacket{}, errors.New("invalid shell_v2 EXIT packet length")
+		return ShellPacket{}, diagnostics.New("invalid shell_v2 EXIT packet length")
 	}
 	if id == shellCloseStdin && n != 0 {
-		return ShellPacket{}, errors.New("invalid shell_v2 CLOSE_STDIN packet length")
+		return ShellPacket{}, diagnostics.New("invalid shell_v2 CLOSE_STDIN packet length")
 	}
 	if uint64(n) > uint64(cap(scratch)) {
 		scratch = make([]byte, int(n))
@@ -70,13 +71,13 @@ type ShellResult struct {
 // stdout and stderr never exceed maxOutput.
 func (c *Client) RunShell(ctx context.Context, transportID uint64, command string, maxOutput int64, authorize func() error) (ShellResult, error) {
 	if command == "" || strings.IndexByte(command, 0) >= 0 {
-		return ShellResult{}, errors.New("invalid shell command")
+		return ShellResult{}, diagnostics.New("invalid shell command")
 	}
 	if maxOutput < 0 {
-		return ShellResult{}, errors.New("invalid shell output limit")
+		return ShellResult{}, diagnostics.New("invalid shell output limit")
 	}
 	if authorize == nil {
-		return ShellResult{}, errors.New("ADB service authorization is required")
+		return ShellResult{}, diagnostics.New("ADB service authorization is required")
 	}
 	conn, err := c.Open(ctx, transportID, "shell,v2,raw:"+command, authorize)
 	if err != nil {
@@ -101,7 +102,7 @@ func (c *Client) RunShell(ctx context.Context, transportID uint64, command strin
 		switch packet.ID {
 		case shellStdout, shellStderr:
 			if int64(len(packet.Data)) > maxOutput-used {
-				return ShellResult{}, errors.New("shell_v2 output exceeds limit")
+				return ShellResult{}, diagnostics.New("shell_v2 output exceeds limit")
 			}
 			used += int64(len(packet.Data))
 			if packet.ID == shellStdout {
@@ -113,7 +114,7 @@ func (c *Client) RunShell(ctx context.Context, transportID uint64, command strin
 			result.ExitCode = packet.Data[0]
 			return result, nil
 		default:
-			return ShellResult{}, errors.New("unexpected shell_v2 packet")
+			return ShellResult{}, diagnostics.New("unexpected shell_v2 packet")
 		}
 	}
 }
@@ -121,7 +122,7 @@ func (c *Client) RunShell(ctx context.Context, transportID uint64, command strin
 // ShellQuote returns one single-quoted POSIX shell argument; it is not a command sanitizer.
 func ShellQuote(value string) (string, error) {
 	if strings.IndexByte(value, 0) >= 0 {
-		return "", errors.New("shell argument contains NUL")
+		return "", diagnostics.New("shell argument contains NUL")
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'", nil
 }

@@ -59,6 +59,60 @@ A newly claimed phone may retain its previous application, screen, login, and ba
 
 Do not assume apps were closed, accounts logged out, or UI reset. Platform lease cleanup revokes task access; it does not reset application state or guarantee that a program already started on the phone stops running. Consider possible continuing side effects.
 
+### Observe, launch and navigate an app
+
+Use the app package requested by the task. Resolve its current launcher instead of assuming a launcher icon position or a version-specific Activity:
+
+```text
+<adbBinary> <adbArgs...> shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p <package>
+<adbBinary> <adbArgs...> shell am start -W -n <resolved-package/activity>
+```
+
+Common package identities: Taobao `com.taobao.taobao`, Pinduoduo `com.xunmeng.pinduoduo`, Xianyu `com.taobao.idlefish`. A successful `am start` means Android accepted the launch, not that the intended app page or search results are ready. Read the foreground window and the actual page before the next action.
+
+If the phone is asleep, explicitly wake it when the task permits, then observe the restored interface before clicking:
+
+```text
+<adbBinary> <adbArgs...> shell input keyevent KEYCODE_WAKEUP
+<adbBinary> <adbArgs...> shell dumpsys power
+<adbBinary> <adbArgs...> shell dumpsys window
+```
+
+An immediate click can arrive before wake-up finishes. A black screenshot may represent a sleeping display; check current power/window state rather than treating a valid PNG as proof of a usable app screen. A credential lock requires the user's unlock action.
+
+Android's built-in `uiautomator dump` is usable through native shell and is distinct from the unsupported uiautomator2 framework. Choose a unique task-owned XML path:
+
+```text
+<adbBinary> <adbArgs...> shell uiautomator dump --compressed /data/local/tmp/droidharbor-<task-owned-random>-ui.xml
+<adbBinary> <adbArgs...> shell -T cat /data/local/tmp/droidharbor-<task-owned-random>-ui.xml
+<adbBinary> <adbArgs...> shell rm -f /data/local/tmp/droidharbor-<task-owned-random>-ui.xml
+```
+
+Verify that the XML exists and parses; an idle-state failure can occur without a useful nonzero `uiautomator` exit status. Animated pages can exceed the idle wait. Use a fresh screenshot to observe such a page rather than repeating an input or changing global animation settings. Keep hierarchy/screenshot data private, extract only task-relevant nodes, and remove only this task's XML files.
+
+Select controls from current text/content descriptions, class and bounds. Resource IDs are not always unique or present: Pinduoduo can reuse one ID across controls, and Xianyu's custom-rendered pages may expose descriptions without IDs. Use coordinates derived from the current observation for one action, then observe again. Dismiss a promotion only through its verified close control; distinguish it from coupon, purchase and chat actions.
+
+For example, native ASCII input and a tap are:
+
+```text
+<adbBinary> <adbArgs...> shell input text usb
+<adbBinary> <adbArgs...> shell input tap <current-x> <current-y>
+```
+
+Before submitting a search, read back the actual input field. The active IME can transform multiword input, and `input text` is not a general Unicode/Chinese input channel. Use ASCII only when it satisfies the requested query; required Chinese input needs an explicitly approved input method/channel. Preserve the user's keyboard settings and account state.
+
+Inspect the submitted query, visible product results and opened product details separately. App-specific deep links need the same page-level verification; successful intent resolution/launch alone does not prove the query was applied. If search or browsing reaches a login/authorization gate, request the user's login action and report that path as blocked. Device tags do not prove that an app login is still valid. Browsing authorization alone does not authorize orders, payments, messages, account switching or coupon redemption.
+
+### Keep the observation loop efficient
+
+- Resolve the launcher once per app/task and reuse it until the installed app changes or launch fails. Do not repeat package discovery before each navigation.
+- Start with a screenshot when page identity or visual state is the question. Request a UI hierarchy only when text, descriptions or bounds are needed; parse task-relevant nodes rather than printing the entire tree.
+- Reuse a verified locator while the same page, orientation and layout remain valid. Re-observe after navigation, overlays, scrolling or rotation; do not reuse stale coordinates across those changes.
+- Prefer one purposeful action followed by the smallest observation that proves its result. A search needs the actual input field checked before submit, then results checked; it does not need repeated full `dumpsys` output between each tap.
+- On a dynamic page where a hierarchy dump fails its idle wait, inspect a fresh screenshot instead of polling `uiautomator dump`. Do not replay the previous action or change animation settings to obtain a tree.
+- Query power/window state when a black image, wake-up or unexpected foreground page requires diagnosis, not on every step. Avoid fixed sleeps and repeated identical screenshots when the required state is already observable.
+
+
 ### Binary-safe screenshot and files
 
 Capture PNG bytes directly, never through text-oriented decoding or redirection. On Windows use `cmd.exe` native binary redirection, not legacy PowerShell `>`:
