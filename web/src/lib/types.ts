@@ -61,7 +61,11 @@ export interface Transfer {
 }
 export const deviceName = (device: Device) => device.displayName
 const allocationLabels: Record<AllocationState, string> = { available: '空闲', leased: 'AI 使用中', reclaiming: '回收中', quarantined: '已隔离', maintenance: '维护中' }
+export function deviceNeedsVerification(device: Device) {
+  return device.connectionState === 'offline' && device.links.some(link => link.connectionState === 'online' && !link.identityVerified)
+}
 export function deviceStatus(device: Device) {
+  if (deviceNeedsVerification(device)) return '待核验'
   if (device.connectionState === 'offline') return '离线'
   if (device.connectionState === 'unauthorized') return '未授权'
   return allocationLabels[device.allocationState]

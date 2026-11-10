@@ -10,7 +10,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { DevicePreview } from '@/devices/DevicePreview'
 import { VideoSurface } from '@/media/VideoSurface'
 import { useMediaSession } from '@/media/useMediaSession'
-import { deviceName, deviceStatus, type Device, type SessionMode } from '@/lib/types'
+import { deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { errorMessage } from '@/lib/api'
 import { WorkbenchTools } from './WorkbenchTools'
 import { downloadScreenshot } from '@/lib/screenshots'
@@ -33,7 +33,9 @@ export function Workbench(props: WorkbenchProps) {
 
 function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange, onBack }: WorkbenchProps) {
   const [popupBlocked, setPopupBlocked] = useState(false)
-  const [sessionAllowed, setSessionAllowed] = useState(device.connectionState === 'online')
+  const [sessionAllowed, setSessionAllowed] = useState(true)
+  const hasBeenOnline = useRef(device.connectionState === 'online')
+  const needsVerification = deviceNeedsVerification(device)
   const [lastPowerCommand, setLastPowerCommand] = useState<boolean | null>(null)
   const [displayRotation, setDisplayRotation] = useState(0)
   const [mirrored, setMirrored] = useState(false)
@@ -43,7 +45,11 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
   const [previewFrames, setPreviewFrames] = useState<Record<string, { capturedAt: string | null; linkGeneration: string | null }>>({})
   const videoAreaRef = useRef<HTMLDivElement | null>(null)
   const [videoAreaSize, setVideoAreaSize] = useState({ width: 0, height: 0 })
-  useEffect(() => { if (device.connectionState !== 'online') setSessionAllowed(false) }, [device.connectionState])
+  // 首次核验转为在线可以建流；已在线过的设备断连后仍需显式重连，不恢复旧人工会话。
+  useEffect(() => {
+    if (device.connectionState === 'online') hasBeenOnline.current = true
+    else if (hasBeenOnline.current) setSessionAllowed(false)
+  }, [device.connectionState])
   const enabled = device.connectionState === 'online' && sessionAllowed
   const session = useMediaSession(device.deviceId, mode, enabled)
   const canControl = mode === 'control' && session.status === 'connected' && session.ready && !!session.sessionId
@@ -166,7 +172,7 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
               <div className="overflow-hidden rounded-3xl border border-border bg-card" style={{ width: frameWidth, height: frameHeight }}>
                 <VideoSurface session={session} mode={mode} rotation={displayRotation} mirrored={mirrored} paused={paused} className="size-full overflow-hidden rounded-3xl" />
               </div>
-              {!session.ready && <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState !== 'online' ? <Unplug /> : <Monitor />}</EmptyMedia><EmptyTitle>{device.connectionState !== 'online' ? '设备当前不可用' : session.status === 'failed' ? '视频连接失败' : '等待设备画面'}</EmptyTitle><EmptyDescription>{session.error || (device.connectionState !== 'online' ? deviceStatus(device) : '正在等待设备视频流')}</EmptyDescription></EmptyHeader></Empty></div>}
+              {!session.ready && <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState !== 'online' ? <Unplug /> : <Monitor />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState !== 'online' ? '设备当前不可用' : session.status === 'failed' ? '视频连接失败' : '等待设备画面'}</EmptyTitle><EmptyDescription>{needsVerification ? '在设备管理中核验身份后即可投屏。' : session.error || (device.connectionState !== 'online' ? deviceStatus(device) : '正在等待设备视频流')}</EmptyDescription></EmptyHeader></Empty></div>}
             </div>
             <div className="flex flex-wrap items-center justify-center gap-2 px-3 py-3" aria-label="设备快捷操作">
               <Button size="icon-lg" variant="ghost" disabled={!canControl || actionBusy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
@@ -195,7 +201,7 @@ function WorkbenchSession({ device, devices, onDeviceChange, mode, onModeChange,
               <CardContent className="flex flex-col gap-4">
                 <div className="flex flex-wrap gap-2">{device.tags.map(tag => <Badge key={tag} variant="secondary">{tag}</Badge>)}</div>
                 <Separator />
-                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 text-sm"><dt className="text-muted-foreground">连接状态</dt><dd className="text-right">{connectionLabels[device.connectionState]}</dd><dt className="text-muted-foreground">分配状态</dt><dd className="text-right">{allocationLabels[device.allocationState]}</dd><dt className="text-muted-foreground">视频状态</dt><dd className="text-right">{sessionStatusLabels[session.status]}</dd></dl>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 text-sm"><dt className="text-muted-foreground">连接状态</dt><dd className="text-right">{needsVerification ? '已连接，待核验' : connectionLabels[device.connectionState]}</dd><dt className="text-muted-foreground">分配状态</dt><dd className="text-right">{allocationLabels[device.allocationState]}</dd><dt className="text-muted-foreground">视频状态</dt><dd className="text-right">{sessionStatusLabels[session.status]}</dd></dl>
               </CardContent>
             </Card>
             <Card>

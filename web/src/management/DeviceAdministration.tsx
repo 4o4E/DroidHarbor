@@ -219,7 +219,7 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
   const [discovery, setDiscovery] = useState<DiscoveredDevice[] | null>(null)
   const [discoveryError, setDiscoveryError] = useState('')
   const [failure, setFailure] = useState('')
-  const [result, setResult] = useState('')
+  const [registered, setRegistered] = useState<{ deviceId: string; linkId: string } | null>(null)
   const [pending, setPending] = useState('')
 
   useEffect(() => {
@@ -230,7 +230,7 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     setDiscovery(null)
     setDiscoveryError('')
     setFailure('')
-    setResult('')
+    setRegistered(null)
   }, [open])
 
   async function readDiscovery() {
@@ -251,49 +251,59 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     const name = displayName.trim()
     const address = endpoint.trim()
     if (!name || !address || pending) return
-    setPending('register')
+    setPending(registered ? 'verify' : 'register')
     setFailure('')
-    setResult('')
+    let created = registered
+    let failureMessage = ''
     try {
-      const created = await api<{ deviceId: string; linkId: string }>('/devices', { method: 'POST', body: { displayName: name, kind, endpoint: address } })
-      setResult(`设备 ${created.deviceId} 已登记，初始处于维护且身份尚未核验。`)
-      await onCreated()
-      onOpenChange(false)
+      if (!created) {
+        created = await api<{ deviceId: string; linkId: string }>('/devices', { method: 'POST', body: { displayName: name, kind, endpoint: address } })
+        setRegistered(created)
+      }
+      setPending('verify')
+      await api('/devices/' + encodeURIComponent(created.deviceId) + '/links/' + encodeURIComponent(created.linkId) + '/verify', { method: 'POST' })
     } catch (error) {
-      const unknown = error instanceof ApiError && error.code === 'RESULT_UNKNOWN'
-      setFailure(unknown ? `登记结果未确认：${errorMessage(error)} 请重新读取设备列表核对。` : errorMessage(error))
-    } finally {
-      setPending('')
+      const unknown = error instanceof ApiError && (error.code === 'RESULT_UNKNOWN' || error.code === 'ADB_RESULT_UNKNOWN')
+      failureMessage = created ? `设备已登记，身份核验未完成：${errorMessage(error)} 可重新核验，无需重复登记。` : errorMessage(error)
+      if (unknown) failureMessage += ' 请先核对设备状态，操作结果尚未确认。'
     }
+    setPending('refresh')
+    try {
+      await onCreated()
+    } catch (error) {
+      failureMessage += `${failureMessage ? ' ' : ''}设备列表刷新失败：${errorMessage(error)}`
+    }
+    if (failureMessage) setFailure(failureMessage)
+    else onOpenChange(false)
+    setPending('')
   }
 
   function selectDiscovered(device: DiscoveredDevice) {
-    setKind('usb')
+    setKind(/:\d+$/.test(device.serial) ? 'wifi' : 'usb')
     setEndpoint(device.serial)
   }
 
-  return <Dialog open={open} onOpenChange={onOpenChange}>
-    <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
-      <DialogHeader><DialogTitle>登记设备</DialogTitle><DialogDescription>登记稳定设备 ID 与第一条链路。登记不代表手机已授权、身份已核验或可以分配。</DialogDescription></DialogHeader>
-      {failure && <Alert variant="destructive"><ShieldAlert /><AlertTitle>登记结果未确认</AlertTitle><AlertDescription>{failure}</AlertDescription></Alert>}
+  return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }}>
+    <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto" showCloseButton={!pending}>
+      <DialogHeader><DialogTitle>登记设备</DialogTitle><DialogDescription>登记所选设备并核验身份；核验成功后即可投屏。</DialogDescription></DialogHeader>
+      {failure && <Alert variant="destructive"><ShieldAlert /><AlertTitle>操作未完成</AlertTitle><AlertDescription>{failure}</AlertDescription></Alert>}
       {discoveryError && <Alert variant="destructive"><AlertTitle>无法读取发现快照</AlertTitle><AlertDescription>{discoveryError}</AlertDescription></Alert>}
-      {result && <Alert><Check /><AlertTitle>登记成功</AlertTitle><AlertDescription>{result}</AlertDescription></Alert>}
       <div className="flex flex-col gap-3">
-        <Button type="button" variant="outline" disabled={Boolean(pending)} onClick={() => void readDiscovery()}>
+        <Button type="button" variant="outline" disabled={Boolean(pending) || Boolean(registered)} onClick={() => void readDiscovery()}>
           <RefreshCw data-icon="inline-start" />{pending === 'discovery' ? '正在读取…' : '读取已发现设备'}
         </Button>
         {discovery !== null && <div className="flex flex-col gap-3">
           {discovery.length ? discovery.map(found => <div key={found.serial} className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0"><p className="break-all text-sm">{found.serial}</p><p className="text-xs text-muted-foreground">{found.model} · {found.state}</p></div>
-            <Button type="button" variant="outline" size="sm" disabled={Boolean(pending)} onClick={() => selectDiscovered(found)}>使用此设备</Button>
+            <Button type="button" variant="outline" size="sm" disabled={Boolean(pending) || Boolean(registered)} onClick={() => selectDiscovered(found)}>使用此设备</Button>
           </div>) : <p className="text-sm text-muted-foreground">当前没有已发现设备。</p>}
         </div>}
       </div>
       <form onSubmit={register}><FieldGroup>
-        <Field><FieldLabel htmlFor="new-device-name">设备名称</FieldLabel><Input id="new-device-name" value={displayName} onChange={event => setDisplayName(event.target.value)} maxLength={120} required /></Field>
-        <Field><FieldLabel>第一条链路类型</FieldLabel><ToggleGroup variant="outline" value={[kind]} onValueChange={value => { if (value[0]) setKind(value[0] as LinkKind) }} aria-label="第一条链路类型"><ToggleGroupItem value="usb"><Cable data-icon="inline-start" />USB</ToggleGroupItem><ToggleGroupItem value="wifi"><Wifi data-icon="inline-start" />Wi-Fi</ToggleGroupItem></ToggleGroup></Field>
-        <Field><FieldLabel htmlFor="new-device-endpoint">{kind === 'usb' ? 'USB serial' : 'Wi-Fi endpoint'}</FieldLabel><Input id="new-device-endpoint" value={endpoint} onChange={event => setEndpoint(event.target.value)} placeholder={kind === 'usb' ? '从设备发现列表选择或输入 serial' : '主机:连接端口'} required /><FieldDescription>配对地址与连接地址分别填写。</FieldDescription></Field>
-        <DialogFooter><Button type="button" variant="outline" disabled={Boolean(pending)} onClick={() => onOpenChange(false)}>取消</Button><Button type="submit" disabled={Boolean(pending) || !displayName.trim() || !endpoint.trim()}>{pending === 'register' ? '正在登记…' : '登记设备'}</Button></DialogFooter>
+        <Field data-disabled={Boolean(pending) || Boolean(registered)}><FieldLabel htmlFor="new-device-name">设备名称</FieldLabel><Input id="new-device-name" value={displayName} onChange={event => setDisplayName(event.target.value)} maxLength={120} required disabled={Boolean(pending) || Boolean(registered)} /></Field>
+        <Field data-disabled={Boolean(pending) || Boolean(registered)}><FieldLabel>第一条链路类型</FieldLabel><ToggleGroup variant="outline" value={[kind]} disabled={Boolean(pending) || Boolean(registered)} onValueChange={value => { if (value[0]) setKind(value[0] as LinkKind) }} aria-label="第一条链路类型"><ToggleGroupItem value="usb"><Cable data-icon="inline-start" />USB</ToggleGroupItem><ToggleGroupItem value="wifi"><Wifi data-icon="inline-start" />Wi-Fi</ToggleGroupItem></ToggleGroup></Field>
+        <Field data-disabled={Boolean(pending) || Boolean(registered)}><FieldLabel htmlFor="new-device-endpoint">{kind === 'usb' ? 'USB serial' : 'Wi-Fi endpoint'}</FieldLabel><Input id="new-device-endpoint" value={endpoint} onChange={event => setEndpoint(event.target.value)} placeholder={kind === 'usb' ? '从设备发现列表选择或输入 serial' : '主机:连接端口'} required disabled={Boolean(pending) || Boolean(registered)} /><FieldDescription>配对地址与连接地址分别填写。</FieldDescription></Field>
+        <DialogFooter><Button type="button" variant="outline" disabled={Boolean(pending)} onClick={() => onOpenChange(false)}>{registered ? '关闭' : '取消'}</Button><Button type="submit" disabled={Boolean(pending) || !displayName.trim() || !endpoint.trim()}>{pending === 'register' ? '正在登记…' : pending === 'verify' ? '正在核验…' : pending === 'refresh' ? '正在刷新…' : registered ? '重新核验' : '登记并核验'}</Button></DialogFooter>
       </FieldGroup></form>
     </DialogContent>
   </Dialog>

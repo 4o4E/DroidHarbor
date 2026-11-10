@@ -7,7 +7,7 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Input } from '@/components/ui/input'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { DevicePreview } from '@/devices/DevicePreview'
-import { deviceName, deviceStatus, type Device } from '@/lib/types'
+import { deviceName, deviceNeedsVerification, deviceStatus, type Device } from '@/lib/types'
 
 type Filter = 'all' | 'available' | 'leased' | 'offline' | 'attention'
 
@@ -19,10 +19,10 @@ type Props = {
 }
 
 function isOffline(device: Device) {
-  return device.connectionState !== 'online'
+  return device.connectionState !== 'online' && !deviceNeedsVerification(device)
 }
 function needsAttention(device: Device) {
-  return isOffline(device) || device.allocationState === 'reclaiming' || device.allocationState === 'quarantined'
+  return device.connectionState !== 'online' || device.allocationState === 'reclaiming' || device.allocationState === 'quarantined'
 }
 function badgeVariant(device: Device): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (isOffline(device) || device.allocationState === 'quarantined') return 'destructive'

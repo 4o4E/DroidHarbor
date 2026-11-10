@@ -7,7 +7,7 @@ import { VideoSurface } from '@/media/VideoSurface'
 import { useMediaSession } from '@/media/useMediaSession'
 import { useAuth } from '@/lib/auth'
 import { useDevices, usePlatformEvents } from '@/lib/queries'
-import { deviceName, deviceStatus, type Device, type SessionMode } from '@/lib/types'
+import { deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { errorMessage } from '@/lib/api'
 import { downloadScreenshot } from '@/lib/screenshots'
 
@@ -40,13 +40,18 @@ function Unavailable({ invalidMode, message }: { invalidMode: boolean; message?:
 }
 
 function CompactSession({ device, mode, resizeError, setResizeError, eventStatus }: { device: Device; mode: SessionMode; resizeError: string; setResizeError: (value: string) => void; eventStatus: string }) {
-  const [sessionAllowed, setSessionAllowed] = useState(device.connectionState === 'online')
+  const [sessionAllowed, setSessionAllowed] = useState(true)
+  const hasBeenOnline = useRef(device.connectionState === 'online')
+  const needsVerification = deviceNeedsVerification(device)
   const [actionError, setActionError] = useState('')
   const [busy, setBusy] = useState(false)
   const cancelResize = useRef<(() => void) | null>(null)
   const screenAreaRef = useRef<HTMLDivElement | null>(null)
   const [availableArea, setAvailableArea] = useState({ width: 0, height: 0 })
-  useEffect(() => { if (device.connectionState !== 'online') setSessionAllowed(false) }, [device.connectionState])
+  useEffect(() => {
+    if (device.connectionState === 'online') hasBeenOnline.current = true
+    else if (hasBeenOnline.current) setSessionAllowed(false)
+  }, [device.connectionState])
   const session = useMediaSession(device.deviceId, mode, device.connectionState === 'online' && sessionAllowed)
   const canControl = mode === 'control' && session.status === 'connected' && session.ready && !!session.sessionId
   const ratio = session.width > 0 && session.height > 0 ? session.width / session.height : 1
@@ -125,7 +130,7 @@ function CompactSession({ device, mode, resizeError, setResizeError, eventStatus
         <div ref={screenAreaRef} className="flex min-h-0 flex-1 items-center justify-center">
           <div className="relative flex items-center justify-center" style={{ width: frameWidth, height: frameHeight }} aria-label="设备画面">
             <VideoSurface session={session} mode={mode} className="size-full overflow-hidden rounded-3xl border border-border bg-card" />
-            {!session.ready && <div className="pointer-events-none absolute inset-0 flex items-center justify-center"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{device.connectionState === 'online' ? session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{session.error || deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
+            {!session.ready && <div className="pointer-events-none absolute inset-0 flex items-center justify-center"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState === 'online' ? session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{needsVerification ? '在主页面核验设备身份后即可投屏。' : session.error || deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
           </div>
         </div>
         {resizeError && <Alert variant="destructive"><AlertDescription>{resizeError}</AlertDescription><AlertAction><Button size="icon-xs" variant="ghost" aria-label="关闭提示" onClick={() => setResizeError('')}><X /></Button></AlertAction></Alert>}
