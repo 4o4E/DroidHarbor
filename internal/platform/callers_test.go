@@ -39,9 +39,8 @@ func TestCallerCredentialLifecycleAndAuditFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Leases.Close()
-	server := httptest.NewTLSServer(app.Handler(http.NotFoundHandler()))
+	server := httptest.NewServer(app.Handler(http.NotFoundHandler()))
 	defer server.Close()
-	app.Origin = server.URL
 	client := server.Client()
 	var cookie *http.Cookie
 	var csrfToken string

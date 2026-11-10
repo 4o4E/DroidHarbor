@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,7 +9,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -31,7 +29,6 @@ import (
 	"droidharbor/internal/platform"
 	"droidharbor/internal/previews"
 	"droidharbor/internal/rtc"
-	"droidharbor/internal/service"
 	"droidharbor/internal/storage"
 	"droidharbor/internal/transfers"
 )
@@ -45,31 +42,17 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("用法：droidharbor version | migrate | admin-init | serve | adb-serve")
+		return runPlatform(nil)
 	}
 	if args[0] == "adb-serve" {
 		return runADBService(args[1:])
 	}
+	if args[0] == "serve" {
+		return runPlatform(args[1:])
+	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	database := flags.String("database", "data/droidharbor.db", "SQLite 文件")
 	adminFile := flags.String("admin-file", "data/admin.json", "管理员摘要配置")
-	listen := flags.String("listen", "127.0.0.1:8443", "HTTPS 监听地址")
-	origin := flags.String("origin", "", "浏览器使用的 HTTPS origin（必填）")
-	cert := flags.String("tls-cert", "", "TLS 证书")
-	key := flags.String("tls-key", "", "TLS 私钥")
-	web := flags.String("web-dir", "", "静态前端覆盖目录（默认使用内嵌网页）")
-	ttl := flags.Duration("admin-session-ttl", 12*time.Hour, "管理员会话有效期")
-	adbAddress := flags.String("adb-server", "", "显式指定的 ADB 管理地址 host:port（serve 必填）")
-	adbTimeout := flags.Duration("adb-timeout", 10*time.Second, "ADB 管理请求与身份核验时限")
-	scrcpyServer := flags.String("scrcpy-server", "", "scrcpy-server 覆盖路径（默认使用内嵌的锁定版本）")
-	rtcListen := flags.String("rtc-listen", "", "显式 UDP4 WebRTC 监听 host:port（serve 必填）")
-	rtcAdvertisedIP := flags.String("rtc-advertised-ip", "", "浏览器可达的显式 WebRTC IPv4 地址（serve 必填）")
-	transferTempDir := flags.String("transfer-temp-dir", "", "受限本地文件传输暂存目录（serve 必填）")
-	transferMaxUpload := flags.Int64("transfer-max-upload-bytes", transfers.DefaultMaxUploadBytes, "单文件最大上传字节数")
-	transferMaxActive := flags.Int("transfer-max-active", transfers.DefaultMaxActive, "并发文件传输上限")
-	transferMaxOutput := flags.Int64("transfer-max-command-output", transfers.DefaultMaxCommandOutput, "ADB 命令输出最大字节数")
-	logFile := flags.String("log-file", "", "轮转 JSON 日志文件路径；同时输出到 stderr")
-	logLevel := flags.String("log-level", "info", "日志级别 debug、info、warn、error")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -101,25 +84,13 @@ func run(args []string) error {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"schemaVersion": storage.SchemaVersion})
-	case "serve":
-		options := serveOptions{
-			database: *database, adminFile: *adminFile, listen: *listen, origin: *origin,
-			cert: *cert, key: *key, web: *web, sessionTTL: *ttl, adbAddress: *adbAddress,
-			adbTimeout: *adbTimeout, scrcpyServer: *scrcpyServer, rtcListen: *rtcListen,
-			rtcAdvertisedIP: *rtcAdvertisedIP, transferTempDir: *transferTempDir, logFile: *logFile,
-			transferMaxUpload: *transferMaxUpload, transferMaxActive: *transferMaxActive,
-			transferMaxOutput: *transferMaxOutput, logLevel: *logLevel,
-		}
-		return service.Run("DroidHarbor", func(ctx context.Context, ready func()) error {
-			return runServe(ctx, ready, options)
-		})
 	default:
 		return fmt.Errorf("未知命令 %q", args[0])
 	}
 }
 
 type serveOptions struct {
-	database, adminFile, listen, origin, cert, key, web                string
+	database, adminFile, listen, web                                   string
 	sessionTTL                                                         time.Duration
 	adbAddress                                                         string
 	adbTimeout                                                         time.Duration
@@ -157,19 +128,14 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		runErr = errors.Join(runErr, logSink.Close())
 	}()
 	logger.Info("platform_starting", "pid", os.Getpid(), "build", buildInfo(), "listen", options.listen, "adbServer", options.adbAddress, "rtcListen", options.rtcListen)
-	parsed, err := url.Parse(options.origin)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return errors.New("origin 必须是无路径、参数或用户信息的 HTTPS 地址")
-	}
-	if options.cert == "" || options.key == "" || options.sessionTTL <= 0 {
-		return errors.New("必须配置 TLS 证书、私钥和正数会话有效期")
+	if options.sessionTTL <= 0 {
+		return errors.New("DROIDHARBOR_ADMIN_SESSION_TTL 必须是正数时长")
 	}
 	if options.adbAddress == "" || options.rtcListen == "" || options.rtcAdvertisedIP == "" || options.transferTempDir == "" {
-		return errors.New("serve 必须显式配置 ADB、WebRTC UDP4 地址和文件暂存目录")
+		return errors.New("请在 .env 配置 ADB、WebRTC IPv4 地址和文件暂存目录")
 	}
-	stage = "load_tls_credentials"
-	if _, err = tls.LoadX509KeyPair(options.cert, options.key); err != nil {
-		return err
+	if err = os.MkdirAll(options.transferTempDir, 0700); err != nil {
+		return fmt.Errorf("创建文件暂存目录失败：%w", err)
 	}
 	stage = "load_frontend"
 	var static http.Handler
@@ -187,6 +153,18 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	}
 	stage = "load_admin_credentials"
 	credential, err := identity.Load(options.adminFile)
+	if errors.Is(err, os.ErrNotExist) {
+		token, initErr := identity.Initialize(options.adminFile)
+		if initErr != nil {
+			return fmt.Errorf("首次创建管理员凭证失败：%w", initErr)
+		}
+		// First-start bootstrap uses stdout only; secrets never reach the runtime log.
+		if err := json.NewEncoder(os.Stdout).Encode(map[string]string{"event": "administrator_initialized", "adminToken": token, "credentialFile": options.adminFile}); err != nil {
+			return fmt.Errorf("输出首次管理员令牌失败：%w", err)
+		}
+		logger.Info("admin_credentials_initialized")
+		credential, err = identity.Load(options.adminFile)
+	}
 	if err != nil {
 		return err
 	}
@@ -305,7 +283,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	previewManager = previews.New(runtimeCtx, registry, adbClient)
 	registry.Start(manager)
 	app := &platform.Server{
-		DB: db, Admin: credential, Origin: options.origin, SessionTTL: options.sessionTTL, Logger: logger,
+		DB: db, Admin: credential, SessionTTL: options.sessionTTL, Logger: logger,
 		Leases: manager, Devices: registry, Connections: tunnels, Events: stateEvents, Previews: previewManager,
 		Media: mediaManager, Transfers: transferManager,
 	}
@@ -314,7 +292,6 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		Handler:           app.Handler(static),
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
-		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	stage = "bind_http"
 	listener, err := net.Listen("tcp", options.listen)
@@ -325,8 +302,8 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	ready()
 	result := make(chan error, 1)
 	go func() {
-		logger.Info("https_listening", "address", options.listen)
-		result <- server.ServeTLS(listener, options.cert, options.key)
+		logger.Info("http_listening", "address", listener.Addr().String())
+		result <- server.Serve(listener)
 	}()
 	select {
 	case err = <-result:

@@ -6,45 +6,33 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.platform
-    image: droidharbor-platform:${DH_IMAGE_TAG:?set immutable release/build tag}
+    image: droidharbor-platform:latest
     init: true
     restart: unless-stopped
     stop_signal: SIGTERM
     stop_grace_period: 45s
     depends_on:
       - adb
-    command:
-      - serve
-      - --database
-      - /var/lib/droidharbor/droidharbor.db
-      - --admin-file
-      - /run/droidharbor-config/admin.json
-      - --listen
-      - 0.0.0.0:8443
-      - --origin
-      - ${DH_HTTPS_ORIGIN:?set external HTTPS origin}
-      - --tls-cert
-      - /run/droidharbor-config/tls.crt
-      - --tls-key
-      - /run/droidharbor-config/tls.key
-      - --adb-server
-      - adb:5037
-      - --rtc-listen
-      - 0.0.0.0:${DH_RTC_PORT:?set shared UDP port}
-      - --rtc-advertised-ip
-      - ${DH_RTC_ADVERTISED_IP:?set browser-reachable VPN IPv4}
-      - --transfer-temp-dir
-      - /var/lib/droidharbor/transfers
+    command: [serve, --env-file, /run/droidharbor-config/.env]
+    environment:
+      DROIDHARBOR_DATABASE: /var/lib/droidharbor/droidharbor.db
+      DROIDHARBOR_ADMIN_FILE: /run/droidharbor-config/admin.json
+      DROIDHARBOR_LISTEN: 0.0.0.0:8080
+      DROIDHARBOR_ADB_SERVER: adb:5037
+      DROIDHARBOR_RTC_LISTEN: 0.0.0.0:${DH_RTC_PORT:?set shared UDP port}
+      DROIDHARBOR_RTC_ADVERTISED_IP: ${DH_RTC_ADVERTISED_IP:?set browser-reachable IPv4}
+      DROIDHARBOR_TRANSFER_TEMP_DIR: /var/lib/droidharbor/transfers
+      DROIDHARBOR_LOG_FILE: /var/lib/droidharbor/logs/platform.jsonl
     volumes:
       - type: bind
         source: ${DH_PLATFORM_DATA:?set platform state directory}
         target: /var/lib/droidharbor
       - type: bind
-        source: ${DH_CONFIG_DIR:?set admin and TLS config directory}
+        source: ${DH_CONFIG_DIR:?set admin and dotenv config directory}
         target: /run/droidharbor-config
         read_only: true
     ports:
-      - "${DH_HTTPS_BIND_ADDRESS:?set local HTTPS bind IPv4}:${DH_HTTPS_PORT:?set HTTPS host port}:8443/tcp"
+      - "${DH_HTTP_BIND_ADDRESS:?set local HTTP bind IPv4}:${DH_HTTP_PORT:?set HTTP host port}:8080/tcp"
       - "${DH_RTC_BIND_ADDRESS:?set local UDP bind IPv4}:${DH_RTC_PORT:?set UDP host port}:${DH_RTC_PORT:?set UDP host port}/udp"
     networks:
       - backend
@@ -54,7 +42,7 @@ services:
     build:
       context: ./adb
       dockerfile: Dockerfile
-    image: droidharbor-adb:platform-tools-37.0.1-15733141
+    image: droidharbor-adb:latest
     user: "0:0"
     init: true
     restart: unless-stopped

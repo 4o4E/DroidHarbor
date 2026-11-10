@@ -2,7 +2,6 @@ package platform
 
 import (
 	"bufio"
-	"crypto/tls"
 	"errors"
 	"net"
 	"net/http"
@@ -101,7 +100,7 @@ func (s *Server) connectionTunnel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, 422, "INVALID_REQUEST", "通道地址不接受查询参数")
 		return
 	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != s.Origin {
+	if r.Header.Get("Origin") != "" && !sameRequestOrigin(r) {
 		s.fail(w, r, 403, "ORIGIN_DENIED", "请求来源不匹配")
 		return
 	}
@@ -132,8 +131,7 @@ func (s *Server) connectionTunnel(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	upgrade := &websocketUpgradeResponse{ResponseWriter: w, server: s, request: r}
-	// Origin was checked exactly above. Skip the library's additional wildcard
-	// host matcher, which differs behind proxies and for literal IPv6 origins.
+	// Source was checked against the current Host; avoid a second wildcard matcher.
 	ws, err := websocket.Accept(upgrade, r, &websocket.AcceptOptions{Subprotocols: []string{connections.Subprotocol}, InsecureSkipVerify: true})
 	if err != nil {
 		s.Logger.Info("websocket_upgrade_failed", "requestId", r.Context().Value(requestKey{}), "cause", diagnostics.Cause(err))
@@ -161,9 +159,6 @@ func (w *websocketUpgradeResponse) Hijack() (net.Conn, *bufio.ReadWriter, error)
 	conn, buffered, err := http.NewResponseController(w.ResponseWriter).Hijack()
 	if err == nil {
 		w.socket = conn
-		if secure, ok := conn.(*tls.Conn); ok {
-			w.socket = secure.NetConn()
-		}
 	}
 	return conn, buffered, err
 }
@@ -192,8 +187,7 @@ type websocketStream struct {
 
 func (c *websocketStream) Close() error {
 	c.once.Do(func() {
-		// Close the owned socket first. TLS close_notify can fail after a peer
-		// reset even though TLS closed the socket; it is not resource leakage.
+		// Close the owned socket first, then join WebSocket workers.
 		socketErr := c.socket.Close()
 		if errors.Is(socketErr, net.ErrClosed) {
 			socketErr = nil

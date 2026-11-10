@@ -5,7 +5,7 @@ info:
   description: 管理会话、调用凭证、设备与租约、原生 ADB 通道、状态通知、共享预览及人工媒体会话接口。运行能力由 capabilities 和实际状态反馈；接口存在不等于已完成真机或生产网络兼容验收。
 servers:
   - url: /
-    description: 当前部署的 HTTPS origin
+    description: 当前部署的 HTTP 服务地址；浏览器使用同源 API
 paths:
   /health/live:
     get:
@@ -663,12 +663,12 @@ paths:
       - $ref: '#/components/parameters/ConnectionID'
     get:
       operationId: openAdbTunnel
-      summary: 用本任务凭证升级一次性 WSS 二进制通道
+      summary: 用本任务凭证升级一次性 WebSocket 二进制通道
       description: |
         要求 WebSocket 子协议 droidharbor.adb.v1。Authorization 使用任务 bearer，
-        URL 不接受查询参数；原生 CLI 不发送 Origin，浏览器 Origin 必须与平台配置完全一致。
+        URL 不接受查询参数；原生 CLI 不发送 Origin，浏览器 Origin 的主机与端口必须匹配本次请求 Host。
         通道承载原生 ADB 字节流，WebSocket 帧边界不是 ADB 包边界。
-        WSS 建立后仍要求登记公钥的原生 ADB AUTH；同一连接记录不得重复建流。
+        WebSocket 建立后仍要求登记公钥的原生 ADB AUTH；同一连接记录不得重复建流。
         租约结束、链路变化或平台重启均使旧通道失效，不自动重连或重放。
       security: [{callerOrTask: []}]
       responses:
@@ -1009,7 +1009,7 @@ components:
     adminSession:
       type: apiKey
       in: cookie
-      name: __Host-droidharbor
+      name: droidharbor_admin
     callerOrTask:
       type: http
       scheme: bearer
@@ -1035,7 +1035,7 @@ components:
       in: header
       required: true
       schema: {type: string, format: uri}
-      description: 必须与服务配置的 HTTPS origin 完全相同。
+      description: 浏览器 HTTP(S) 来源，主机与端口必须匹配本次请求的 Host；不需要部署 origin 配置。
     CSRFToken:
       name: X-CSRF-Token
       in: header

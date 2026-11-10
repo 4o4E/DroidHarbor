@@ -12,7 +12,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"droidharbor/internal/connections"
@@ -26,12 +28,11 @@ import (
 	"droidharbor/internal/transfers"
 )
 
-const sessionCookie = "__Host-droidharbor"
+const sessionCookie = "droidharbor_admin"
 
 type Server struct {
 	DB          *sql.DB
 	Admin       identity.AdminCredential
-	Origin      string
 	SessionTTL  time.Duration
 	Logger      *slog.Logger
 	Leases      *leases.Manager
@@ -113,8 +114,8 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "no-store")
-		// Origin 必须与部署配置完全一致；不信任任意 Host 或反向代理头。
-		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("Origin") != "" && r.Header.Get("Origin") != s.Origin {
+		// Compare against this request's Host; deployment needs no configured origin.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get("Origin") != "" && !sameRequestOrigin(r) {
 			s.fail(w, r, 403, "ORIGIN_DENIED", "请求来源不匹配")
 			return
 		}
@@ -185,7 +186,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: secret, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expires})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: secret, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, Expires: expires})
 	s.json(w, 201, map[string]any{"sessionId": id, "expiresAt": expires.Format(time.RFC3339), "csrfToken": csrf(secret)})
 }
 
@@ -253,7 +254,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	if owner != "" && s.Media != nil {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -266,9 +267,16 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireOrigin(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get("Origin") == s.Origin {
+	if sameRequestOrigin(r) {
 		return true
 	}
 	s.fail(w, r, 403, "ORIGIN_DENIED", "请求来源不匹配")
 	return false
+}
+
+func sameRequestOrigin(r *http.Request) bool {
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	return err == nil && (origin.Scheme == "http" || origin.Scheme == "https") &&
+		origin.Host != "" && strings.EqualFold(origin.Host, r.Host) && origin.User == nil &&
+		origin.Path == "" && origin.RawQuery == "" && origin.Fragment == ""
 }

@@ -3,12 +3,6 @@ param(
     [Parameter(Mandatory=$true)][string]$BinaryPath,
     [Parameter(Mandatory=$true)][string]$DataDirectory,
     [Parameter(Mandatory=$true)][string]$ConfigDirectory,
-    [Parameter(Mandatory=$true)][string]$WebDirectory,
-    [Parameter(Mandatory=$true)][string]$ScrcpyServer,
-    [Parameter(Mandatory=$true)][string]$HttpsListen,
-    [Parameter(Mandatory=$true)][string]$HttpsOrigin,
-    [Parameter(Mandatory=$true)][string]$RtcListen,
-    [Parameter(Mandatory=$true)][string]$RtcAdvertisedIPv4,
     [Parameter(Mandatory=$true)][string]$AdbExecutable,
     [Parameter(Mandatory=$true)][string]$AdbListen,
     [Parameter(Mandatory=$true)][string]$TransferDirectory,
@@ -83,21 +77,13 @@ function Get-AdbProfileAndroidDirectory {
 
 try {
     Require-File $BinaryPath 'BinaryPath'
-    Require-File $ScrcpyServer 'ScrcpyServer'
     Require-File $AdbExecutable 'AdbExecutable'
     Require-Directory $ConfigDirectory 'ConfigDirectory'
-    Require-Directory $WebDirectory 'WebDirectory'
-    foreach ($name in @('admin.json', 'tls.crt', 'tls.key')) {
+    foreach ($name in @('admin.json', '.env')) {
         Require-File (Join-Path $ConfigDirectory $name) $name
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $WebDirectory 'index.html') -PathType Leaf)) {
-        throw 'WebDirectory must contain index.html.'
-    }
-    foreach ($path in @($HttpsListen, $RtcListen, $AdbListen)) {
-        if ([string]::IsNullOrWhiteSpace($path)) { throw 'HTTPS, RTC, and ADB listen addresses must be explicit.' }
-    }
-    if ([string]::IsNullOrWhiteSpace($HttpsOrigin) -or [string]::IsNullOrWhiteSpace($RtcAdvertisedIPv4)) {
-        throw 'HTTPS origin and browser-reachable RTC IPv4 address are required.'
+    if ([string]::IsNullOrWhiteSpace($AdbListen)) {
+        throw 'The dedicated ADB listen address is required.'
     }
     if ($DataDirectory -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2})' -or $TransferDirectory -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2})') {
         throw 'DataDirectory and TransferDirectory must be absolute paths.'
@@ -131,18 +117,9 @@ try {
     $adbLogDirectory = Join-Path $logRoot 'adb'
     New-Item -ItemType Directory -Path $platformLogDirectory, $adbLogDirectory -Force | Out-Null
 
-    $serveArgs = @(
-        'serve', '--database', (Join-Path $DataDirectory 'droidharbor.db'),
-        '--admin-file', (Join-Path $ConfigDirectory 'admin.json'),
-        '--listen', $HttpsListen, '--origin', $HttpsOrigin,
-        '--tls-cert', (Join-Path $ConfigDirectory 'tls.crt'),
-        '--tls-key', (Join-Path $ConfigDirectory 'tls.key'),
-        '--web-dir', $WebDirectory, '--adb-server', $AdbListen,
-        '--scrcpy-server', $ScrcpyServer, '--rtc-listen', $RtcListen,
-        '--rtc-advertised-ip', $RtcAdvertisedIPv4,
-        '--transfer-temp-dir', $TransferDirectory,
-        '--log-file', (Join-Path $platformLogDirectory 'droidharbor.jsonl')
-    )
+    # The platform reads its runtime settings from one dotenv file.
+    # Its database/admin/transfer paths must point to the directories granted below.
+    $serveArgs = @('serve', '--env-file', (Join-Path $ConfigDirectory '.env'))
     $adbArgsWithoutSeed = @('adb-serve', '--adb', $AdbExecutable, '--listen', $AdbListen, '--log-file', (Join-Path $adbLogDirectory 'adb.jsonl'))
     $adbArgs = @($adbArgsWithoutSeed)
     if ($seedStage) { $adbArgs += @('--auth-seed-dir', $seedStage) }
@@ -163,7 +140,7 @@ try {
         if ($change.ReturnValue -ne 0) { throw "Could not assign dedicated account to '$name': $($change.ReturnValue)." }
     }
     if ($seedStage) { Grant-Tree $seedStage $adbAccount '(OI)(CI)R' }
-    Invoke-Sc @('description', $platformName, 'DroidHarbor HTTPS device-management platform.')
+    Invoke-Sc @('description', $platformName, 'DroidHarbor HTTP device-management platform.')
     Invoke-Sc @('description', $adbName, 'Dedicated DroidHarbor official ADB server.')
     Invoke-Sc @('config', $platformName, 'depend=', $adbName)
     foreach ($name in @($platformName, $adbName)) {
@@ -173,17 +150,14 @@ try {
 
     Grant-File $BinaryPath $platformAccount 'RX'
     Grant-File $BinaryPath $adbAccount 'RX'
-    Grant-Tree $WebDirectory $platformAccount '(OI)(CI)RX'
     Grant-Tree $ConfigDirectory $platformAccount '(OI)(CI)R'
     Grant-Tree $DataDirectory $platformAccount '(OI)(CI)M'
     Grant-Tree $platformLogDirectory $platformAccount '(OI)(CI)M'
     Grant-Tree $adbLogDirectory $adbAccount '(OI)(CI)M'
     Grant-File $AdbExecutable $adbAccount 'RX'
-    Grant-File $ScrcpyServer $platformAccount 'R'
     Grant-Directory (Split-Path -Parent $BinaryPath) $platformAccount '(RX)'
     Grant-Directory (Split-Path -Parent $BinaryPath) $adbAccount '(RX)'
     Grant-Directory (Split-Path -Parent $AdbExecutable) $adbAccount '(RX)'
-    Grant-Directory (Split-Path -Parent $ScrcpyServer) $platformAccount '(RX)'
 
     $serviceStartType = if ($NoStart) { 'demand' } else { 'auto' }
     Invoke-Sc @('config', $adbName, 'start=', $serviceStartType)

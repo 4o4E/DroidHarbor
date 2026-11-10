@@ -51,7 +51,7 @@ func runConnect(args []string) (failure *commandFailure) {
 	if task.LeaseID == "" {
 		return &commandFailure{Code: "LEASE_REQUIRED", Message: "connect 需要已持久化的有效 leaseId；请先显式 claim", exitCode: 2}
 	}
-	api, failure := newAPI(task.Server, options.caFile)
+	api, failure := newAPI(task.Server)
 	if failure != nil {
 		return failure
 	}
@@ -308,7 +308,7 @@ func runConnect(args []string) (failure *commandFailure) {
 			return &commandFailure{Code: "ADB_CONNECT_FAILED", Message: result.err.Error(), exitCode: 5}
 		}
 	case tunnelErr := <-tunnelResult:
-		return &commandFailure{Code: "ADB_TUNNEL_LOST", Message: "WSS/loopback 通道在原生 adb connect 完成前关闭：" + fmt.Sprint(tunnelErr), exitCode: 4}
+		return &commandFailure{Code: "ADB_TUNNEL_LOST", Message: "WebSocket/loopback 通道在原生 adb connect 完成前关闭：" + fmt.Sprint(tunnelErr), exitCode: 4}
 	case <-server.done:
 		return &commandFailure{Code: "ADB_SERVER_EXITED", Message: fmt.Sprintf("本地 adb Server 在 connect 期间退出：%v", server.wait()), exitCode: 5}
 	case controlErr := <-control.failureCh:
@@ -321,7 +321,7 @@ func runConnect(args []string) (failure *commandFailure) {
 		return &commandFailure{Code: "ADB_CONNECT_TIMEOUT", Message: "原生 ADB 未连接任务入口", exitCode: 4}
 	case resources.localConn = <-accepted:
 	case tunnelErr := <-tunnelResult:
-		return &commandFailure{Code: "ADB_TUNNEL_LOST", Message: "WSS/loopback 通道在原生 adb connect 后关闭：" + fmt.Sprint(tunnelErr), exitCode: 4}
+		return &commandFailure{Code: "ADB_TUNNEL_LOST", Message: "WebSocket/loopback 通道在原生 adb connect 后关闭：" + fmt.Sprint(tunnelErr), exitCode: 4}
 	case <-server.done:
 		return &commandFailure{Code: "ADB_SERVER_EXITED", Message: fmt.Sprintf("本地 adb Server 在 connect 后退出：%v", server.wait()), exitCode: 5}
 	case controlErr := <-control.failureCh:
@@ -544,7 +544,7 @@ func envCommand(args []string) (result json.RawMessage, failure *commandFailure)
 		}
 		return nil, &commandFailure{Code: "CONNECTION_NOT_ACTIVE", Message: message, exitCode: 5}
 	}
-	api, failure := newAPI(task.Server, options.caFile)
+	api, failure := newAPI(task.Server)
 	if failure != nil {
 		return nil, failure
 	}
@@ -641,7 +641,7 @@ func disconnectCommand(args []string) (result json.RawMessage, failure *commandF
 	if state.Connection == nil {
 		return nil, &commandFailure{Code: "RESULT_UNKNOWN", Message: "连接创建结果未知且尚无 connectionId；请显式 connect 以复用原幂等键恢复结果", exitCode: 6}
 	}
-	api, failure := newAPI(task.Server, options.caFile)
+	api, failure := newAPI(task.Server)
 	if failure != nil {
 		return nil, failure
 	}

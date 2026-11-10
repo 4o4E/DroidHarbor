@@ -72,7 +72,6 @@ type publicConnectionEnvironment struct {
 
 type connectionCommandOptions struct {
 	taskDir string
-	caFile  string
 	adbBin  string
 }
 
@@ -80,14 +79,13 @@ func parseConnectionFlags(command string, args []string, connect bool) (connecti
 	var options connectionCommandOptions
 	flags := newCommandFlagSet(command)
 	flags.StringVar(&options.taskDir, "task-dir", "", "受保护的任务目录")
-	flags.StringVar(&options.caFile, "ca-file", "", "可选的额外 PEM CA 证书")
 	if connect {
 		flags.StringVar(&options.adbBin, "adb-bin", "", "平台工具锁定版本的原生 adb 绝对路径")
 	}
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || options.taskDir == "" || (connect && options.adbBin == "") {
-		usage := "用法：droidharbor-cli " + command + " --task-dir <目录> [--ca-file <PEM 文件>]"
+		usage := "用法：droidharbor-cli " + command + " --task-dir <目录>"
 		if connect {
-			usage = "用法：droidharbor-cli connect --task-dir <目录> --adb-bin <原生 adb 绝对路径> [--ca-file <PEM 文件>]"
+			usage = "用法：droidharbor-cli connect --task-dir <目录> --adb-bin <原生 adb 绝对路径>"
 		}
 		return connectionCommandOptions{}, &commandFailure{Code: "INVALID_ARGUMENT", Message: usage, exitCode: 2}
 	}

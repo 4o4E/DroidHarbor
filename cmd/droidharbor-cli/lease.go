@@ -45,7 +45,6 @@ type leaseResponse struct {
 
 type leaseCommandOptions struct {
 	taskDir        string
-	caFile         string
 	server         string
 	credentialFile string
 	taskID         string
@@ -92,18 +91,17 @@ func parseLeaseFlags(command string, args []string, claim bool) (leaseCommandOpt
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&options.taskDir, "task-dir", "", "受保护的任务目录")
-	flags.StringVar(&options.caFile, "ca-file", "", "可选的额外 PEM CA 证书")
 	var tags stringSliceFlag
 	if claim {
-		flags.StringVar(&options.server, "server", "", "平台 HTTPS origin")
+		flags.StringVar(&options.server, "server", "", "平台 HTTP(S) 地址")
 		flags.StringVar(&options.credentialFile, "credential-file", "", "含 token 的 JSON 文件")
 		flags.StringVar(&options.taskID, "task-id", "", "可选的外部任务 ID")
 		flags.Var(&tags, "tag", "所需标签（可重复）")
 	}
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || options.taskDir == "" || (claim && (options.server == "" || options.credentialFile == "")) {
-		usage := "用法：droidharbor-cli " + command + " --task-dir <目录> [--ca-file <PEM 文件>]"
+		usage := "用法：droidharbor-cli " + command + " --task-dir <目录>"
 		if claim {
-			usage = "用法：droidharbor-cli claim --task-dir <目录> --server <https://host:port> --credential-file <JSON 文件> [--tag <标签>]... [--task-id <ID>] [--ca-file <PEM 文件>]"
+			usage = "用法：droidharbor-cli claim --task-dir <目录> --server <http://host:port> --credential-file <JSON 文件> [--tag <标签>]... [--task-id <ID>]"
 		}
 		return leaseCommandOptions{}, &commandFailure{Code: "INVALID_ARGUMENT", Message: usage, exitCode: 2}
 	}
@@ -276,7 +274,7 @@ func runLeaseCommand(command string, args []string) (result json.RawMessage, fai
 	if failure != nil {
 		return nil, failure
 	}
-	api, failure := newAPI(state.Server, options.caFile)
+	api, failure := newAPI(state.Server)
 	if failure != nil {
 		return nil, failure
 	}
@@ -355,7 +353,7 @@ func prepareTaskState(directory string, options leaseCommandOptions, claim bool)
 		return state, "", nil
 	}
 
-	base, failure := parseHTTPSOrigin(options.server)
+	base, failure := parseServerURL(options.server)
 	if failure != nil {
 		return nil, "", failure
 	}

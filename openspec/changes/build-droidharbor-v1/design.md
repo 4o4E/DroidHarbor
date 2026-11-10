@@ -27,7 +27,7 @@
 
 ### 1. 单服务、两个产品入口
 
-**已确认**：一个 Go 服务提供静态前端、HTTP 管理 API、SSE 状态事件、WSS 租约网关与 Pion WebRTC。Windows 原生运行，Linux 与独立 ADB 容器通过 Compose 部署。相比分离前端 Web 服务，这避免多套部署与跨域认证；相比拆分媒体服务，十台规模不需要额外服务协调。
+**已确认**：一个 Go 服务提供静态前端、HTTP 管理 API、SSE 状态事件、WebSocket 租约网关与 Pion WebRTC。Windows 原生运行，Linux 与独立 ADB 容器通过 Compose 部署。相比分离前端 Web 服务，这避免多套部署与跨域认证；相比拆分媒体服务，十台规模不需要额外服务协调。
 
 工程上采用标准 `net/http` 路由与中间件；内部按身份、设备、租约、ADB、媒体、回收、存储分模块，而不是按模块部署。前端使用 React/TypeScript、Vite、frontend-library 指定的 shadcn/ui Nova、Tailwind、Lucide；服务端状态用 TanStack Query，确有共享客户端状态才使用 Zustand。不先安装 Motion、dnd-kit 或面板库。
 
@@ -35,29 +35,29 @@
 
 ```mermaid
 flowchart LR
-    Browser[网页] -->|HTTPS / SSE| Platform[单 Go 平台服务]
+    Browser[网页] -->|HTTP / SSE| Platform[单 Go 平台服务]
     Browser <-->|WebRTC 视频与控制| Platform
     Skill[调用方 Skill] --> CLI[任务级 Go CLI]
     Native[原生 adb] --> Local[任务专用本地 ADB]
     Local -->|设备侧协议 / loopback| CLI
-    CLI -->|HTTPS 管理 / WSS 二进制| Platform
+    CLI -->|HTTP 管理 / WebSocket 二进制| Platform
     Platform --> DB[(本地 SQLite)]
     Platform --> ADB[服务端 ADB]
     ADB -->|USB 或 Wi-Fi| Android[Android 手机]
 ```
 
-SSE 只传递状态通知，双向设备字节流使用 WSS，网页输入使用可靠有序 DataChannel。相比复用一个无边界 WebSocket 承载全部数据，这使授权、背压和故障范围更清晰；不另引入消息代理。
+SSE 只传递状态通知，双向设备字节流使用 WebSocket，网页输入使用可靠有序 DataChannel。相比复用一个无边界 WebSocket 承载全部数据，这使授权、背压和故障范围更清晰；不另引入消息代理。
 
 ### 2. 认证、任务凭证与管理员会话
 
 **已确认**：管理员访问令牌登录，不做账号密码、注册或 SSO。部署命令生成高熵管理员令牌，仅在初始化/轮换时交给管理员；服务端配置保存摘要，不写入网页包、URL、日志或 SQLite 明文。
 
-- 网页通过 HTTPS 提交令牌换取不透明会话，使用 `Secure`、`HttpOnly`、同站 Cookie；写操作验证来源及 CSRF。退出撤销该会话，管理员令牌轮换撤销所有旧管理员会话。会话使用独立于 AI 租约的可配置有效期，工程默认 12 小时，不因视频流量自动延长。
+- 网页通过同源 HTTP 提交令牌换取不透明会话，使用 `HttpOnly`、`SameSite=Strict` Cookie；写操作验证本次请求 Host 对应的浏览器 Origin 及 CSRF，不配置固定 origin。退出撤销该会话，管理员令牌轮换撤销所有旧管理员会话。会话使用独立于 AI 租约的可配置有效期，工程默认 12 小时，不因视频流量自动延长。应用不处理 TLS，明文 HTTP 仅用于可信内网/隔离网络。
 - 管理员创建命名调用方 API 凭证，秘密仅创建时展示；数据库保存摘要、标识和撤销时间。调用凭证用于能力查询及创建任务，不作为所有任务数据通道的通行证。
-- CLI 为每个任务在本地生成 256 bit 随机任务秘密，首次认领时通过 HTTPS 提交；服务端只保存摘要。后续查询本任务、续租、释放及创建连接使用这个任务凭证。这样即使认领响应丢失，CLI 仍持有任务凭证，不需要保存可回放的明文租约秘密。
+- CLI 为每个任务在本地生成 256 bit 随机任务秘密，首次认领时通过管理 API 提交；服务端只保存摘要。后续查询本任务、续租、释放及创建连接使用这个任务凭证。这样即使认领响应丢失，CLI 仍持有任务凭证，不需要保存可回放的明文租约秘密。
 - `callerId + taskId` 唯一。认领同时绑定请求幂等键、规范化请求摘要和任务凭证摘要；相同幂等键只接受相同任务秘密及相同参数。仅知道共享调用凭证、另一个 taskId 或旧幂等键，不能取回或重置另一任务秘密。
 - 管理员可撤销调用凭证，撤销同时阻断其既有租约和连接并启动回收；调用凭证轮换不自动迁移旧任务。管理员拥有管理权，不是被任务隔离约束的普通任务。
-- WSS Upgrade 同时校验任务凭证、leaseId、connectionId、generation、平台本次启动标识；token 不放在查询字符串。每次派发仍检查当前授权，握手通过不是永久授权。
+- WebSocket Upgrade 同时校验任务凭证、leaseId、connectionId、generation、平台本次启动标识；token 不放在查询字符串。每次派发仍检查当前授权，握手通过不是永久授权。
 
 这里使用普通随机 bearer 凭证与摘要校验，不自创签名协议，不引入 JWT 自包含授权。相较于长期 JWT，数据库撤销与内存状态能立即作用于现有连接；任务秘密由 CLI 预先生成解决首次响应丢失，不让共享调用凭证具有“找回其他任务凭证”的权限。
 
@@ -108,13 +108,13 @@ sequenceDiagram
 
 ### 5. 原生 ADB 网关合同
 
-原生 adb 客户端连接的是任务专用本地 ADB Server 的 smart socket；该 Server 再通过 `adb connect` 连接 CLI 的 loopback 设备入口。CLI 将设备侧 ADB 字节流经 WSS 传到平台。`adb -H/-P` 与 `adb connect` 不能混作一个接口。
+原生 adb 客户端连接的是任务专用本地 ADB Server 的 smart socket；该 Server 再通过 `adb connect` 连接 CLI 的 loopback 设备入口。CLI 将设备侧 ADB 字节流经 WebSocket 传到平台。`adb -H/-P` 与 `adb connect` 不能混作一个接口。
 
 网关终止设备侧协议，处理 CNXN/AUTH/OPEN/WRTE/OKAY/CLSE，并将每个允许的 OPEN 映射到服务端 ADB 上的指定设备服务。平台到服务端 ADB 使用 smart socket 的长度前缀与 OKAY/FAIL；目标只来自租约映射，不采用调用方提供的真实手机 serial。
 
 - 每任务生成独立本地 ADB 密钥，连接创建时登记其公钥。网关通过标准 ADB AUTH 验证对应私钥；不自动接受未知公钥，不弹出手机配对要求。旧任务凭证和密钥不能直接通过新任务网关的认证；该保证不扩展为可信调用机内原生 ADB Server 的客户端隔离。
 - Windows 保持官方原生 adb 调用。官方 Server 会读取默认用户密钥，缺失时可能生成；CLI 不覆盖或删除已有默认密钥，不宣称环境变量能隔离 Windows 用户配置目录。网关支持有界的标准多密钥 AUTH 协商，但只有登记任务公钥的有效签名能通过；默认密钥尝试失败不等于任务密钥无效，不降级为免认证。
-- WSS 传输二进制，不把 ADB 数据转 JSON/Base64；消息边界不被当作 ADB 包边界。遵守协商 maxdata、包长度、stream ID 和流控，错误关闭该连接，不把无效包转发至手机。
+- WebSocket 传输二进制，不把 ADB 数据转 JSON/Base64；消息边界不被当作 ADB 包边界。遵守协商 maxdata、包长度、stream ID 和流控，错误关闭该连接，不把无效包转发至手机。
 - 功能协商取“网关实现、锁定 platform-tools、目标设备”交集，不原样宣称真实设备所有 features；不宣称支持未实现的 TLS 设备配对协议或 delayed-ack 等扩展。
 - OPEN 建立一条专属上游服务连接，WRTE/OKAY 实施有界背压；无需重写 USB、文件系统或 shell。shell_v2 和 sync 内容保留二进制语义，取消同时关闭上下游。
 - 服务集合是协议范围，不是 shell 命令沙箱；允许 shell 就可能启动后台服务、改变应用或配置手机，平台不分析全部命令文本来伪称安全隔离。
@@ -138,7 +138,7 @@ CLI 提供 `capabilities`、`claim`、`status`、`renew`、`connect`、`disconne
 
 任务工作目录保存本任务秘密、ADB 密钥、实例端口、leaseId 及资源归属，使用 OS 权限保护，不提交到 Git。原生 adb 命令显式指定独立 Server 和租约虚拟设备，不修改全局环境或 kill 默认 ADB。启动任务 ADB 时禁用无关设备自动发现/自动连接，确保不争用调用机 USB；锁定版本并验证实际支持的参数，不编造可用命令行开关。
 
-Linux 的任务 HOME 与默认密钥位置保持一致，使用任务目录下的 `.android/adbkey`；Windows 通过 `ADB_VENDOR_KEYS` 加载任务密钥，同时接受官方 SDK 的默认用户密钥行为。两者都不修改系统全局环境、不操作默认 Server；任务密钥与平台任务凭证由 CLI 管理，不要求用户手工维护。原生握手不能代替 WSS 任务凭证和租约检查。
+Linux 的任务 HOME 与默认密钥位置保持一致，使用任务目录下的 `.android/adbkey`；Windows 通过 `ADB_VENDOR_KEYS` 加载任务密钥，同时接受官方 SDK 的默认用户密钥行为。两者都不修改系统全局环境、不操作默认 Server；任务密钥与平台任务凭证由 CLI 管理，不要求用户手工维护。原生握手不能代替 WebSocket 任务凭证和租约检查。
 
 `connect` 接到停止/撤销时清理本任务 endpoint 和 ADB 进程；CLI 崩溃后下一次运行按记录核对进程身份再清理，不能只凭复用的 PID/端口杀进程。服务端到期撤销独立于本地清理成功与否。
 
@@ -148,7 +148,7 @@ Skill 流程：观察能力 → 生成任务身份/秘密 → 以所需标签认
 
 ### 7. API 合同
 
-统一 HTTPS `/api/v1`，JSON 使用 camelCase，标识为不透明字符串，时间为 UTC RFC3339，HTTP 错误使用稳定 `code / message / requestId / details`。敏感字段不进入日志。默认鉴权，只有基本存活探针不返回设备或身份信息。
+统一 HTTP `/api/v1`，JSON 使用 camelCase，标识为不透明字符串，时间为 UTC RFC3339，HTTP 错误使用稳定 `code / message / requestId / details`。敏感字段不进入日志。默认鉴权，只有基本存活探针不返回设备或身份信息。CLI 接受 HTTP(S) 服务地址，按地址选择 WS/WSS，标准外部传输不引入应用证书参数。
 
 | API | 授权与主要请求 | 成功/失败合同 |
 | --- | --- | --- |
@@ -168,7 +168,7 @@ Skill 流程：观察能力 → 生成任务身份/秘密 → 以所需标签认
 | `GET /leases/{id}` | 对应任务凭证或管理员 | 权威租约、到期和回收结果；不回显任务秘密 |
 | `POST /leases/{id}/renew` | 对应任务凭证 | 有效期更新为当前服务端时间 +900 秒；过期/撤销拒绝 |
 | `DELETE /leases/{id}` | 对应任务凭证或管理员 | 幂等终止；回收中返回 202 及查询信息，不伪报 available |
-| `POST /leases/{id}/connections` | 对应任务凭证；协议版本、任务 ADB 公钥 | 返回 connectionId、WSS 路径、有效期、支持能力；不返回真实手机/ADB 管理地址 |
+| `POST /leases/{id}/connections` | 对应任务凭证；协议版本、任务 ADB 公钥 | 返回 connectionId、WebSocket 路径、有效期、支持能力；不返回真实手机/ADB 管理地址 |
 | `GET/DELETE /leases/{id}/connections/{connectionId}` | 对应任务凭证 | 状态/幂等关闭；关闭连接不等于释放租约 |
 | `GET /leases/{id}/connections/{connectionId}/tunnel` | 对应任务凭证，WebSocket Upgrade | 建立绑定租约与代次的二进制通道；状态失效立即拒绝 |
 | `POST /devices/{id}/sessions` | 管理员；readonly/control、SDP offer | 创建人工 session，返回 answer/会话参数；无观看权限不能建立媒体流 |
@@ -218,7 +218,7 @@ OpenAPI 3.1 文档由实现与合同共同维护，未实现接口不能宣称�
 
 #### 8.4 文件与截图
 
-文件通过 HTTPS 流式接收至受限临时目录，再通过平台 ADB 适配器上传/安装；不用 DataChannel 或 SQLite 搬运整个文件。普通文件默认 `/sdcard/Download/`，同名覆盖必须明确确认；APK 沿锁定 scrcpy 的安装语义保留安装结果，不在失败后自动卸载旧应用或清数据。
+文件通过 HTTP 流式接收至受限临时目录，再通过平台 ADB 适配器上传/安装；不用 DataChannel 或 SQLite 搬运整个文件。普通文件默认 `/sdcard/Download/`，同名覆盖必须明确确认；APK 沿锁定 scrcpy 的安装语义保留安装结果，不在失败后自动卸载旧应用或清数据。
 
 状态区分 uploading/transferring/installing/succeeded/failed/cancelled/unknown。进度来源于实际字节传输，安装成功以 Package Manager 结果为准。取消关闭后续传输并清理平台临时文件；已经推到手机或已开始安装的副作用不可保证撤回，结果不明时显示 unknown。源文件不会被当作平台回收对象从手机任意删除。
 
@@ -283,12 +283,12 @@ ADB 容器单独重启视为底层连接中断，关闭旧子流，状态置离�
 
 | 部署面 | 合同 |
 | --- | --- |
-| Windows | 原生 Go Windows Service；平台和服务端 ADB 使用明确账户、数据目录及启动责任；日志、TLS、退出恢复可配置，不依赖 Node/Python 常驻 |
-| Linux 平台容器 | 单 Go 进程与打包静态前端；仅业务数据卷、TLS/管理员摘要配置；无需 USB 访问权限 |
+| Windows | 原生 Go Windows Service；平台读取 `.env`，平台和服务端 ADB 使用明确账户、数据目录及启动责任；不依赖 Node/Python 常驻 |
+| Linux 平台容器 | 单 Go 进程与内嵌静态前端；业务数据卷、dotenv/管理员摘要配置；无需 USB 访问权限 |
 | Linux ADB 容器 | 锁定 platform-tools；负责 USB、无线配对与授权材料卷；对平台容器开放内部 smart socket，宿主不发布给调用方 |
-| 容器网络 | 使用 Compose 专用 bridge；HTTPS 显式发布；Pion 使用显式配置的媒体 UDP 端口并发布，配置内网/VPN 可达的 advertised 地址；不使用不可达容器私网地址假装协商成功 |
+| 容器网络 | 使用 Compose 专用 bridge；HTTP 显式发布；Pion 使用显式配置的媒体 UDP 端口并发布，配置内网/VPN 可达的 advertised 地址；不使用不可达容器私网地址假装协商成功 |
 | USB | ADB 容器映射设备节点并配置设备访问规则；覆盖插拔后新节点和权限变化。平台容器不以 privileged 绕过设计 |
-| WebRTC | 校验证书、认证、信令及实际媒体路径；无隐式 TURN 或公网穿透。VPN/防火墙阻断 UDP 时明确报告部署缺口，不静默切换媒体协议 |
+| WebRTC | 校验认证、信令、浏览器能力及实际媒体路径；无隐式 TURN 或公网穿透。VPN/防火墙阻断 UDP 时明确报告部署缺口，不静默切换媒体协议 |
 | 备份 | 用 SQLite 一致性备份方式或停服务后完整备份，不能只拷贝正在写入的主库而遗漏 WAL；ADB 授权卷与平台数据分别备份，秘密按文件权限保护 |
 | 恢复 | 校验 schema/版本后启动，生成新 bootId，旧租约不恢复；不声称备份包含手机应用数据 |
 
@@ -305,7 +305,7 @@ ADB 容器单独重启视为底层连接中断，关闭旧子流，状态置离�
 ### 13. Windows 前台试用与诊断
 
 - Windows amd64 发布按角色提供两个独立 ZIP 及解压目录：服务端包含自带网页和 scrcpy-server v5.0.1 的平台 EXE、CMD 启动/管理员初始化入口和服务端说明；客户端包含任务 CLI、产品 Skill 和客户端说明。构建阶段生成服务端内嵌资源，运行时不依赖源码、前端目录或 Node/Go；ADB 可执行文件和其 Server 均由部署环境提供，平台连接显式管理端点，不改系统 ADB。人工网页通过浏览器访问服务端，无需安装 CLI。
-- CMD 将工作目录固定到解压目录，管理员凭证首次独占初始化，数据目录使用运行账户 ACL；运行数据与日志留在解压目录。沿用现有服务参数及访问协议，不新增配置格式或域名、证书、网络设施的配置流程。`--web-dir` 和 `--scrcpy-server` 仍用于显式覆盖内嵌资源。
+- CMD 只启动 EXE，不拼接运行参数；无参数 EXE 默认启动平台，从 EXE 同目录 `.env` 读取配置，提供 `.env.example`，仅浏览器可达 IPv4 必填。路径相对配置文件解析，进程环境可覆盖文件。首次启动独占生成管理员摘要并只在 stdout 一次性显示 token，已有或损坏配置不会重置。数据和日志与程序代码分离，不配置 TLS、证书或固定 origin；Windows Service 仅通过 `serve --env-file` 选择同一配置格式。
 - 平台及专用 ADB runner 的日志同时写控制台和文件，20 MiB 轮转、最多 5 份压缩历史；日志无法创建直接失败，后续写入故障显式写 stderr。默认 info，可显式开启 debug 记录 requestId、匹配路由和请求耗时。
 - 启动阶段、后台 ADB 清单、媒体采集、资源清理、传输和存储异常保留错误类型/原因链、OS errno、SQLite 结果码及关联 ID。数据库/设备错误正文可能包含业务数据，运行日志只提取已知系统原因，不写入任意错误字符串、请求参数或设备输出。HTTP panic 记录类型与调用栈后继续交给 HTTP Server 关闭异常请求。
 - 本轮仅证明前台发布包及异常可观测性，不替代系统重启、自启动、Linux 热插拔、目标网络或浏览器矩阵验收。
@@ -338,7 +338,7 @@ ADB 容器单独重启视为底层连接中断，关闭旧子流，状态置离�
 以下是实施环境资料和数值，由实施前置检查/真机测量补齐：
 
 - 生产 WinServer、Linux 宿主、调用机架构、手机型号及 Android 版本，用于锁定实际发布兼容矩阵。
-- 内网域名/证书、VPN 网段及可开放媒体端口，用于填入部署配置；不改变内网/VPN 和无隐式 TURN 的边界。
+- 内网/VPN 网段、浏览器可达 IPv4 及可开放媒体端口，用于填入 `.env`；应用不承担域名/证书配置，不改变内网/VPN 和无隐式 TURN 的边界。
 - 单文件上传容量和队列/缓冲资源限额，根据可用磁盘与首轮负载确定，并在 API 能力中公布；未完成前不能宣称无限容量。
 - 在实际宿主和手机上取得资源、延迟、建流及稳定运行数据后，确认性能数值门槛。
 

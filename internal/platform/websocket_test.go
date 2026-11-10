@@ -2,7 +2,6 @@ package platform
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
@@ -32,10 +31,10 @@ func TestWebsocketCleanupAfterPeerTCPReset(t *testing.T) {
 		closeResult <- stream.Close()
 	}))
 	server.Config.ConnContext = func(ctx context.Context, conn net.Conn) context.Context {
-		rawServer <- conn.(*tls.Conn).NetConn()
+		rawServer <- conn
 		return ctx
 	}
-	server.StartTLS()
+	server.Start()
 	defer server.Close()
 	defer func() {
 		select {
@@ -45,7 +44,7 @@ func TestWebsocketCleanupAfterPeerTCPReset(t *testing.T) {
 		}
 	}()
 	client := server.Client()
-	transport := client.Transport.(*http.Transport).Clone()
+	transport := http.DefaultTransport.(*http.Transport).Clone()
 	client.Transport = transport
 	defer transport.CloseIdleConnections()
 	rawClient := make(chan *net.TCPConn, 1)
@@ -58,7 +57,7 @@ func TestWebsocketCleanupAfterPeerTCPReset(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ws, _, err := websocket.Dial(ctx, "wss"+strings.TrimPrefix(server.URL, "https"), &websocket.DialOptions{HTTPClient: client})
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), &websocket.DialOptions{HTTPClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}

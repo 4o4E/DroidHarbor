@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -33,10 +34,14 @@ func TestSessionAuthorizationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Leases.Close()
-	server := httptest.NewTLSServer(app.Handler(http.NotFoundHandler()))
+	server := httptest.NewServer(app.Handler(http.NotFoundHandler()))
 	defer server.Close()
-	app.Origin = server.URL
 	client := server.Client()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Jar = jar
 	send := func(method, path, body, origin, csrfToken string, cookie *http.Cookie) (*http.Response, []byte) {
 		t.Helper()
 		req, err := http.NewRequest(method, server.URL+path, strings.NewReader(body))
@@ -76,8 +81,8 @@ func TestSessionAuthorizationLifecycle(t *testing.T) {
 		t.Fatalf("login %d %s", response.StatusCode, data)
 	}
 	cookie := response.Cookies()[0]
-	if !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
-		t.Fatal("unsafe cookie")
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
+		t.Fatal("session cookie lost isolation")
 	}
 	var result struct {
 		CSRF string `json:"csrfToken"`
@@ -90,7 +95,7 @@ func TestSessionAuthorizationLifecycle(t *testing.T) {
 	if response.StatusCode != 403 {
 		t.Fatalf("missing csrf %d", response.StatusCode)
 	}
-	response, _ = send("GET", current, "", "", "", cookie)
+	response, _ = send("GET", current, "", "", "", nil)
 	if response.StatusCode != 200 {
 		t.Fatalf("valid session %d", response.StatusCode)
 	}

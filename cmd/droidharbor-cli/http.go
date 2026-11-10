@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,37 +17,21 @@ type apiClient struct {
 	client *http.Client
 }
 
-func parseHTTPSOrigin(origin string) (*url.URL, *commandFailure) {
+func parseServerURL(origin string) (*url.URL, *commandFailure) {
 	base, err := url.Parse(origin)
-	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") {
-		return nil, &commandFailure{Code: "INVALID_ARGUMENT", Message: "平台地址必须为 HTTPS origin，不能包含用户信息、查询参数、片段或路径前缀", exitCode: 2}
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") {
+		return nil, &commandFailure{Code: "INVALID_ARGUMENT", Message: "平台地址必须是 HTTP(S) 地址，不能包含用户信息、查询参数、片段或路径前缀", exitCode: 2}
 	}
 	base.Path = ""
 	return base, nil
 }
 
-func newAPI(origin, caPath string) (*apiClient, *commandFailure) {
-	base, failure := parseHTTPSOrigin(origin)
+func newAPI(origin string) (*apiClient, *commandFailure) {
+	base, failure := parseServerURL(origin)
 	if failure != nil {
 		return nil, failure
 	}
-	var err error
-	var roots *x509.CertPool
-	if caPath != "" {
-		roots, err = x509.SystemCertPool()
-		if err != nil {
-			return nil, &commandFailure{Code: "TLS_CONFIGURATION_ERROR", Message: "无法读取系统信任证书", exitCode: 2}
-		}
-		pem, readErr := os.ReadFile(caPath)
-		if readErr != nil {
-			return nil, &commandFailure{Code: "TLS_CONFIGURATION_ERROR", Message: readErr.Error(), exitCode: 2}
-		}
-		if !roots.AppendCertsFromPEM(pem) {
-			return nil, &commandFailure{Code: "TLS_CONFIGURATION_ERROR", Message: "CA 文件不包含有效 PEM 证书", exitCode: 2}
-		}
-	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	return &apiClient{base: base, client: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 

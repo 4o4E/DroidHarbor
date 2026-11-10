@@ -11,3 +11,4 @@ web/dist/
 internal/bundle/frontend/
 internal/bundle/scrcpy-server-v5.0.1
 release/
+.env

@@ -18,5 +18,5 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=go-build /out/droidharbor /usr/local/bin/droidharbor
-EXPOSE 8443/tcp
+EXPOSE 8080/tcp
 ENTRYPOINT ["/usr/local/bin/droidharbor"]

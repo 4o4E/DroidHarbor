@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,25 +15,14 @@ import (
 
 func leaseTestInputs(t *testing.T, handler http.HandlerFunc) ([]string, string) {
 	t.Helper()
-	server := httptest.NewTLSServer(handler)
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	root := t.TempDir()
-	caPath := filepath.Join(root, "ca.pem")
-	ca, err := os.OpenFile(caPath, os.O_CREATE|os.O_WRONLY, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = pem.Encode(ca, &pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}); err != nil {
-		t.Fatal(err)
-	}
-	if err = ca.Close(); err != nil {
-		t.Fatal(err)
-	}
 	credential := filepath.Join(root, "caller.json")
-	if err = os.WriteFile(credential, []byte(`{"token":"caller-secret-not-to-persist"}`), 0600); err != nil {
+	if err := os.WriteFile(credential, []byte(`{"token":"caller-secret-not-to-persist"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return []string{"--server", server.URL, "--credential-file", credential, "--ca-file", caPath}, root
+	return []string{"--server", server.URL, "--credential-file", credential}, root
 }
 
 func TestClaimPersistsStateBeforeUnknownResponseAndReusesIt(t *testing.T) {
@@ -113,7 +101,7 @@ func TestClaimPersistsStateBeforeUnknownResponseAndReusesIt(t *testing.T) {
 	if updated.LeaseID != "lease-original" || updated.TaskSecret != state.TaskSecret || updated.IdempotencyKey != state.IdempotencyKey || claimPosts != 2 {
 		t.Fatalf("retry did not reuse original identity: leaseId=%q posts=%d", updated.LeaseID, claimPosts)
 	}
-	if _, failure = status([]string{"--task-dir", taskDir, "--ca-file", filepath.Join(root, "ca.pem")}); failure != nil {
+	if _, failure = status([]string{"--task-dir", taskDir}); failure != nil {
 		t.Fatal(failure)
 	}
 }
@@ -171,7 +159,7 @@ func TestRenewRejectsUndeclaredSuccessResponseAsUnknown(t *testing.T) {
 	if failure := saveTaskState(taskDir, state); failure != nil {
 		t.Fatal(failure)
 	}
-	_, failure := renew([]string{"--task-dir", taskDir, "--ca-file", server[5]})
+	_, failure := renew([]string{"--task-dir", taskDir})
 	if failure == nil || failure.Code != "RESULT_UNKNOWN" || failure.RequestID != "renew-request-id" {
 		t.Fatalf("invalid 204 renew response was not reported as unknown: %+v", failure)
 	}

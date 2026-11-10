@@ -56,7 +56,7 @@ func Load(path string) (AdminCredential, error) {
 	return credential, nil
 }
 
-// Initialize 只创建新文件，拒绝覆盖；令牌只返回给初始化命令调用方。
+// Initialize 只创建新文件，拒绝覆盖；令牌只返回给显式初始化或首次启动的调用方。
 func Initialize(path string) (secret string, err error) {
 	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return "", err

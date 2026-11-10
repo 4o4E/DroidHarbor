@@ -1,35 +1,46 @@
-# Windows 服务端试用包
+# Windows 服务端
 
-`DroidHarbor-server-windows-amd64.zip` 部署在连接手机的服务端机器。包内 `droidharbor.exe` 内含网页和锁定的 scrcpy-server v5.0.1，另附 `start.cmd`、`admin-init.cmd` 和本说明；不包含任务 CLI 或 Skill。部署机器不需要 Node、Go、源码、web/dist 或独立 scrcpy 文件；ADB 由外部提供。
+`DroidHarbor-server-windows-amd64.zip` 部署在连接手机的机器。网页和 scrcpy-server 已内嵌到 `droidharbor.exe`；无需 Node、Go、源码或单独静态目录。ADB 由外部提供，平台不会启动、替换或关闭系统 ADB。
 
-人工管理和工作台直接用浏览器访问服务端，无需安装客户端。任务调用机使用独立的 `DroidHarbor-client-windows-amd64.zip`，客户端包含 CLI、Skill 和客户端操作说明。
+## 首次使用
 
-## CMD 启动
+1. 解压到当前运行账户可读写的独立目录。
+2. 将 `.env.example` 复制为 `.env`。唯一必填项为 `DROIDHARBOR_RTC_ADVERTISED_IP`：本机浏览器试用填 `127.0.0.1`，局域网浏览器使用时填服务端可达的局域网 IPv4。
+3. 确认外部 ADB Server 已运行且能看到已授权手机；默认连接 `127.0.0.1:5037`，不同地址修改 `.env` 中的 `DROIDHARBOR_ADB_SERVER`。
+4. 双击 `start.cmd`，无需任何参数。也可直接双击 `droidharbor.exe`。程序直接读取 EXE 同目录的 `.env`；路径均相对 `.env` 所在目录，不受启动工作目录影响。
+5. 首次启动自动创建管理员凭证，在控制台一次性显示 `adminToken`，请安全保存。已有凭证会复用，不重置、不重新显示令牌；配置文件只存摘要，不将 token 写入运行日志。
+6. 本机打开 `http://localhost:8080`，局域网打开 `http://服务端IP:8080`。使用管理员令牌登录。人工工作台用浏览器即可，无需安装任务客户端。
 
-1. 解压到独立、可写目录；在 CMD 中进入该目录。保留 `data` 目录用于后续升级。
-2. 首次执行 `admin-init.cmd`。终端只显示一次管理员 token，请自行安全保存。重复初始化会报错，不会替换已有凭证。
-3. 外部 ADB Server 必须已经启动，且其 `adb devices -l` 能列出已授权设备。平台只连接 `--adb-server` 指定的管理端点；不会启动、替换或关闭外部 ADB。
-4. 执行 `start.cmd`，在后面追加部署环境已有的启动参数。`start.cmd` 固定在解压目录运行，自动设置日志和上传暂存目录，其余参数与 `droidharbor.exe serve` 相同：
+应用使用 HTTP，不配置证书、私钥或 origin。管理员登录、调用凭证和 CSRF 校验仍然生效；浏览器请求来源自动与当前请求 Host 核对。HTTP 不加密网络内容，仅在可信内网/隔离网络使用。已实测通过局域网 IP 的 HTTP 页面投屏两台真机；该页面不能调用浏览器系统剪贴板 API，可手动选择文本复制，不影响投屏连接。
 
-   ```cmd
-   start.cmd --adb-server 127.0.0.1:5037 --listen 0.0.0.0:8443 --origin "%DH_ORIGIN%" --tls-cert "%DH_TLS_CERT%" --tls-key "%DH_TLS_KEY%" --rtc-listen 0.0.0.0:8444 --rtc-advertised-ip "%DH_RTC_IP%"
-   ```
+## .env 配置
 
-   示例变量由现有部署环境提供。本交付不配置域名、证书或网络基础设施，沿用服务已有访问协议。也可直接执行 `droidharbor.exe serve` 并自行传入所有参数。
-5. 当前控制台保持运行；使用 Ctrl+C 停止。程序启动失败以非零退出码退出。`droidharbor.exe version` 查看版本和构建标识。
+模板包含常用项；未声明的可选项使用默认值，保留模板默认值或注释该行即可。进程环境中的同名变量优先于文件，便于服务/容器部署。支持引号、注释、Windows CRLF 和 UTF-8 BOM。
 
-## 排障
+| 项目 | 配置名 | 默认/说明 |
+| --- | --- | --- |
+| 网页/API | `DROIDHARBOR_LISTEN` | `0.0.0.0:8080` |
+| 媒体 UDP | `DROIDHARBOR_RTC_LISTEN` | `0.0.0.0:8081` |
+| 浏览器可达地址 | `DROIDHARBOR_RTC_ADVERTISED_IP` | 必填 IPv4 |
+| 外部 ADB | `DROIDHARBOR_ADB_SERVER` | `127.0.0.1:5037` |
+| 数据库 | `DROIDHARBOR_DATABASE` | `data/droidharbor.db` |
+| 管理员凭证摘要 | `DROIDHARBOR_ADMIN_FILE` | `data/admin.json` |
+| 上传暂存 | `DROIDHARBOR_TRANSFER_TEMP_DIR` | `data/transfers` |
+| 运行日志 | `DROIDHARBOR_LOG_FILE` | `logs/platform.jsonl` |
+| 日志级别 | `DROIDHARBOR_LOG_LEVEL` | `info`，排障可改 `debug` |
 
-- `start.cmd` 的运行日志同时显示在控制台并写入 `logs/platform.jsonl`；单文件 20 MiB，最多保留 5 份压缩历史文件。
-- 需要详细请求时加 `--log-level debug`；正常试用默认 info。对照网页错误中的 `requestId` 搜索日志。
-- 启动失败、ADB 清单断开、采集退出、资源回收、数据库故障均有对应阶段/错误码和错误原因类型。已知 OS 错误包含系统原因，SQLite 包含结果码；设备原始输出、SQL 绑定参数、token、配对码、剪贴板和完整 shell 命令不进日志。
-- 日志文件创建失败直接退出；运行中日志写入失败直接输出到 stderr，不能以“文件没有日志”判断服务正常。
-- 提交问题时附上发生时间、操作、requestId 和相关日志片段。管理员 token、ADB 私钥和证书私钥单独保管。
-- 本包不安装 Windows Service、不修改系统 ADB，不进行系统级证书、域名或防火墙配置。
-- 开始投屏前先点亮手机屏幕。程序不自动唤醒或保持亮屏；若未取得关键帧，点亮后点击“重新连接视频”。试用包不把占位画面当作视频成功。
+高级可选项：`DROIDHARBOR_ADMIN_SESSION_TTL`（`12h`）、`DROIDHARBOR_ADB_TIMEOUT`（`10s`）、`DROIDHARBOR_TRANSFER_MAX_UPLOAD_BYTES`（268435456）、`DROIDHARBOR_TRANSFER_MAX_ACTIVE`（8）、`DROIDHARBOR_TRANSFER_MAX_COMMAND_OUTPUT`（65536）。明确覆盖内嵌资源时才设置 `DROIDHARBOR_WEB_DIR`、`DROIDHARBOR_SCRCPY_SERVER`。
 
-## 从源码重建
+## 停止、升级与排障
 
-在项目根目录执行 `npm run package:windows`。需要 Node/npm、项目要求的 Go 和已下载的锁定 scrcpy-server（见项目开发文档）。脚本运行前端构建、校验并准备内嵌资源，分别生成服务端和客户端目录及独立 ZIP。默认发布根目录为 `release/windows-amd64-时间戳`；根目录内 `DroidHarbor-server-windows-amd64.zip` 和 `DroidHarbor-client-windows-amd64.zip` 分别分发，已有输出根目录拒绝覆盖。
+- 保持启动窗口运行；Ctrl+C 停止。启动失败以非零退出码退出，`start.cmd` 暂停窗口以便查看错误。缺 `.env`、必填项为空或值无效时明确指出文件/配置项，不要求补命令行参数。
+- 升级前停止程序并备份，保留 `.env` 和 `data`。发布包不包含真实 `.env`、凭证或数据库，不覆盖现有运行数据。
+- 日志同时输出到控制台和 `DROIDHARBOR_LOG_FILE`；每文件 20 MiB，最多保留 5 份压缩历史。文件创建失败直接退出，运行中写日志失败直接报告 stderr。
+- 用发生时间、requestId、关联设备/会话查故障。token、配对码、完整 shell 命令、剪贴板和设备原始输出不进入日志。
+- 开始投屏前先点亮手机。程序不自动唤醒或保持亮屏；若未取得关键帧，点亮后点击“重新连接视频”。
+- `admin-init.cmd` 是可选的显式首次初始化入口；需要轮换凭证时可用 `droidharbor.exe admin-init --admin-file 新文件路径`，再修改 `.env` 的管理员文件路径。已有摘要文件损坏会明确失败，不覆盖重置。
+- 本包不安装 Windows Service，不配置系统网络。服务部署可用 `serve --env-file 配置文件绝对路径`，运行参数仍由该文件读取。
 
-可直接调用 `powershell -NoProfile -ExecutionPolicy Bypass -File deploy/windows/package.ps1 -GoExecutable C:\path\to\go.exe -OutputDirectory C:\output\DroidHarbor` 指定工具链和新发布根目录；该根目录同时包含两类包，不是任一角色的运行目录。
+## 重建与客户端
+
+项目根目录执行 `npm run package:windows`，需要开发工具链和锁定 scrcpy-server。输出 `release/windows-amd64-时间戳` 下独立的服务端和客户端 ZIP；已有输出根目录拒绝覆盖。任务调用机使用 `DroidHarbor-client-windows-amd64.zip`，其 CLI、Skill 和说明与服务端分开分发。

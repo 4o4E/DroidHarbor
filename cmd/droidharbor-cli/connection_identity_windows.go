@@ -85,6 +85,22 @@ func setPrivateWindowsACL(path string, directory bool) error {
 		return err
 	}
 	sid := tokenUser.User.Sid
+	current, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return errors.New("任务路径没有 Windows 安全描述符")
+	}
+	owner, _, err := current.Owner()
+	if err != nil {
+		return err
+	}
+	information := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	// 已属于当前用户时只收紧 DACL；重复设置 owner 仍要求普通目录可能没有的 WRITE_OWNER。
+	if !owner.Equals(sid) {
+		information |= windows.OWNER_SECURITY_INFORMATION
+	}
 	inheritance := ""
 	if directory {
 		inheritance = "OICI"
@@ -98,6 +114,6 @@ func setPrivateWindowsACL(path string, directory bool) error {
 		return err
 	}
 	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		information,
 		sid, nil, dacl, nil)
 }

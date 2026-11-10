@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,24 +13,14 @@ import (
 
 func capabilityTestServer(t *testing.T, handler http.HandlerFunc) []string {
 	t.Helper()
-	server := httptest.NewTLSServer(handler)
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	directory := t.TempDir()
-	caFile, err := os.OpenFile(filepath.Join(directory, "ca.pem"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = pem.Encode(caFile, &pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}); err != nil {
-		t.Fatal(err)
-	}
-	if err = caFile.Close(); err != nil {
-		t.Fatal(err)
-	}
 	credentialFile := filepath.Join(directory, "caller.json")
-	if err = os.WriteFile(credentialFile, []byte(`{"token":"test-private-bearer"}`), 0600); err != nil {
+	if err := os.WriteFile(credentialFile, []byte(`{"token":"test-private-bearer"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return []string{"--server", server.URL, "--credential-file", credentialFile, "--ca-file", caFile.Name()}
+	return []string{"--server", server.URL, "--credential-file", credentialFile}
 }
 
 func TestCapabilitiesDoesNotForwardCredentialsOnRedirect(t *testing.T) {

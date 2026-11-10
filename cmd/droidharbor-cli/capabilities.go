@@ -17,17 +17,16 @@ type commandFailure struct {
 func capabilities(args []string) (json.RawMessage, *commandFailure) {
 	flags := flag.NewFlagSet("capabilities", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	server := flags.String("server", "", "平台 HTTPS origin")
+	server := flags.String("server", "", "平台 HTTP(S) 地址")
 	credential := flags.String("credential-file", "", "含 token 的 JSON 文件")
-	ca := flags.String("ca-file", "", "可选的额外 PEM CA 证书")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *server == "" || *credential == "" {
-		return nil, &commandFailure{Code: "INVALID_ARGUMENT", Message: "用法：droidharbor-cli capabilities --server <https://host:port> --credential-file <JSON 文件> [--ca-file <PEM 文件>]", exitCode: 2}
+		return nil, &commandFailure{Code: "INVALID_ARGUMENT", Message: "用法：droidharbor-cli capabilities --server <http://host:port> --credential-file <JSON 文件>", exitCode: 2}
 	}
 	token, failure := readCredential(*credential)
 	if failure != nil {
 		return nil, failure
 	}
-	api, failure := newAPI(*server, *ca)
+	api, failure := newAPI(*server)
 	if failure != nil {
 		return nil, failure
 	}

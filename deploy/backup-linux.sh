@@ -54,4 +54,4 @@ cp -a -- "$adb_auth/." "$backup/adb-auth/"
 "$binary" version >"$backup/platform-version.json"
 [[ -s "$backup/platform-version.json" ]] || { echo "DroidHarbor version command returned no metadata" >&2; exit 1; }
 printf '%s\n' 'format=droidharbor-backup-v1' >"$backup/manifest.txt"
-echo "Stopped-state backup created at $backup. Platform data, configuration/TLS, and ADB authorization are separate."
+echo "Stopped-state backup created at $backup. Platform data/configuration and ADB authorization are separate."

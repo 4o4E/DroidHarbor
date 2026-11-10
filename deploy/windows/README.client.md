@@ -11,11 +11,11 @@
 3. 调用机自行提供官方 platform-tools 37.0.1 ADB；连接任务时通过 `--adb-bin` 指定其绝对路径，客户端不会下载或替换系统 ADB。
 4. 按 `SKILL.md` 执行 capabilities、claim、connect、env、renew、disconnect、release。每个任务使用独立私有目录；长任务显式续租，操作结束显式释放。`connect` 在前台持续运行，不要退出后继续使用其任务入口。
 
-示例中的变量是现有环境提供的服务地址和凭证文件路径，不是 CLI 自动读取的配置项：
+服务端默认提供 HTTP，客户端不需要证书或 CA 参数。下面是本机服务示例；在其他调用机上将地址替换为服务端的局域网 IP。CLI 的任务目标/凭证由命令参数指定，不要求额外设置 shell 环境变量：
 
 ```cmd
 droidharbor-cli.exe version
-droidharbor-cli.exe capabilities --server "%DH_SERVER%" --credential-file "%DH_CREDENTIAL_FILE%"
+droidharbor-cli.exe capabilities --server http://127.0.0.1:8080 --credential-file caller.json
 ```
 
 完整参数、隔离边界、原生 ADB 使用、结果未知时的处理和退出码均以同包 `SKILL.md` 为准。成功结果输出到 stdout，错误输出到 stderr；排障保留服务端 requestId，不公开凭证文件或任务秘密。

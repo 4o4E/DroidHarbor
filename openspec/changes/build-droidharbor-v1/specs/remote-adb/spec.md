@@ -7,7 +7,7 @@
 ## ADDED Requirements
 
 ### Requirement: 原生 ADB 任务连接
-平台 SHALL 提供经认证加密通道访问的任务级设备入口，使原生 adb 可以通过调用方 loopback 入口连接已认领手机。该入口 MUST 只对应当前租约设备，不暴露服务端 ADB 管理地址或其他真实手机。
+平台 SHALL 提供经任务认证的 WebSocket 设备入口，使原生 adb 可以通过调用方 loopback 入口连接已认领手机。应用原生提供 HTTP/WS，部署于可信内网/隔离网络；该入口 MUST 只对应当前租约设备，不暴露服务端 ADB 管理地址或其他真实手机。
 
 #### Scenario: 使用 USB 手机远程操作
 - **WHEN** 任务认领一台仅通过 USB 接入平台的手机并建立认证连接

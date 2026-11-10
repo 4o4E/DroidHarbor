@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -27,8 +26,7 @@ type connectionTunnel struct {
 
 func (t *connectionTunnel) CloseNow() error {
 	t.once.Do(func() {
-		// Confirm physical socket closure without requiring TLS close_notify
-		// delivery to a crashed peer, then join WebSocket workers.
+		// Confirm physical socket closure, then join WebSocket workers.
 		socketErr := t.socket.Close()
 		if errors.Is(socketErr, net.ErrClosed) {
 			socketErr = nil
@@ -44,7 +42,10 @@ func (t *connectionTunnel) CloseNow() error {
 
 func dialConnectionTunnel(ctx context.Context, api *apiClient, connection remoteConnection, taskSecret string) (*connectionTunnel, *commandFailure) {
 	endpoint := *api.base
-	endpoint.Scheme = "wss"
+	endpoint.Scheme = "ws"
+	if api.base.Scheme == "https" {
+		endpoint.Scheme = "wss"
+	}
 	path, err := url.Parse(connection.TunnelPath)
 	if err != nil || path.IsAbs() || path.RawQuery != "" || path.Fragment != "" || !strings.HasPrefix(path.Path, "/api/v1/leases/") {
 		return nil, &commandFailure{Code: "INVALID_RESPONSE", Message: "平台返回了无效的 tunnelPath", exitCode: 4}
@@ -53,7 +54,7 @@ func dialConnectionTunnel(ctx context.Context, api *apiClient, connection remote
 	endpoint.RawPath = path.RawPath
 	transport, ok := api.client.Transport.(*http.Transport)
 	if !ok {
-		return nil, &commandFailure{Code: "TLS_CONFIGURATION_ERROR", Message: "HTTPS transport 不支持 WSS", exitCode: 2}
+		return nil, &commandFailure{Code: "CONNECTION_CONFIGURATION_ERROR", Message: "HTTP transport 不支持 WebSocket", exitCode: 2}
 	}
 	client := &http.Client{
 		Transport:     transport.Clone(),
@@ -65,8 +66,8 @@ func dialConnectionTunnel(ctx context.Context, api *apiClient, connection remote
 	var socket net.Conn
 	dialCtx = httptrace.WithClientTrace(dialCtx, &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
 		socket = info.Conn
-		if secure, ok := socket.(*tls.Conn); ok {
-			socket = secure.NetConn()
+		if underlying, ok := socket.(interface{ NetConn() net.Conn }); ok {
+			socket = underlying.NetConn()
 		}
 	}})
 	conn, response, err := websocket.Dial(dialCtx, endpoint.String(), &websocket.DialOptions{
@@ -86,14 +87,14 @@ func dialConnectionTunnel(ctx context.Context, api *apiClient, connection remote
 			if readErr == nil && closeErr == nil && len(body) <= 65536 {
 				return nil, httpFailure(body, response.StatusCode, requestID)
 			}
-			return nil, &commandFailure{Code: "WSS_HANDSHAKE_FAILED", Message: errors.Join(err, readErr, closeErr, errors.New("WSS 握手响应不完整或超过 64 KiB")).Error(), RequestID: requestID, exitCode: 4}
+			return nil, &commandFailure{Code: "WEBSOCKET_HANDSHAKE_FAILED", Message: errors.Join(err, readErr, closeErr, errors.New("WebSocket 握手响应不完整或超过 64 KiB")).Error(), RequestID: requestID, exitCode: 4}
 		}
-		return nil, &commandFailure{Code: "WSS_HANDSHAKE_FAILED", Message: err.Error(), exitCode: 4}
+		return nil, &commandFailure{Code: "WEBSOCKET_HANDSHAKE_FAILED", Message: err.Error(), exitCode: 4}
 	}
 	tunnel := &connectionTunnel{ws: conn, socket: socket}
 	if conn.Subprotocol() != "droidharbor.adb.v1" {
 		_ = tunnel.CloseNow()
-		return nil, &commandFailure{Code: "INVALID_RESPONSE", Message: "WSS 服务端未协商 droidharbor.adb.v1", exitCode: 4}
+		return nil, &commandFailure{Code: "INVALID_RESPONSE", Message: "WebSocket 服务端未协商 droidharbor.adb.v1", exitCode: 4}
 	}
 	return tunnel, nil
 }
