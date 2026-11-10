@@ -1,6 +1,8 @@
-# Windows 试用包
+# Windows 服务端试用包
 
-`droidharbor.exe` 内含网页和锁定的 scrcpy-server v5.0.1。部署机器不需要 Node、Go、源码、web/dist 或独立 scrcpy 文件；ADB 由外部提供。`droidharbor-cli.exe` 是任务调用工具，接口说明见同包 `SKILL.md`。
+`DroidHarbor-server-windows-amd64.zip` 部署在连接手机的服务端机器。包内 `droidharbor.exe` 内含网页和锁定的 scrcpy-server v5.0.1，另附 `start.cmd`、`admin-init.cmd` 和本说明；不包含任务 CLI 或 Skill。部署机器不需要 Node、Go、源码、web/dist 或独立 scrcpy 文件；ADB 由外部提供。
+
+人工管理和工作台直接用浏览器访问服务端，无需安装客户端。任务调用机使用独立的 `DroidHarbor-client-windows-amd64.zip`，客户端包含 CLI、Skill 和客户端操作说明。
 
 ## CMD 启动
 
@@ -28,6 +30,6 @@
 
 ## 从源码重建
 
-在项目根目录执行 `npm run package:windows`。需要 Node/npm、项目要求的 Go 和已下载的锁定 scrcpy-server（见项目开发文档）。脚本运行前端构建、校验并准备内嵌资源、生成两个 Windows amd64 EXE 和 ZIP。默认输出 `release/DroidHarbor-windows-amd64-时间戳`；已有输出目录拒绝覆盖。
+在项目根目录执行 `npm run package:windows`。需要 Node/npm、项目要求的 Go 和已下载的锁定 scrcpy-server（见项目开发文档）。脚本运行前端构建、校验并准备内嵌资源，分别生成服务端和客户端目录及独立 ZIP。默认发布根目录为 `release/windows-amd64-时间戳`；根目录内 `DroidHarbor-server-windows-amd64.zip` 和 `DroidHarbor-client-windows-amd64.zip` 分别分发，已有输出根目录拒绝覆盖。
 
-可直接调用 `powershell -NoProfile -ExecutionPolicy Bypass -File deploy/windows/package.ps1 -GoExecutable C:\path\to\go.exe -OutputDirectory C:\output\DroidHarbor` 指定工具链和新输出目录。
+可直接调用 `powershell -NoProfile -ExecutionPolicy Bypass -File deploy/windows/package.ps1 -GoExecutable C:\path\to\go.exe -OutputDirectory C:\output\DroidHarbor` 指定工具链和新发布根目录；该根目录同时包含两类包，不是任一角色的运行目录。
