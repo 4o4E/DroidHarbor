@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"droidharbor/internal/capture"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/scrcpy"
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
@@ -162,7 +163,7 @@ func (h *hub) failSource(source *capture.Stream, err error) {
 	}
 	h.mu.Unlock()
 	if err != nil {
-		h.manager.deps.Logger.Error("media_source_failed", "deviceId", h.deviceID, "code", errorCode(err), "error", err.Error())
+		h.manager.deps.Logger.Error("media_source_failed", "deviceId", h.deviceID, "code", errorCode(err), "cause", diagnostics.Cause(err))
 	}
 	h.cancelAllClipboard()
 	h.manager.notifyDevice(h.deviceID)

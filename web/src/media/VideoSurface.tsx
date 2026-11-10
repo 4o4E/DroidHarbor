@@ -238,7 +238,8 @@ export function VideoSurface({ session, mode, rotation = 0, mirrored = false, pa
       event.currentTarget.focus({ preventScroll: true })
       try {
         event.currentTarget.setPointerCapture(event.pointerId)
-      } catch {
+      } catch (cause) {
+        console.warn('pointer_capture_failed', { errorType: cause instanceof Error ? cause.name : typeof cause })
         setControlError('无法保持鼠标按键捕获，请重新点击。')
         return
       }
@@ -267,7 +268,9 @@ export function VideoSurface({ session, mode, rotation = 0, mirrored = false, pa
       return
     }
     event.currentTarget.focus({ preventScroll: true })
-    try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* the pointer may already have been cancelled */ }
+    try { event.currentTarget.setPointerCapture(event.pointerId) } catch (cause) {
+      console.warn('pointer_capture_failed', { errorType: cause instanceof Error ? cause.name : typeof cause })
+    }
     nextPointerRef.current = candidate
     const localId = allocated[0]
     const virtualId = useVirtualFinger ? allocated[1] : undefined

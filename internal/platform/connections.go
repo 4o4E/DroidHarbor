@@ -12,6 +12,7 @@ import (
 	"github.com/coder/websocket"
 
 	"droidharbor/internal/connections"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/leases"
 )
 
@@ -127,7 +128,7 @@ func (s *Server) connectionTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := tunnel.Close(); err != nil {
-			s.Logger.Error("tunnel_cleanup_failed", "connectionId", r.PathValue("connectionId"))
+			s.Logger.Error("tunnel_cleanup_failed", "requestId", r.Context().Value(requestKey{}), "connectionId", r.PathValue("connectionId"), "cause", diagnostics.Cause(err))
 		}
 	}()
 	upgrade := &websocketUpgradeResponse{ResponseWriter: w, server: s, request: r}
@@ -135,12 +136,13 @@ func (s *Server) connectionTunnel(w http.ResponseWriter, r *http.Request) {
 	// host matcher, which differs behind proxies and for literal IPv6 origins.
 	ws, err := websocket.Accept(upgrade, r, &websocket.AcceptOptions{Subprotocols: []string{connections.Subprotocol}, InsecureSkipVerify: true})
 	if err != nil {
+		s.Logger.Info("websocket_upgrade_failed", "requestId", r.Context().Value(requestKey{}), "cause", diagnostics.Cause(err))
 		return
 	} // Accept has already written the HTTP rejection.
 	stream := &websocketStream{Conn: websocket.NetConn(tunnel.Context(), ws, websocket.MessageBinary), ws: ws, socket: upgrade.socket}
 	if err = tunnel.Serve(stream); err != nil {
-		// Peer/upstream error text can include device data; log identity, not payload.
-		s.Logger.Info("adb_transport_ended", "connectionId", r.PathValue("connectionId"))
+		// Peer/upstream error text can include device data; keep payload-free causes.
+		s.Logger.Info("adb_transport_ended", "requestId", r.Context().Value(requestKey{}), "connectionId", r.PathValue("connectionId"), "cause", diagnostics.Cause(err))
 	}
 }
 

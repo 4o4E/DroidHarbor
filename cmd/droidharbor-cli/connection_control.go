@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"droidharbor/internal/diagnostics"
 )
 
 type localControlResponse struct {
@@ -204,7 +207,9 @@ func (r *connectionRuntime) handleStop(w http.ResponseWriter, request *http.Requ
 
 func writeControlJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(value)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		slog.Warn("local_control_response_write_failed", "cause", diagnostics.Cause(err))
+	}
 }
 
 func stopLocalControl(runtime *connectionRuntime) error {

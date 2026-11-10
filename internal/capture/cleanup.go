@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"droidharbor/internal/devices"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/leases"
 )
 
@@ -20,7 +21,9 @@ var ErrCleanupDeferred = errors.New("capture cleanup deferred")
 func (m *Manager) recordCleanupFailure(id, code string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = m.setCleanupFailure(ctx, id, code)
+	if err := m.setCleanupFailure(ctx, id, code); err != nil {
+		m.logger.Error("capture_cleanup_failure_persistence_failed", "captureId", id, "code", code, "cause", diagnostics.Cause(err))
+	}
 }
 
 func (s *Stream) authorizeSystem() error {

@@ -14,13 +14,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/bundle"
 	"droidharbor/internal/capture"
 	"droidharbor/internal/connections"
 	"droidharbor/internal/devices"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/identity"
 	"droidharbor/internal/leases"
@@ -54,18 +57,19 @@ func run(args []string) error {
 	origin := flags.String("origin", "", "浏览器使用的 HTTPS origin（必填）")
 	cert := flags.String("tls-cert", "", "TLS 证书")
 	key := flags.String("tls-key", "", "TLS 私钥")
-	web := flags.String("web-dir", "web/dist", "构建后的静态前端目录")
+	web := flags.String("web-dir", "", "静态前端覆盖目录（默认使用内嵌网页）")
 	ttl := flags.Duration("admin-session-ttl", 12*time.Hour, "管理员会话有效期")
 	adbAddress := flags.String("adb-server", "", "显式指定的 ADB 管理地址 host:port（serve 必填）")
 	adbTimeout := flags.Duration("adb-timeout", 10*time.Second, "ADB 管理请求与身份核验时限")
-	scrcpyServer := flags.String("scrcpy-server", "", "锁定版本 scrcpy-server artifact 路径（serve 必填）")
+	scrcpyServer := flags.String("scrcpy-server", "", "scrcpy-server 覆盖路径（默认使用内嵌的锁定版本）")
 	rtcListen := flags.String("rtc-listen", "", "显式 UDP4 WebRTC 监听 host:port（serve 必填）")
 	rtcAdvertisedIP := flags.String("rtc-advertised-ip", "", "浏览器可达的显式 WebRTC IPv4 地址（serve 必填）")
 	transferTempDir := flags.String("transfer-temp-dir", "", "受限本地文件传输暂存目录（serve 必填）")
 	transferMaxUpload := flags.Int64("transfer-max-upload-bytes", transfers.DefaultMaxUploadBytes, "单文件最大上传字节数")
 	transferMaxActive := flags.Int("transfer-max-active", transfers.DefaultMaxActive, "并发文件传输上限")
 	transferMaxOutput := flags.Int64("transfer-max-command-output", transfers.DefaultMaxCommandOutput, "ADB 命令输出最大字节数")
-	logFile := flags.String("log-file", "", "serve 追加写入的 JSON 日志文件路径")
+	logFile := flags.String("log-file", "", "轮转 JSON 日志文件路径；同时输出到 stderr")
+	logLevel := flags.String("log-level", "info", "日志级别 debug、info、warn、error")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -74,7 +78,7 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "version":
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"product": "droidharbor", "version": "0.0.0-dev", "apiMajor": 1, "schemaVersion": storage.SchemaVersion})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"product": "droidharbor", "version": "0.0.0-dev", "apiMajor": 1, "schemaVersion": storage.SchemaVersion, "build": buildInfo()})
 	case "admin-init":
 		token, err := identity.Initialize(*adminFile)
 		if err != nil {
@@ -104,7 +108,7 @@ func run(args []string) error {
 			adbTimeout: *adbTimeout, scrcpyServer: *scrcpyServer, rtcListen: *rtcListen,
 			rtcAdvertisedIP: *rtcAdvertisedIP, transferTempDir: *transferTempDir, logFile: *logFile,
 			transferMaxUpload: *transferMaxUpload, transferMaxActive: *transferMaxActive,
-			transferMaxOutput: *transferMaxOutput,
+			transferMaxOutput: *transferMaxOutput, logLevel: *logLevel,
 		}
 		return service.Run("DroidHarbor", func(ctx context.Context, ready func()) error {
 			return runServe(ctx, ready, options)
@@ -120,6 +124,7 @@ type serveOptions struct {
 	adbAddress                                                         string
 	adbTimeout                                                         time.Duration
 	scrcpyServer, rtcListen, rtcAdvertisedIP, transferTempDir, logFile string
+	logLevel                                                           string
 	transferMaxUpload                                                  int64
 	transferMaxActive                                                  int
 	transferMaxOutput                                                  int64
@@ -129,22 +134,29 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if ctx == nil || ready == nil {
 		return errors.New("service context and ready callback are required")
 	}
-	var err error
-	var logOutput = os.Stderr
-	var logSink *os.File
-	if options.logFile != "" {
-		logSink, err = os.OpenFile(options.logFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			return fmt.Errorf("open service log file: %w", err)
+	var level slog.Level
+	if options.logLevel != "" {
+		if err := level.UnmarshalText([]byte(options.logLevel)); err != nil {
+			return fmt.Errorf("invalid log-level: %w", err)
 		}
-		logOutput = logSink
-		defer func() {
-			if err := logSink.Close(); err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("close service log file: %w", err))
-			}
-		}()
 	}
-	logger := slog.New(slog.NewJSONHandler(logOutput, nil))
+	logger, logSink, err := diagnostics.Open(options.logFile, level)
+	if err != nil {
+		return err
+	}
+	stage := "configuration"
+	defer func() {
+		if runErr != nil {
+			logger.Error("platform_failed", "stage", stage, "cause", diagnostics.Cause(runErr))
+			if stage == "configuration" {
+				logger.Error("invalid_configuration", "error", runErr.Error())
+			}
+		} else {
+			logger.Info("platform_stopped")
+		}
+		runErr = errors.Join(runErr, logSink.Close())
+	}()
+	logger.Info("platform_starting", "pid", os.Getpid(), "build", buildInfo(), "listen", options.listen, "adbServer", options.adbAddress, "rtcListen", options.rtcListen)
 	parsed, err := url.Parse(options.origin)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("origin 必须是无路径、参数或用户信息的 HTTPS 地址")
@@ -152,27 +164,43 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if options.cert == "" || options.key == "" || options.sessionTTL <= 0 {
 		return errors.New("必须配置 TLS 证书、私钥和正数会话有效期")
 	}
-	if options.adbAddress == "" || options.scrcpyServer == "" || options.rtcListen == "" || options.rtcAdvertisedIP == "" || options.transferTempDir == "" {
-		return errors.New("serve 必须显式配置 ADB、scrcpy artifact、WebRTC UDP4 地址和文件暂存目录")
+	if options.adbAddress == "" || options.rtcListen == "" || options.rtcAdvertisedIP == "" || options.transferTempDir == "" {
+		return errors.New("serve 必须显式配置 ADB、WebRTC UDP4 地址和文件暂存目录")
 	}
+	stage = "load_tls_credentials"
 	if _, err = tls.LoadX509KeyPair(options.cert, options.key); err != nil {
 		return err
 	}
-	if _, err = os.Stat(filepath.Join(options.web, "index.html")); err != nil {
-		return fmt.Errorf("前端未构建：%w", err)
+	stage = "load_frontend"
+	var static http.Handler
+	if options.web != "" {
+		if _, err = os.Stat(filepath.Join(options.web, "index.html")); err != nil {
+			return fmt.Errorf("前端覆盖目录不可用：%w", err)
+		}
+		static = http.FileServer(http.Dir(options.web))
+	} else {
+		assets, err := bundle.Frontend()
+		if err != nil {
+			return fmt.Errorf("open embedded frontend: %w", err)
+		}
+		static = http.FileServer(http.FS(assets))
 	}
+	stage = "load_admin_credentials"
 	credential, err := identity.Load(options.adminFile)
 	if err != nil {
 		return err
 	}
+	stage = "configure_adb_client"
 	adbClient, err := adb.NewClient(options.adbAddress, options.adbTimeout)
 	if err != nil {
 		return err
 	}
+	stage = "acquire_database_lock"
 	processLock, err := storage.AcquireProcessLock(options.database)
 	if err != nil {
 		return err
 	}
+	stage = "open_database"
 	db, err := storage.Open(ctx, options.database)
 	if err != nil {
 		return errors.Join(err, processLock.Close())
@@ -183,6 +211,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		MaxActive:        options.transferMaxActive,
 		MaxCommandOutput: options.transferMaxOutput,
 	}
+	stage = "recover_transfers"
 	if err = transfers.Recover(ctx, db, transferConfig); err != nil {
 		return errors.Join(err, db.Close(), processLock.Close())
 	}
@@ -234,6 +263,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 
 	registry = devices.New(runtimeCtx, db, adbClient, logger, options.adbTimeout)
 	tunnels = connections.New(runtimeCtx, db, adbClient, registry, logger)
+	stage = "initialize_capture"
 	captureManager, err = capture.New(runtimeCtx, db, adbClient, registry, capture.Config{ServerPath: options.scrcpyServer}, logger)
 	if err != nil {
 		return errors.Join(err, closeRuntime())
@@ -244,6 +274,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		}
 		return captureManager.Recover(recoveryCtx, deviceID)
 	})
+	stage = "initialize_leases"
 	manager, err = leases.New(runtimeCtx, db, registry, logger)
 	if err != nil {
 		return errors.Join(err, closeRuntime())
@@ -256,6 +287,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	stateEvents = events.New(manager.BootID())
 	manager.SetEvents(stateEvents)
 	registry.SetEvents(stateEvents)
+	stage = "bind_webrtc"
 	rtcEndpoint, err = rtc.New(rtc.Config{ListenAddress: options.rtcListen, AdvertisedIP: options.rtcAdvertisedIP})
 	if err != nil {
 		return errors.Join(err, closeRuntime())
@@ -265,6 +297,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		Events: stateEvents, TaskOwner: manager.EventTask, AdminVersion: credential.Version,
 		Logger: logger,
 	})
+	stage = "initialize_transfers"
 	transferManager, err = transfers.New(runtimeCtx, transfers.Dependencies{DB: db, ADB: adbClient, Scopes: mediaManager, Logger: logger}, transferConfig)
 	if err != nil {
 		return errors.Join(err, closeRuntime())
@@ -278,15 +311,17 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	}
 	server := &http.Server{
 		Addr:              options.listen,
-		Handler:           app.Handler(http.FileServer(http.Dir(options.web))),
+		Handler:           app.Handler(static),
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
+	stage = "bind_http"
 	listener, err := net.Listen("tcp", options.listen)
 	if err != nil {
 		return errors.Join(err, closeRuntime())
 	}
+	stage = "running"
 	ready()
 	result := make(chan error, 1)
 	go func() {
@@ -311,5 +346,20 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if errors.Is(err, http.ErrServerClosed) {
 		err = nil
 	}
+	stage = "shutdown"
 	return errors.Join(err, closeRuntime())
+}
+
+func buildInfo() map[string]string {
+	result := make(map[string]string)
+	if info, ok := debug.ReadBuildInfo(); ok {
+		result["go"] = info.GoVersion
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision", "vcs.time", "vcs.modified":
+				result[setting.Key] = setting.Value
+			}
+		}
+	}
+	return result
 }

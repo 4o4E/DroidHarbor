@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/leases"
 )
@@ -230,9 +231,9 @@ func (r *Registry) watch() {
 			return
 		}
 		if wasReady {
-			r.logger.Warn("adb_inventory_disconnected", "code", "ADB_UNAVAILABLE")
+			r.logger.Warn("adb_inventory_disconnected", "code", "ADB_UNAVAILABLE", "cause", diagnostics.Cause(err))
 		} else if err != nil && announce {
-			r.logger.Warn("adb_inventory_unavailable", "code", "ADB_UNAVAILABLE")
+			r.logger.Warn("adb_inventory_unavailable", "code", "ADB_UNAVAILABLE", "cause", diagnostics.Cause(err))
 		}
 		// Resubscription observes server state only; it never reconnects a
 		// device, renews a lease, or replays an Android operation.
@@ -297,7 +298,7 @@ func (r *Registry) notifyLocked(deviceID string) {
 		taskID = r.manager.EventTask(deviceID)
 	}
 	if _, err := r.events.Publish(events.Change{EntityType: "device", EntityID: deviceID, DeviceID: deviceID, TaskID: taskID}); err != nil && !errors.Is(err, events.ErrClosed) {
-		r.logger.Error("device_event_publish_failed", "code", "EVENT_PUBLISH_FAILED")
+		r.logger.Error("device_event_publish_failed", "code", "EVENT_PUBLISH_FAILED", "deviceId", deviceID, "cause", diagnostics.Cause(err))
 	}
 }
 
@@ -317,7 +318,7 @@ func (r *Registry) verifyInventory() {
 			return
 		case update := <-r.updates:
 			if err := r.verifySnapshot(update); err != nil && r.ctx.Err() == nil {
-				r.logger.Error("device_identity_refresh_failed", "code", "IDENTITY_UNAVAILABLE")
+				r.logger.Error("device_identity_refresh_failed", "code", "IDENTITY_UNAVAILABLE", "cause", diagnostics.Cause(err))
 			}
 		}
 	}
@@ -423,7 +424,7 @@ func (r *Registry) verifySnapshot(update inventoryUpdate) error {
 		}
 		if reclaiming {
 			if err = r.manager.RetryRecovery(update.epoch, link.deviceID); err != nil {
-				r.logger.Error("device_recovery_recheck_failed", "deviceId", link.deviceID, "code", "RECLAIM_FAILED")
+				r.logger.Error("device_recovery_recheck_failed", "deviceId", link.deviceID, "code", "RECLAIM_FAILED", "cause", diagnostics.Cause(err))
 			}
 		}
 	}

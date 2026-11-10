@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"droidharbor/internal/bundle"
 )
 
 const serverArtifactSize = 733930
@@ -13,17 +15,16 @@ const serverArtifactSize = 733930
 // loadServerArtifact loads only the pinned scrcpy v5.0.1 artifact. The caller
 // retains the returned immutable byte slice for the lifetime of its manager.
 func loadServerArtifact(path string) ([]byte, error) {
-	if path == "" {
-		return nil, errors.New("scrcpy server artifact path is required")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open scrcpy server artifact: %w", err)
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, serverArtifactSize+1))
-	if err != nil {
-		return nil, fmt.Errorf("read scrcpy server artifact: %w", err)
+	data := bundle.ScrcpyServer
+	if path != "" {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("open scrcpy server artifact: %w", err)
+		}
+		data, err = io.ReadAll(io.LimitReader(file, serverArtifactSize+1))
+		if err = errors.Join(err, file.Close()); err != nil {
+			return nil, fmt.Errorf("read scrcpy server artifact: %w", err)
+		}
 	}
 	if len(data) != serverArtifactSize {
 		return nil, errors.New("scrcpy server artifact has unexpected size")

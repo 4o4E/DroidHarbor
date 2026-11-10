@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/identity"
 	"droidharbor/internal/leases"
 	"droidharbor/internal/scrcpy"
@@ -470,7 +471,11 @@ func (m *Manager) markFailure(ctx context.Context, s *Stream, code string) error
 func (m *Manager) markFailureBounded(s *Stream, code string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	return m.markFailure(ctx, s, code)
+	err := m.markFailure(ctx, s, code)
+	if err != nil {
+		m.logger.Error("capture_failure_persistence_failed", "deviceId", s.deviceID, "captureId", s.id, "code", code, "cause", diagnostics.Cause(err))
+	}
+	return err
 }
 func (m *Manager) remove(s *Stream) {
 	m.mu.Lock()

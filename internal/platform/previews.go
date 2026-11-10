@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"droidharbor/internal/devices"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/previews"
 )
 
@@ -39,14 +40,14 @@ func (s *Server) devicePreview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-DroidHarbor-Link-Generation", strconv.FormatUint(snapshot.LinkGeneration, 10))
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(snapshot.JPEG); err != nil {
-		s.Logger.Info("preview_response_write_failed", "requestId", r.Context().Value(requestKey{}))
+		s.Logger.Info("preview_response_write_failed", "requestId", r.Context().Value(requestKey{}), "cause", diagnostics.Cause(err))
 	}
 }
 
 func (s *Server) previewError(w http.ResponseWriter, r *http.Request, err error) {
 	var deviceErr *devices.Error
 	if errors.As(err, &deviceErr) {
-		s.fail(w, r, deviceErr.Status, deviceErr.Code, deviceErr.Message)
+		s.domainError(w, r, deviceErr)
 		return
 	}
 	switch {
@@ -59,7 +60,7 @@ func (s *Server) previewError(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, previews.ErrInputTooLarge), errors.Is(err, previews.ErrImageTooLarge), errors.Is(err, previews.ErrInvalidImage):
 		s.fail(w, r, 503, "PREVIEW_CAPTURE_FAILED", "设备截图无效或超出预览限制")
 	default:
-		s.Logger.Info("preview_capture_failed", "requestId", r.Context().Value(requestKey{}), "errorType", fmtErrorType(err))
+		s.Logger.Warn("preview_capture_failed", "requestId", r.Context().Value(requestKey{}), "deviceId", r.PathValue("id"), "cause", diagnostics.Cause(err))
 		s.fail(w, r, 503, "PREVIEW_CAPTURE_FAILED", "无法获取设备预览")
 	}
 }

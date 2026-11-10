@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"droidharbor/internal/devices"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/leases"
 	"droidharbor/internal/media"
 	"droidharbor/internal/transfers"
@@ -19,18 +20,25 @@ func (s *Server) domainError(w http.ResponseWriter, r *http.Request, err error) 
 	var deviceError *devices.Error
 	var mediaError *media.Error
 	var transferError *transfers.Error
+	var status int
+	var code, message string
 	switch {
 	case errors.As(err, &transferError):
-		s.fail(w, r, transferError.Status, transferError.Code, transferError.Message)
+		status, code, message = transferError.Status, transferError.Code, transferError.Message
 	case errors.As(err, &mediaError):
-		s.fail(w, r, mediaError.Status, mediaError.Code, mediaError.Message)
+		status, code, message = mediaError.Status, mediaError.Code, mediaError.Message
 	case errors.As(err, &leaseError):
-		s.fail(w, r, leaseError.HTTPStatus, leaseError.Code, leaseError.Message)
+		status, code, message = leaseError.HTTPStatus, leaseError.Code, leaseError.Message
 	case errors.As(err, &deviceError):
-		s.fail(w, r, deviceError.Status, deviceError.Code, deviceError.Message)
+		status, code, message = deviceError.Status, deviceError.Code, deviceError.Message
 	default:
 		s.internal(w, r, err)
+		return
 	}
+	if status >= 500 {
+		s.Logger.Error("operation_failed", "requestId", r.Context().Value(requestKey{}), "code", code, "cause", diagnostics.Cause(err))
+	}
+	s.fail(w, r, status, code, message)
 }
 
 func (s *Server) bearer(w http.ResponseWriter, r *http.Request) (string, bool) {

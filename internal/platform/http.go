@@ -8,13 +8,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"droidharbor/internal/connections"
 	"droidharbor/internal/devices"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/identity"
 	"droidharbor/internal/leases"
@@ -93,6 +96,18 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux.Handle("/", static)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := identity.Secret()
+		started := time.Now()
+		defer func() {
+			if value := recover(); value != nil {
+				if value != http.ErrAbortHandler {
+					s.Logger.Error("request_panicked", "requestId", id, "method", r.Method, "route", r.Pattern, "panicType", fmt.Sprintf("%T", value), "stack", string(debug.Stack()))
+				}
+				// Preserve net/http's aborted-connection behavior without letting
+				// its default panic logger print a potentially secret panic value.
+				panic(http.ErrAbortHandler)
+			}
+			s.Logger.Debug("request_completed", "requestId", id, "method", r.Method, "route", r.Pattern, "durationMs", time.Since(started).Milliseconds())
+		}()
 		r = r.WithContext(context.WithValue(r.Context(), requestKey{}, id))
 		w.Header().Set("X-Request-ID", id)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -117,13 +132,17 @@ func (s *Server) json(w http.ResponseWriter, status int, value any) {
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, code, message string) {
 	id, _ := r.Context().Value(requestKey{}).(string)
-	s.Logger.Info("request_rejected", "requestId", id, "code", code, "status", status)
+	level := slog.LevelInfo
+	if status >= 500 {
+		level = slog.LevelError
+	}
+	s.Logger.Log(r.Context(), level, "request_rejected", "requestId", id, "method", r.Method, "route", r.Pattern, "code", code, "status", status)
 	s.json(w, status, apiError{Code: code, Message: message, RequestID: id})
 }
 
 func (s *Server) internal(w http.ResponseWriter, r *http.Request, err error) {
 	// 数据库错误可能含绑定参数，不把原始错误写入普通运行日志。
-	s.Logger.Error("storage_operation_failed", "requestId", r.Context().Value(requestKey{}), "errorType", fmtErrorType(err))
+	s.Logger.Error("storage_operation_failed", "requestId", r.Context().Value(requestKey{}), "errorType", fmtErrorType(err), "cause", diagnostics.Cause(err))
 	s.fail(w, r, 503, "STORAGE_UNAVAILABLE", "持久化操作失败")
 }
 

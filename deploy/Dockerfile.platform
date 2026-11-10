@@ -11,12 +11,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
+COPY --from=web-build /src/web/dist ./internal/bundle/frontend
 RUN echo '764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536  .tools/scrcpy-server-v5.0.1' | sha256sum -c -
+RUN cp .tools/scrcpy-server-v5.0.1 internal/bundle/scrcpy-server-v5.0.1
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/droidharbor ./cmd/droidharbor
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=go-build /out/droidharbor /usr/local/bin/droidharbor
-COPY --from=go-build /src/.tools/scrcpy-server-v5.0.1 /opt/droidharbor/scrcpy-server-v5.0.1
-COPY --from=web-build /src/web/dist /opt/droidharbor/web
 EXPOSE 8443/tcp
 ENTRYPOINT ["/usr/local/bin/droidharbor"]

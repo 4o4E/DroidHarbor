@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/identity"
 	"github.com/pion/webrtc/v4"
@@ -239,7 +240,7 @@ func (s *session) beginEnd(reason error) {
 	s.endOnce.Do(func() {
 		s.cancel()
 		if reason != nil {
-			s.manager.deps.Logger.Info("media_session_ended", "sessionId", s.id, "deviceId", s.hub.deviceID, "error", reason.Error())
+			s.manager.deps.Logger.Warn("media_session_ended", "sessionId", s.id, "deviceId", s.hub.deviceID, "code", errorCode(reason), "cause", diagnostics.Cause(reason))
 		}
 		// At most one finisher per reserved session. Its capacity slot is retained
 		// until cleanup completes; peer callbacks never wait on device cleanup.
@@ -307,7 +308,7 @@ func (s *session) finish(reason error) {
 	code := errorCode(reason)
 	status := "succeeded"
 	if cleanupErr != nil {
-		s.manager.deps.Logger.Warn("media_session_cleanup_failed", "sessionId", s.id, "deviceId", h.deviceID, "error", cleanupErr.Error())
+		s.manager.deps.Logger.Warn("media_session_cleanup_failed", "sessionId", s.id, "deviceId", h.deviceID, "cause", diagnostics.Cause(cleanupErr))
 		status = "failed"
 		code = "SESSION_CLEANUP_FAILED"
 	}

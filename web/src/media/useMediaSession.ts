@@ -256,14 +256,18 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         channel.onclose = null
         channel.onerror = null
         channel.onmessage = null
-        try { channel.close() } catch { /* closing a failed transport is best effort */ }
+        try { channel.close() } catch (cause) {
+          console.warn('media_channel_close_failed', { sessionId: runtime.sessionId, errorType: cause instanceof Error ? cause.name : typeof cause })
+        }
       }
       const peer = runtime.peer
       runtime.peer = null
       if (peer) {
         peer.ontrack = null
         peer.onconnectionstatechange = null
-        try { peer.close() } catch { /* closing a failed transport is best effort */ }
+        try { peer.close() } catch (cause) {
+          console.warn('media_peer_close_failed', { sessionId: runtime.sessionId, errorType: cause instanceof Error ? cause.name : typeof cause })
+        }
       }
       runtime.stream?.getTracks().forEach(track => track.stop())
       runtime.stream = null
@@ -274,6 +278,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         ? api<void>(`/sessions/${encodeURIComponent(currentSession)}`, { method: 'DELETE', keepalive: true })
         : Promise.resolve()
       runtime.teardownPromise = closeRequest.catch(cause => {
+        console.error('media_session_cleanup_failed', { sessionId: currentSession, errorType: cause instanceof Error ? cause.name : typeof cause })
         const message = `结束媒体会话失败：${errorMessage(cause)}`
         if (wasCurrent) setCleanupError(message)
         if (nextStatus === 'closed' && !failure) throw cause

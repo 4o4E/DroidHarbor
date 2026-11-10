@@ -16,3 +16,5 @@
 !web/public/**
 !.tools/
 !.tools/scrcpy-server-v5.0.1
+internal/bundle/frontend/
+internal/bundle/scrcpy-server-v5.0.1

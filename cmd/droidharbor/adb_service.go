@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/service"
 )
 
@@ -39,15 +40,13 @@ func runADBService(args []string) error {
 	if strings.TrimSpace(*logPath) == "" || !filepath.IsAbs(*logPath) {
 		return errors.New("log-file must be an absolute path")
 	}
-	logFile, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	logger, logFile, err := diagnostics.Open(*logPath, slog.LevelInfo)
 	if err != nil {
 		return fmt.Errorf("open ADB service log file: %w", err)
 	}
-	logger := slog.New(slog.NewJSONHandler(logFile, nil))
 	if err := validateADBServiceConfig(*adbPath, *listen, *logPath, *authSeedDir); err != nil {
 		logger.Error("adb_service_invalid_configuration", "error", err)
-		_ = logFile.Close()
-		return err
+		return errors.Join(err, logFile.Close())
 	}
 	logger.Info("adb_service_starting", "listen", *listen)
 	err = service.Run("DroidHarborADB", func(ctx context.Context, ready func()) error {
@@ -111,7 +110,7 @@ func validateADBServiceConfig(adbPath, listen, logPath, authSeedDir string) erro
 	return nil
 }
 
-func runOwnedADB(ctx context.Context, adbPath, listen, profileDir, authSeedDir string, startupTimeout time.Duration, ready func()) error {
+func runOwnedADB(ctx context.Context, adbPath, listen, profileDir, authSeedDir string, startupTimeout time.Duration, ready func()) (runErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -139,15 +138,20 @@ func runOwnedADB(ctx context.Context, adbPath, listen, profileDir, authSeedDir s
 	if err != nil {
 		return fmt.Errorf("could not start owned ADB server: %w", err)
 	}
-	stopOnCancellation := context.AfterFunc(ctx, func() { _ = process.Kill() })
-	defer stopOnCancellation()
+	killDone := make(chan error, 1)
+	stopOnCancellation := context.AfterFunc(ctx, func() { killDone <- process.Kill() })
+	defer func() {
+		if !stopOnCancellation() {
+			runErr = errors.Join(runErr, <-killDone)
+		}
+	}()
 	exited := make(chan error, 1)
 	go func() { exited <- process.Wait() }()
 	client, err := adb.NewClient(listen, min(startupTimeout, time.Second))
 	if err != nil {
-		_ = process.Kill()
+		killErr := process.Kill()
 		<-exited
-		return processFailure("could not create ADB readiness client", err, diagnostics)
+		return processFailure("could not create ADB readiness client", errors.Join(err, killErr), diagnostics)
 	}
 	deadline := time.NewTimer(startupTimeout)
 	defer deadline.Stop()
@@ -167,9 +171,9 @@ func runOwnedADB(ctx context.Context, adbPath, listen, profileDir, authSeedDir s
 				return nil
 			case <-deadline.C:
 				confirm.Stop()
-				_ = process.Kill()
+				killErr := process.Kill()
 				<-exited
-				return processFailure("owned ADB server did not become ready before the startup deadline", nil, diagnostics)
+				return processFailure("owned ADB server did not become ready before the startup deadline", killErr, diagnostics)
 			case <-confirm.C:
 			}
 			version, versionErr = client.Version(ctx)
@@ -190,9 +194,9 @@ func runOwnedADB(ctx context.Context, adbPath, listen, profileDir, authSeedDir s
 			<-exited
 			return nil
 		case <-deadline.C:
-			_ = process.Kill()
+			killErr := process.Kill()
 			<-exited
-			return processFailure("owned ADB server did not become ready before the startup deadline", nil, diagnostics)
+			return processFailure("owned ADB server did not become ready before the startup deadline", killErr, diagnostics)
 		case <-poll.C:
 		}
 	}
@@ -357,10 +361,14 @@ func writeADBAuthSeed(target string, material map[string][]byte, removeDirectory
 			return
 		}
 		for _, name := range created {
-			_ = os.Remove(filepath.Join(target, name))
+			if err := os.Remove(filepath.Join(target, name)); err != nil {
+				result = errors.Join(result, fmt.Errorf("roll back ADB authorization file: %w", err))
+			}
 		}
 		if removeDirectoryOnFailure {
-			_ = os.Remove(target)
+			if err := os.Remove(target); err != nil {
+				result = errors.Join(result, fmt.Errorf("roll back ADB authorization directory: %w", err))
+			}
 		}
 	}()
 	for _, name := range names {
@@ -377,9 +385,7 @@ func writeADBAuthSeed(target string, material map[string][]byte, removeDirectory
 		if writeErr == nil {
 			writeErr = file.Sync()
 		}
-		if closeErr := file.Close(); writeErr == nil {
-			writeErr = closeErr
-		}
+		writeErr = errors.Join(writeErr, file.Close())
 		if writeErr != nil {
 			return writeErr
 		}

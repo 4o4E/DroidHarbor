@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func TestRecoverOfflineCompletesOnlyWithoutOwnedCaptureResources(t *testing.T) {
 	}
 	link := leases.Link{DeviceID: "device", LinkID: "link", TransportID: 7, Generation: 3}
 	source := &testSource{link: link, available: false}
-	manager := &Manager{db: db, source: source, streams: make(map[string]*Stream), recovering: make(map[string]bool)}
+	manager := &Manager{logger: slog.Default(), db: db, source: source, streams: make(map[string]*Stream), recovering: make(map[string]bool)}
 
 	complete, err := manager.Recover(ctx, "device")
 	if err != nil || !complete {

@@ -106,15 +106,13 @@ func startOwnedADBServer(binary string, args, environment []string) (*ownedADBSe
 	runtime.KeepAlive(attributes)
 	born, err := processBirthIdentityHandle(information.Process)
 	if err != nil {
-		abortCreatedADBProcess(information, job)
-		return nil, err
+		return nil, errors.Join(err, abortCreatedADBProcess(information, job))
 	}
 	threadCloseErr := windows.CloseHandle(information.Thread)
-	information.Thread = 0
 	if threadCloseErr != nil {
-		abortCreatedADBProcess(information, job)
-		return nil, threadCloseErr
+		return nil, errors.Join(threadCloseErr, abortCreatedADBProcess(information, job))
 	}
+	information.Thread = 0
 	process := &ownedADBServer{process: information.Process, job: job, pid: information.ProcessId, born: born, done: make(chan struct{})}
 	go process.waitForExit()
 	return process, nil
@@ -145,14 +143,27 @@ func deleteProcThreadAttributeList(list *windows.ProcThreadAttributeListContaine
 	}
 }
 
-func abortCreatedADBProcess(information windows.ProcessInformation, job windows.Handle) {
-	_ = windows.TerminateProcess(information.Process, 1)
-	_, _ = windows.WaitForSingleObject(information.Process, windows.INFINITE)
-	if information.Thread != 0 {
-		_ = windows.CloseHandle(information.Thread)
+func abortCreatedADBProcess(information windows.ProcessInformation, job windows.Handle) error {
+	var result error
+	if err := windows.TerminateProcess(information.Process, 1); err != nil {
+		result = errors.Join(result, fmt.Errorf("terminate ADB startup child: %w", err))
 	}
-	_ = windows.CloseHandle(information.Process)
-	_ = windows.CloseHandle(job)
+	// Closing the owned job also terminates descendants if direct termination failed.
+	if err := windows.CloseHandle(job); err != nil {
+		result = errors.Join(result, fmt.Errorf("close ADB startup job: %w", err))
+	}
+	if _, err := windows.WaitForSingleObject(information.Process, windows.INFINITE); err != nil {
+		result = errors.Join(result, fmt.Errorf("wait for ADB startup child: %w", err))
+	}
+	if information.Thread != 0 {
+		if err := windows.CloseHandle(information.Thread); err != nil {
+			result = errors.Join(result, fmt.Errorf("close ADB startup thread: %w", err))
+		}
+	}
+	if err := windows.CloseHandle(information.Process); err != nil {
+		result = errors.Join(result, fmt.Errorf("close ADB startup process: %w", err))
+	}
+	return result
 }
 
 func (p *ownedADBServer) waitForExit() {
@@ -167,8 +178,7 @@ func (p *ownedADBServer) waitForExit() {
 	} else if exitCode != 0 && !p.stopped {
 		p.err = fmt.Errorf("adb server exited with code %d", exitCode)
 	}
-	_ = windows.CloseHandle(p.process)
-	_ = windows.CloseHandle(p.job)
+	p.err = errors.Join(p.err, windows.CloseHandle(p.process), windows.CloseHandle(p.job))
 	close(p.done)
 	p.mu.Unlock()
 }

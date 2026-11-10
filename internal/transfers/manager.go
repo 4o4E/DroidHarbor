@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/identity"
 	"droidharbor/internal/media"
 )
@@ -643,8 +644,9 @@ func (m *Manager) finish(t *transfer, state, code, message, result string, exit 
 	t.scope.Close()
 	close(t.done)
 	if finishErr != nil {
-		m.logger.Error("transfer finalization incomplete", "errorType", "TRANSFER_FINALIZATION_FAILED", "transfer_id", value.ID)
+		m.logger.Error("transfer_finalization_incomplete", "errorType", "TRANSFER_FINALIZATION_FAILED", "transferId", value.ID, "cause", diagnostics.Cause(finishErr))
 	}
+	m.logger.Info("transfer_finished", "transferId", value.ID, "state", finalState, "code", finalCode, "exitCode", exit)
 	return finishErr
 }
 

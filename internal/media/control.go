@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"droidharbor/internal/capture"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/rtc"
 	"droidharbor/internal/scrcpy"
 )
@@ -456,7 +457,7 @@ func (s *session) resetDeviceVideo() {
 	// RESET_VIDEO restarts capture for all viewers; it is not a device write,
 	// so read-only viewers must be able to request a fresh key frame too.
 	if err := source.Send(ctx, scrcpy.ControlMessage{Type: scrcpy.ControlResetVideo}, func() error { return s.check(ctx, false) }); err != nil && s.ctx.Err() == nil {
-		s.manager.deps.Logger.Warn("media_keyframe_request_failed", "sessionId", s.id, "deviceId", h.deviceID, "error", err.Error())
+		s.manager.deps.Logger.Warn("media_keyframe_request_failed", "sessionId", s.id, "deviceId", h.deviceID, "cause", diagnostics.Cause(err))
 	}
 }
 

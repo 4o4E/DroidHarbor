@@ -6,7 +6,9 @@
   "scripts": {
     "spec": "openspec",
     "web:dev": "npm --prefix web run dev --",
-    "web:build": "npm --prefix web run build"
+    "web:build": "npm --prefix web run build",
+    "assets:prepare": "node scripts/prepare-assets.mjs",
+    "package:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy/windows/package.ps1"
   },
   "devDependencies": {
     "@fission-ai/openspec": "1.16.0"

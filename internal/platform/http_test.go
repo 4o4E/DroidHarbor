@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -117,5 +118,50 @@ func TestSessionAuthorizationLifecycle(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), cookie.Value) {
 		t.Fatal("secret leaked into logs")
+	}
+}
+
+func TestPanicAbortsRequestWithoutLoggingSecretValue(t *testing.T) {
+	var output bytes.Buffer
+	app := &Server{Logger: slog.New(slog.NewJSONHandler(&output, nil))}
+	server := httptest.NewUnstartedServer(app.Handler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("secret-request-payload-marker")
+	})))
+	// Capture the standard HTTP logger too: it must not repeat the panic value.
+	server.Config.ErrorLog = slog.NewLogLogger(app.Logger.Handler(), slog.LevelError)
+	server.Start()
+	defer server.Close()
+	response, err := server.Client().Get(server.URL + "/fault?secret-query-marker")
+	if response != nil {
+		response.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("panic was converted to an HTTP success")
+	}
+	// The abort is limited to the failed request, not the whole server.
+	response, err = server.Client().Get(server.URL + "/health/live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("server did not survive request panic: %d", response.StatusCode)
+	}
+	logs := output.String()
+	for _, secret := range []string{"secret-request-payload-marker", "secret-query-marker"} {
+		if strings.Contains(logs, secret) {
+			t.Fatalf("panic diagnosis leaked %q", secret)
+		}
+	}
+	var record struct {
+		Message   string `json:"msg"`
+		RequestID string `json:"requestId"`
+		Stack     string `json:"stack"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Message != "request_panicked" || record.RequestID == "" || !strings.Contains(record.Stack, "TestPanicAbortsRequestWithoutLoggingSecretValue") {
+		t.Fatalf("panic lost diagnostic context: %s", logs)
 	}
 }

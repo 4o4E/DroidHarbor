@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/leases"
 	"droidharbor/internal/scrcpy"
 )
@@ -122,12 +123,16 @@ func (s *Stream) failAndClose(err error) {
 	s.requestStop(err)
 	ctx, cancel := cleanupContext()
 	defer cancel()
-	_ = s.finish(ctx)
+	if cleanupErr := s.finish(ctx); cleanupErr != nil {
+		s.manager.logger.Error("capture_cleanup_failed", "deviceId", s.deviceID, "captureId", s.id, "cause", diagnostics.Cause(cleanupErr))
+	}
 }
 func (s *Stream) finishAsync() {
 	ctx, cancel := cleanupContext()
 	defer cancel()
-	_ = s.finish(ctx)
+	if err := s.finish(ctx); err != nil {
+		s.manager.logger.Error("capture_async_cleanup_failed", "deviceId", s.deviceID, "captureId", s.id, "cause", diagnostics.Cause(err))
+	}
 }
 func (s *Stream) scheduleFinalizer() {
 	s.finishMu.Lock()
@@ -168,6 +173,7 @@ func (s *Stream) requestStop(err error) {
 	s.stopOnce.Do(func() {
 		s.stopRequested.Store(true)
 		if err != nil {
+			s.manager.logger.Warn("capture_stream_failed", "deviceId", s.deviceID, "captureId", s.id, "cause", diagnostics.Cause(err))
 			s.mu.Lock()
 			s.err = err
 			s.mu.Unlock()
@@ -309,7 +315,7 @@ func (s *Stream) drainShell() {
 		packet, err := adb.ReadShellPacket(s.shell, scratch, maxShellPacket)
 		if err != nil {
 			if s.ctx.Err() == nil {
-				s.requestStop(errors.New("foreground scrcpy shell exited unexpectedly"))
+				s.requestStop(fmt.Errorf("foreground scrcpy shell exited unexpectedly: %w", err))
 				go s.finishAsync()
 			}
 			return
@@ -320,6 +326,11 @@ func (s *Stream) drainShell() {
 			continue
 		case 3:
 			if s.ctx.Err() == nil {
+				var exitCode any
+				if len(packet.Data) == 1 {
+					exitCode = int(packet.Data[0])
+				}
+				s.manager.logger.Warn("scrcpy_server_exited", "deviceId", s.deviceID, "captureId", s.id, "exitCode", exitCode)
 				s.requestStop(errors.New("foreground scrcpy shell exited"))
 				go s.finishAsync()
 			}

@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/identity"
 )
@@ -454,7 +455,7 @@ func (m *Manager) logFailure(operation string, err error) {
 	if errors.As(err, &domainErr) {
 		category = domainErr.Code
 	}
-	m.logger.Error("lease_manager_failure", "operation", operation, "errorType", category, "eventId", identity.Secret())
+	m.logger.Error("lease_manager_failure", "operation", operation, "errorType", category, "eventId", identity.Secret(), "cause", diagnostics.Cause(err))
 }
 
 func (m *Manager) leaseContext(parent context.Context, state *leaseState) (*Grant, error) {

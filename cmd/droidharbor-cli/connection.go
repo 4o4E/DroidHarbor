@@ -917,7 +917,9 @@ func probeADBServerVersion(port int) (string, error) {
 		return "", err
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(time.Second))
+	if err := connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		return "", err
+	}
 	if _, err = connection.Write([]byte("000chost:version")); err != nil {
 		return "", err
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 )
 
 const (
@@ -180,6 +181,7 @@ func (m *Manager) Upload(ctx context.Context, owner, transferID string, size int
 }
 
 func (m *Manager) failUpload(t *transfer, code string, cause error) (Transfer, error) {
+	m.logOperationFailure(t, code, cause)
 	state := StateFailed
 	status := 500
 	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
@@ -234,21 +236,29 @@ func (m *Manager) run(t *transfer) {
 func (m *Manager) execute(t *transfer) finishOutcome {
 	ctx := t.ctx
 	if err := ctx.Err(); err != nil {
+		m.logOperationFailure(t, "DEVICE_OPERATION_NOT_STARTED", err)
 		return finishOutcome{StateCancelled, "DEVICE_OPERATION_NOT_STARTED", "设备操作尚未开始", "", nil}
 	}
 	if err := t.scope.Check(); err != nil {
+		m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
 		return finishOutcome{StateFailed, "DEVICE_OPERATION_NOT_AUTHORIZED", "设备操作未授权", "", nil}
 	}
 	file, err := os.Open(t.path)
 	if err != nil {
+		m.logOperationFailure(t, "STAGING_OPEN_FAILED", err)
 		return finishOutcome{StateFailed, "STAGING_OPEN_FAILED", "无法读取受限临时文件", "", nil}
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			m.logOperationFailure(t, "STAGING_CLOSE_FAILED", err)
+		}
+	}()
 	if t.value.Purpose == "file" && t.value.Overwrite {
 		err = m.adb.Push(ctx, t.scope.Link.TransportID, t.value.TargetPath, 0644, t.value.CreatedAt, file, t.scope.Check, func(n int64) {
 			m.update(t, func(v *Transfer) { v.BytesTransferred = n })
 		})
 		if err != nil {
+			m.logOperationFailure(t, "DEVICE_PUSH_FAILED", err)
 			code := "DEVICE_RESULT_UNKNOWN"
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				code = "TRANSFER_CANCELLED_RESULT_UNKNOWN"
@@ -256,6 +266,7 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 			return finishOutcome{StateUnknown, code, "推送中断，设备端结果未知", "", nil}
 		}
 		if err := t.scope.Check(); err != nil {
+			m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
 			return finishOutcome{StateUnknown, "DEVICE_RESULT_UNKNOWN", "设备端结果未知", "", nil}
 		}
 		return finishOutcome{StateSucceeded, "", "", "", nil}
@@ -264,19 +275,23 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 	if t.value.Purpose == "file" {
 		quoted, err := adb.ShellQuote(t.value.TargetPath)
 		if err != nil {
+			m.logOperationFailure(t, "INVALID_TARGET_PATH", err)
 			return finishOutcome{StateFailed, "INVALID_TARGET_PATH", "设备目标路径无效", "", nil}
 		}
 		command = "umask 022; set -C; cat > " + quoted
 	} else {
 		if err := m.setStatus(t, StateInstalling, "", ""); err != nil {
+			m.logOperationFailure(t, "RESULT_JOURNAL_FAILED", err)
 			return finishOutcome{StateFailed, "RESULT_JOURNAL_FAILED", "无法记录安装操作状态", "", nil}
 		}
 		if err := t.scope.Check(); err != nil {
+			m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
 			return finishOutcome{StateFailed, "DEVICE_OPERATION_NOT_AUTHORIZED", "安装操作未授权", "", nil}
 		}
 		command = "pm install -r -S " + fmt.Sprint(t.value.Size) + " -"
 	}
 	if err := t.scope.Check(); err != nil {
+		m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
 		return finishOutcome{StateFailed, "DEVICE_OPERATION_NOT_AUTHORIZED", "设备操作未授权", "", nil}
 	}
 	result, err := streamShell(ctx, m.adb, t.scope.Link.TransportID, command, file, t.value.Size, m.config.MaxCommandOutput, t.scope.Check, func(n int64) {
@@ -284,6 +299,7 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 	})
 	m.update(t, func(v *Transfer) { v.Stdout = result.Stdout; v.Stderr = result.Stderr })
 	if err != nil {
+		m.logOperationFailure(t, "DEVICE_STREAM_FAILED", err)
 		code := "DEVICE_RESULT_UNKNOWN"
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			code = "TRANSFER_CANCELLED_RESULT_UNKNOWN"
@@ -294,6 +310,7 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 		out := strings.TrimSpace(result.Stdout)
 		if result.ExitCode == 0 && (out == "Success" || strings.HasPrefix(out, "Success:")) {
 			if err := t.scope.Check(); err != nil {
+				m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
 				return finishOutcome{StateUnknown, "DEVICE_RESULT_UNKNOWN", "安装结果未知", shellResultText(result), &result.ExitCode}
 			}
 			return finishOutcome{StateSucceeded, "", "", shellResultText(result), &result.ExitCode}
@@ -307,9 +324,14 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 		return finishOutcome{StateFailed, "DEVICE_WRITE_FAILED", "设备未能写入目标文件", shellResultText(result), &result.ExitCode}
 	}
 	if err := t.scope.Check(); err != nil {
+		m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
 		return finishOutcome{StateUnknown, "DEVICE_RESULT_UNKNOWN", "设备端结果未知", "", &result.ExitCode}
 	}
 	return finishOutcome{StateSucceeded, "", "", "", &result.ExitCode}
+}
+
+func (m *Manager) logOperationFailure(t *transfer, code string, cause error) {
+	m.logger.Warn("transfer_operation_failed", "transferId", t.value.ID, "code", code, "cause", diagnostics.Cause(cause))
 }
 
 func incompleteShellResult(result commandResult, readErr error, zeroExitMessage string) (commandResult, error) {

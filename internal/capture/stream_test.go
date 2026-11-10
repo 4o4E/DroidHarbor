@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestSendAuthorizationRefusalDoesNotStopSharedStream(t *testing.T) {
 	source := &testSource{link: link, available: true}
 	root, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager := &Manager{source: source, ctx: root, streams: map[string]*Stream{}}
+	manager := &Manager{logger: slog.Default(), source: source, ctx: root, streams: map[string]*Stream{}}
 	streamCtx, stop := context.WithCancel(root)
 	defer stop()
 	stream := &Stream{manager: manager, id: "capture", deviceID: "device", link: link, ctx: streamCtx, cancel: stop, done: make(chan struct{})}
@@ -51,7 +52,7 @@ func TestPinnedLinkAuthorizationRejectsReplacement(t *testing.T) {
 	source := &testSource{link: link, available: false}
 	root, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	manager := &Manager{source: source, ctx: root, streams: map[string]*Stream{}}
+	manager := &Manager{logger: slog.Default(), source: source, ctx: root, streams: map[string]*Stream{}}
 	streamCtx, stop := context.WithCancel(root)
 	defer stop()
 	stream := &Stream{manager: manager, id: "capture", deviceID: "device", link: link, ctx: streamCtx, cancel: stop}
@@ -69,7 +70,7 @@ func TestStreamCancellationClosesHeldSockets(t *testing.T) {
 	source := &testSource{link: link, available: true}
 	root, cancelRoot := context.WithCancel(context.Background())
 	defer cancelRoot()
-	manager := &Manager{source: source, ctx: root, streams: map[string]*Stream{}}
+	manager := &Manager{logger: slog.Default(), source: source, ctx: root, streams: map[string]*Stream{}}
 	streamCtx, cancel := context.WithCancel(root)
 	left, right := net.Pipe()
 	defer right.Close()
@@ -115,7 +116,7 @@ func TestPartialControlWriteHasUnknownResult(t *testing.T) {
 	root, cancelRoot := context.WithCancel(context.Background())
 	defer cancelRoot()
 	streamCtx, cancel := context.WithCancel(root)
-	manager := &Manager{source: source, ctx: root, streams: make(map[string]*Stream)}
+	manager := &Manager{logger: slog.Default(), source: source, ctx: root, streams: make(map[string]*Stream)}
 	stream := &Stream{manager: manager, id: "capture", deviceID: "device", link: link, ctx: streamCtx, cancel: cancel, control: partialControlConn{}, frames: make(chan scrcpy.Packet), messages: make(chan scrcpy.DeviceMessage), done: make(chan struct{}), started: make(chan struct{}), workersDone: make(chan struct{})}
 	close(stream.started)
 	manager.streams["device"] = stream
@@ -171,7 +172,7 @@ func newControlTestStream(conn net.Conn) (*Stream, func()) {
 	source := &testSource{link: link, available: true}
 	root, cancelRoot := context.WithCancel(context.Background())
 	streamCtx, cancelStream := context.WithCancel(root)
-	manager := &Manager{source: source, ctx: root, streams: make(map[string]*Stream)}
+	manager := &Manager{logger: slog.Default(), source: source, ctx: root, streams: make(map[string]*Stream)}
 	stream := &Stream{manager: manager, id: "capture", deviceID: "device", link: link, ctx: streamCtx, cancel: cancelStream, control: conn, frames: make(chan scrcpy.Packet), messages: make(chan scrcpy.DeviceMessage), done: make(chan struct{}), started: make(chan struct{}), workersDone: make(chan struct{})}
 	close(stream.started)
 	manager.streams["device"] = stream
@@ -220,7 +221,7 @@ func TestLinkContextCancellationFinalizesForStreamConsumers(t *testing.T) {
 	source := &testSource{link: link, available: true}
 	managerCtx, cancelManager := context.WithCancel(context.Background())
 	defer cancelManager()
-	manager := &Manager{source: source, ctx: managerCtx, streams: make(map[string]*Stream)}
+	manager := &Manager{logger: slog.Default(), source: source, ctx: managerCtx, streams: make(map[string]*Stream)}
 	linkCtx, cancelLink := context.WithCancel(context.Background())
 	defer cancelLink()
 	streamCtx, cancelStream := context.WithCancel(managerCtx)

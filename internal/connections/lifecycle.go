@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/identity"
 	"droidharbor/internal/leases"
 )
@@ -17,7 +18,7 @@ func (m *Manager) watch(e *entry) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := m.closeEntry(ctx, e); err != nil {
-		m.logger.Error("connection_cleanup_failed", "connectionId", e.id, "leaseId", e.lease.ID)
+		m.logger.Error("connection_cleanup_failed", "connectionId", e.id, "leaseId", e.lease.ID, "cause", diagnostics.Cause(err))
 	}
 }
 

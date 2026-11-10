@@ -42,9 +42,15 @@ func startOwnedADBServer(binary string, args, environment []string) (*ownedADBSe
 		}
 		birth, err := processBirthIdentity(cmd.Process.Pid)
 		if err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			started <- processStartResult{err: err}
+			killErr := cmd.Process.Kill()
+			if errors.Is(killErr, os.ErrProcessDone) {
+				killErr = nil
+			}
+			waitErr := cmd.Wait()
+			if exit, ok := waitErr.(*exec.ExitError); ok && exit.ExitCode() == -1 && killErr == nil {
+				waitErr = nil // The exit caused by our successful kill is expected.
+			}
+			started <- processStartResult{err: errors.Join(err, killErr, waitErr)}
 			return
 		}
 		process := &ownedADBServer{cmd: cmd, pid: cmd.Process.Pid, born: birth, done: make(chan struct{})}
