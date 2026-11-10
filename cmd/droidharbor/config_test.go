@@ -27,7 +27,7 @@ func TestEnvPathsAreLocalToConfigAndEnvironmentOverridesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, ".env")
-	data := "\ufeffDROIDHARBOR_RTC_ADVERTISED_IP=127.0.0.1\r\nDROIDHARBOR_DATABASE=\"database folder/state.db\"\r\nDROIDHARBOR_ADB_SERVER=127.0.0.1:5037\r\n"
+	data := "\ufeffDROIDHARBOR_ADMIN_TOKEN=test-admin-token\r\nDROIDHARBOR_RTC_ADVERTISED_IP=127.0.0.1\r\nDROIDHARBOR_DATABASE=\"database folder/state.db\"\r\nDROIDHARBOR_ADB_SERVER=127.0.0.1:5037\r\n"
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -61,10 +61,33 @@ func TestEnvErrorsNameSettingWithoutExposingValues(t *testing.T) {
 	}
 }
 
-func TestMissingEnvPointsToTemplate(t *testing.T) {
+func TestGeneratedConfigurationKeepsTokenAndRejectsDamagedExistingFile(t *testing.T) {
 	isolatePlatformEnvironment(t)
-	_, err := loadServeOptions(filepath.Join(t.TempDir(), ".env"))
-	if err == nil || !strings.Contains(err.Error(), ".env.example") {
-		t.Fatalf("missing configuration did not explain initialization: %v", err)
+	path := filepath.Join(t.TempDir(), ".env")
+	first, err := loadServeOptions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DROIDHARBOR_ADMIN_TOKEN", "unrelated-process-token")
+	second, err := loadServeOptions(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.configCreated || second.configCreated || first.adminToken != second.adminToken {
+		t.Fatal("initialization replaced the persistent login token")
+	}
+	damaged := []byte("DROIDHARBOR_ADMIN_TOKEN=\n")
+	if err := os.WriteFile(path, damaged, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadServeOptions(path); err == nil {
+		t.Fatal("existing configuration without a token was silently repaired")
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(current) != string(damaged) {
+		t.Fatal("failed loading changed the existing configuration")
 	}
 }

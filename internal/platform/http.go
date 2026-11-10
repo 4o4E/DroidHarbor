@@ -77,6 +77,7 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/v1/transfers/{id}", s.getTransfer)
 	mux.HandleFunc("DELETE /api/v1/transfers/{id}", s.cancelTransfer)
 	mux.HandleFunc("POST /api/v1/devices", s.registerDevice)
+	mux.HandleFunc("POST /api/v1/devices/discovered", s.registerDiscoveredDevice)
 	mux.HandleFunc("PATCH /api/v1/devices/{id}", s.patchDevice)
 	mux.HandleFunc("POST /api/v1/devices/{id}/links", s.addDeviceLink)
 	mux.HandleFunc("PATCH /api/v1/devices/{id}/links/{linkId}", s.patchDeviceLink)

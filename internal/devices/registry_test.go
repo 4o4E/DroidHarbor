@@ -519,3 +519,74 @@ func TestOfflineReadLinkDoesNotBlockOtherDeviceDisconnect(t *testing.T) {
 		t.Fatal("disconnected device retained its previous link authorization")
 	}
 }
+
+func TestDiscoveredEnrollmentDeduplicatesHardwareAndKeepsUntrustedLinksDisabled(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "discovered.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	client := identityFixture(t, map[uint64]string{
+		1: "one-phone\nMaker\nPhone\nproduct\n15\n35\n",
+		2: "one-phone\nMaker\nPhone\nproduct\n15\n35\n",
+		3: "one-phone\nMaker\nDifferent\nproduct\n15\n35\n",
+	})
+	registry := New(ctx, db, client, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second)
+	defer registry.Close()
+	registry.publish([]adb.Device{
+		{Serial: "usb-one", State: "device", TransportID: 1},
+		{Serial: "192.0.2.1:5555", State: "device", TransportID: 2},
+		{Serial: "usb-conflict", State: "device", TransportID: 3},
+		{Serial: "usb-untrusted", State: "unauthorized", TransportID: 4},
+	}, ctx)
+	usb, err := registry.RegisterDiscovered(ctx, "admin", "usb-one", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wifi, err := registry.RegisterDiscovered(ctx, "admin", "192.0.2.1:5555", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usb.DeviceID != wifi.DeviceID || usb.LinkID == wifi.LinkID {
+		t.Fatal("USB and Wi-Fi became separate physical devices or overwrote one link")
+	}
+	pending, err := registry.Discover(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := make(map[string]bool)
+	for _, device := range pending {
+		remaining[device.Serial] = true
+	}
+	if remaining["usb-one"] || remaining["192.0.2.1:5555"] || !remaining["usb-untrusted"] {
+		t.Fatal("registered links remained pending or an untrusted new phone was hidden")
+	}
+	untrusted, err := registry.RegisterDiscovered(ctx, "admin", "usb-untrusted", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enabled bool
+	var state string
+	if err := db.QueryRow(`SELECT enabled FROM device_links WHERE id=?`, untrusted.LinkID).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT allocation_state FROM devices WHERE id=?`, untrusted.DeviceID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if enabled || state != "maintenance" {
+		t.Fatal("an unauthorized phone became usable or allocatable")
+	}
+	_, err = registry.RegisterDiscovered(ctx, "admin", "usb-conflict", "")
+	var conflict *Error
+	if !errors.As(err, &conflict) || conflict.Code != "IDENTITY_CONFLICT" {
+		t.Fatalf("conflicting hardware was accepted: %v", err)
+	}
+	var persisted bool
+	if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM device_links WHERE endpoint='usb-conflict')`).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted {
+		t.Fatal("a rejected identity left a registered link")
+	}
+}

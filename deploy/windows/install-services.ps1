@@ -79,9 +79,7 @@ try {
     Require-File $BinaryPath 'BinaryPath'
     Require-File $AdbExecutable 'AdbExecutable'
     Require-Directory $ConfigDirectory 'ConfigDirectory'
-    foreach ($name in @('admin.json', '.env')) {
-        Require-File (Join-Path $ConfigDirectory $name) $name
-    }
+    Require-File (Join-Path $ConfigDirectory '.env') '.env'
     if ([string]::IsNullOrWhiteSpace($AdbListen)) {
         throw 'The dedicated ADB listen address is required.'
     }

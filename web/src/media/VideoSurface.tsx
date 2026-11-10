@@ -406,7 +406,7 @@ export function VideoSurface({ session, mode, rotation = 0, mirrored = false, pa
     <div className={`flex h-full min-h-0 min-w-0 flex-col ${className ?? ''}`}>
       <div
         ref={surfaceRef}
-        className="relative flex min-h-0 min-w-0 flex-1 touch-none items-center justify-center overflow-hidden bg-black outline-none"
+        className="relative flex min-h-0 min-w-0 flex-1 touch-none items-center justify-center overflow-hidden bg-background outline-none"
         tabIndex={canControl ? 0 : -1}
         aria-label={mode === 'control' ? '设备视频与交互区域' : '设备视频'}
         onBlur={releaseLocalInputs}

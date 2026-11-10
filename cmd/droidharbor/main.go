@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -36,6 +37,9 @@ import (
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		if consoleErr := waitForFailureConsole(); consoleErr != nil {
+			fmt.Fprintln(os.Stderr, consoleErr)
+		}
 		os.Exit(1)
 	}
 }
@@ -52,7 +56,6 @@ func run(args []string) error {
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	database := flags.String("database", "data/droidharbor.db", "SQLite 文件")
-	adminFile := flags.String("admin-file", "data/admin.json", "管理员摘要配置")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -62,13 +65,6 @@ func run(args []string) error {
 	switch args[0] {
 	case "version":
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"product": "droidharbor", "version": "0.0.0-dev", "apiMajor": 1, "schemaVersion": storage.SchemaVersion, "build": buildInfo()})
-	case "admin-init":
-		token, err := identity.Initialize(*adminFile)
-		if err != nil {
-			return err
-		}
-		// 此命令的专用输出用于一次性交付秘密；不经运行日志。
-		return json.NewEncoder(os.Stdout).Encode(map[string]string{"adminToken": token, "credentialFile": *adminFile})
 	case "migrate":
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
@@ -90,7 +86,8 @@ func run(args []string) error {
 }
 
 type serveOptions struct {
-	database, adminFile, listen, web                                   string
+	database, configPath, adminToken, listen, web                      string
+	configCreated                                                      bool
 	sessionTTL                                                         time.Duration
 	adbAddress                                                         string
 	adbTimeout                                                         time.Duration
@@ -152,24 +149,17 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		static = http.FileServer(http.FS(assets))
 	}
 	stage = "load_admin_credentials"
-	credential, err := identity.Load(options.adminFile)
-	if errors.Is(err, os.ErrNotExist) {
-		token, initErr := identity.Initialize(options.adminFile)
-		if initErr != nil {
-			return fmt.Errorf("首次创建管理员凭证失败：%w", initErr)
-		}
-		// First-start credentials must remain visible even when INFO runtime logs are filtered.
+	digest := hex.EncodeToString(identity.Digest(options.adminToken))
+	credential := identity.AdminCredential{Version: digest, Hash: digest}
+	if options.configCreated {
+		// The first initialization result is visible even at ERROR log level.
 		record := slog.NewRecord(time.Now(), slog.LevelInfo, "admin_credentials_initialized", 0)
-		record.AddAttrs(slog.String("adminToken", token), slog.String("credentialFile", options.adminFile))
+		record.AddAttrs(slog.String("adminToken", options.adminToken), slog.String("configurationFile", options.configPath))
 		if err := logger.Handler().Handle(ctx, record); err != nil {
 			return fmt.Errorf("输出首次管理员初始化日志失败：%w", err)
 		}
-		credential, err = identity.Load(options.adminFile)
 	}
-	if err != nil {
-		return err
-	}
-	logger.Info("admin_credentials_ready", "credentialFile", options.adminFile)
+	logger.Info("admin_credentials_ready", "configurationFile", options.configPath)
 	stage = "configure_adb_client"
 	adbClient, err := adb.NewClient(options.adbAddress, options.adbTimeout)
 	if err != nil {
@@ -186,6 +176,10 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		return errors.Join(err, processLock.Close())
 	}
 	logger.Info("database_ready", "database", options.database, "schemaVersion", storage.SchemaVersion)
+	stage = "revoke_previous_admin_sessions"
+	if _, err = db.ExecContext(ctx, `UPDATE admin_sessions SET revoked_at=? WHERE revoked_at IS NULL AND admin_credential_version<>?`, time.Now().UnixMilli(), credential.Version); err != nil {
+		return errors.Join(err, db.Close(), processLock.Close())
+	}
 	transferConfig := transfers.Config{
 		TempDir:          options.transferTempDir,
 		MaxUploadBytes:   options.transferMaxUpload,

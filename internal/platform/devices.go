@@ -11,7 +11,7 @@ func (s *Server) discoverDevices(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorize(w, r, false); !ok {
 		return
 	}
-	found, err := s.Devices.Discover()
+	found, err := s.Devices.Discover(r.Context())
 	if err != nil {
 		s.domainError(w, r, err)
 		return
@@ -61,6 +61,26 @@ func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.json(w, 201, registered)
+}
+
+func (s *Server) registerDiscoveredDevice(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.authorize(w, r, true)
+	if !ok {
+		return
+	}
+	var body struct {
+		Endpoint    string `json:"endpoint"`
+		DisplayName string `json:"displayName"`
+	}
+	if !s.decode(w, r, &body, false) {
+		return
+	}
+	result, err := s.Devices.RegisterDiscovered(r.Context(), actor, body.Endpoint, body.DisplayName)
+	if err != nil {
+		s.domainError(w, r, err)
+		return
+	}
+	s.json(w, 200, result)
 }
 
 func (s *Server) addDeviceLink(w http.ResponseWriter, r *http.Request) {

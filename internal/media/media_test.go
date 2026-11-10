@@ -277,7 +277,7 @@ func TestViewerQueueRejectsOverLimitFramesWithoutChangingQueuedContent(t *testin
 }
 
 func TestFrameRecoveryWaitsForKeyframeAndRejectsOldGeneration(t *testing.T) {
-	source := new(capture.Stream)
+	var source *capture.Stream // Frame generations are independent of native encoder I/O.
 	h := &hub{source: source, epoch: 1}
 	s := &session{
 		hub:              h,

@@ -98,7 +98,9 @@ function rtpIsAtOrAfter(timestamp: number, boundary: number): boolean {
   return ((timestamp - boundary) >>> 0) < 0x8000_0000
 }
 
-export function useMediaSession(deviceId: string, mode: SessionMode, enabled: boolean): MediaSession {
+export function useMediaSession(deviceId: string, mode: SessionMode, enabled: boolean, onClipboard?: (text: string, source: 'phone' | 'browser') => void): MediaSession {
+  const clipboardCallback = useRef(onClipboard)
+  useEffect(() => { clipboardCallback.current = onClipboard }, [onClipboard])
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const runtimeRef = useRef<MediaRuntime | null>(null)
   const [currentRuntime, setCurrentRuntime] = useState<MediaRuntime | null>(null)
@@ -159,6 +161,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         waitForTerminal,
         resolve: reply => {
           window.clearTimeout(timeout)
+          if (type === 'clipboard.paste' && reply.status === 'acknowledged' && typeof payload?.text === 'string') clipboardCallback.current?.(payload.text, 'browser')
+          if (type === 'clipboard.get' && reply.status === 'received' && typeof reply.payload?.text === 'string') clipboardCallback.current?.(reply.payload.text, 'phone')
           resolve(reply)
         },
         reject: cause => {
@@ -343,6 +347,15 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         setEpoch(boundary.epoch)
         setDimensions({ width: boundary.width, height: boundary.height })
         setReady(false)
+        return
+      }
+      if (reply.type === 'clipboard.changed') {
+        if (mode !== 'control' || reply.captureEpoch !== runtime.epoch) return
+        if (reply.status !== 'received' || !isRecord(reply.payload) || typeof reply.payload.text !== 'string') {
+          void teardown('failed', '收到无效的剪贴板消息')
+          return
+        }
+        clipboardCallback.current?.(reply.payload.text, 'phone')
         return
       }
       if (typeof reply.sequence !== 'number' || !Number.isSafeInteger(reply.sequence)) return

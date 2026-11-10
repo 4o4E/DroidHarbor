@@ -69,7 +69,7 @@ func (r *Registry) Register(ctx context.Context, actorID string, request Registr
 		return Registered{}, err
 	}
 	result := Registered{DeviceID: identity.Secret(), LinkID: identity.Secret()}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO devices(id,display_name,allocation_state) VALUES(?,?,'maintenance')`, result.DeviceID, request.DisplayName); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO devices(id,display_name,allocation_state,video_max_fps,video_bit_rate) VALUES(?,?,'maintenance',60,12000000)`, result.DeviceID, request.DisplayName); err != nil {
 		return Registered{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO device_links(id,device_id,kind,endpoint) VALUES(?,?,?,?)`, result.LinkID, result.DeviceID, request.Kind, request.Endpoint); err != nil {

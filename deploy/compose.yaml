@@ -16,7 +16,6 @@ services:
     command: [serve, --env-file, /run/droidharbor-config/.env]
     environment:
       DROIDHARBOR_DATABASE: /var/lib/droidharbor/droidharbor.db
-      DROIDHARBOR_ADMIN_FILE: /run/droidharbor-config/admin.json
       DROIDHARBOR_LISTEN: 0.0.0.0:8080
       DROIDHARBOR_ADB_SERVER: adb:5037
       DROIDHARBOR_RTC_LISTEN: 0.0.0.0:${DH_RTC_PORT:?set shared UDP port}
@@ -28,9 +27,8 @@ services:
         source: ${DH_PLATFORM_DATA:?set platform state directory}
         target: /var/lib/droidharbor
       - type: bind
-        source: ${DH_CONFIG_DIR:?set admin and dotenv config directory}
+        source: ${DH_CONFIG_DIR:?set dotenv config directory}
         target: /run/droidharbor-config
-        read_only: true
     ports:
       - "${DH_HTTP_BIND_ADDRESS:?set local HTTP bind IPv4}:${DH_HTTP_PORT:?set HTTP host port}:8080/tcp"
       - "${DH_RTC_BIND_ADDRESS:?set local UDP bind IPv4}:${DH_RTC_PORT:?set UDP host port}:${DH_RTC_PORT:?set UDP host port}/udp"

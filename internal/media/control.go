@@ -963,19 +963,41 @@ func (h *hub) deviceMessage(source *capture.Stream, message scrcpy.DeviceMessage
 		return
 	}
 	epoch := h.epoch
-	h.mu.Unlock()
-	if deliver == nil {
-		return
-	}
-	session := deliver.session
+	var listeners []*session
 	if message.Type == scrcpy.DeviceClipboard {
-		if !session.enqueueOutput(mustJSON(controlReply{SessionID: session.id, CaptureEpoch: epoch, Sequence: deliver.controlSequence, Type: "clipboard.result", Status: "received", Payload: map[string]string{"text": deliver.text}})) {
+		for _, member := range h.members {
+			if member.mode == "control" && member.ctx.Err() == nil {
+				listeners = append(listeners, member)
+			}
+		}
+	}
+	h.mu.Unlock()
+	if deliver != nil {
+		session := deliver.session
+		var payload any
+		status := "acknowledged"
+		if message.Type == scrcpy.DeviceClipboard {
+			status, payload = "received", map[string]string{"text": deliver.text}
+		} else {
+			payload = map[string]bool{"applied": false}
+		}
+		if !session.enqueueOutput(mustJSON(controlReply{SessionID: session.id, CaptureEpoch: epoch, Sequence: deliver.controlSequence, Type: "clipboard.result", Status: status, Payload: payload})) {
 			session.beginEnd(problem(503, "CONTROL_BACKPRESSURE", "控制响应队列已达到上限"))
 		}
-		return
 	}
-	if !session.enqueueOutput(mustJSON(controlReply{SessionID: session.id, CaptureEpoch: epoch, Sequence: deliver.controlSequence, Type: "clipboard.result", Status: "acknowledged", Payload: map[string]bool{"applied": false}})) {
-		session.beginEnd(problem(503, "CONTROL_BACKPRESSURE", "控制响应队列已达到上限"))
+	// Clipboard text stays on authorized control channels; readonly viewers,
+	// logs and the desktop system clipboard never receive these events.
+	for _, member := range listeners {
+		ctx, cancel := context.WithTimeout(member.ctx, controlTimeout)
+		err := member.check(ctx, true)
+		cancel()
+		if err != nil {
+			member.beginEnd(err)
+			continue
+		}
+		if !member.enqueueOutput(mustJSON(controlReply{SessionID: member.id, CaptureEpoch: epoch, Type: "clipboard.changed", Status: "received", Payload: map[string]string{"text": message.Text}})) {
+			member.beginEnd(problem(503, "CONTROL_BACKPRESSURE", "控制响应队列已达到上限"))
+		}
 	}
 }
 

@@ -24,7 +24,7 @@ func serverOptions(scid int32, settings Settings) ([]string, error) {
 		"max_fps=" + strconv.Itoa(settings.MaxFPS),
 		"video_bit_rate=" + strconv.Itoa(settings.BitRate),
 		"downsize_on_error=false", "power_on=false", "stay_awake=false",
-		"keep_active=false", "show_touches=false", "clipboard_autosync=false",
+		"keep_active=false", "show_touches=false", "clipboard_autosync=true",
 		"cleanup=true", "send_dummy_byte=true", "send_device_meta=true",
 		"send_stream_meta=true", "send_frame_meta=true", "tunnel_forward=true",
 	}, nil

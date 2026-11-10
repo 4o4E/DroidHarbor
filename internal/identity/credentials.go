@@ -1,4 +1,4 @@
-// Package identity 使用高熵随机凭证；凭证文件和数据库保存摘要，首次管理员 token 由启动日志交付。
+// Package identity 使用高熵随机凭证；管理 token 来自 .env，运行态和数据库仅保存摘要。
 package identity
 
 import (
@@ -6,12 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 )
 
 type AdminCredential struct {
@@ -32,48 +26,4 @@ func (credential AdminCredential) Matches(secret string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(expected, Digest(secret)) == 1
-}
-
-func Load(path string) (AdminCredential, error) {
-	var credential AdminCredential
-	file, err := os.Open(path)
-	if err != nil {
-		return credential, err
-	}
-	defer file.Close()
-	decoder := json.NewDecoder(io.LimitReader(file, 4096))
-	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&credential); err != nil {
-		return credential, err
-	}
-	if err = decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return credential, fmt.Errorf("管理凭证配置包含尾随内容")
-	}
-	digest, err := hex.DecodeString(credential.Hash)
-	if err != nil || len(digest) != sha256.Size || credential.Version == "" {
-		return credential, fmt.Errorf("管理凭证配置无效")
-	}
-	return credential, nil
-}
-
-// Initialize 只创建新文件，拒绝覆盖；令牌只返回给显式初始化或首次启动的调用方。
-func Initialize(path string) (secret string, err error) {
-	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return "", err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return "", err
-	}
-	secret = Secret()
-	credential := AdminCredential{Version: Secret(), Hash: hex.EncodeToString(Digest(secret))}
-	err = json.NewEncoder(file).Encode(credential)
-	if err == nil {
-		err = file.Sync()
-	}
-	err = errors.Join(err, file.Close())
-	if err != nil {
-		return "", err
-	}
-	return secret, nil
 }

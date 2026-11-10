@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"droidharbor/internal/identity"
 	"droidharbor/internal/service"
 	"droidharbor/internal/transfers"
 	"github.com/joho/godotenv"
@@ -48,7 +49,8 @@ func loadServeOptions(path string) (serveOptions, error) {
 	}
 	data, err := os.ReadFile(absolute)
 	if errors.Is(err, os.ErrNotExist) {
-		return options, fmt.Errorf("缺少配置文件 %s；请将 .env.example 复制为 .env 并填写必填项", absolute)
+		data, err = initializeServeEnv(absolute)
+		options.configCreated = err == nil
 	}
 	if err != nil {
 		return options, fmt.Errorf("读取 .env 失败：%w", err)
@@ -56,7 +58,7 @@ func loadServeOptions(path string) (serveOptions, error) {
 	values, err := godotenv.Parse(bytes.NewReader(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf})))
 	if err != nil {
 		// Parser errors may quote complete lines, including unrelated secrets.
-		return options, fmt.Errorf("配置文件 %s 格式无效，请对照 .env.example 检查 KEY=VALUE、引号和换行", absolute)
+		return options, fmt.Errorf("配置文件 %s 格式无效，请检查 KEY=VALUE、引号和换行", absolute)
 	}
 	get := func(name, fallback string) string {
 		if value, ok := os.LookupEnv(name); ok {
@@ -75,7 +77,8 @@ func loadServeOptions(path string) (serveOptions, error) {
 		return filepath.Join(filepath.Dir(absolute), value)
 	}
 	options.database = localPath("DROIDHARBOR_DATABASE", "data/droidharbor.db")
-	options.adminFile = localPath("DROIDHARBOR_ADMIN_FILE", "data/admin.json")
+	options.configPath = absolute
+	options.adminToken = values["DROIDHARBOR_ADMIN_TOKEN"]
 	options.listen = get("DROIDHARBOR_LISTEN", "0.0.0.0:8080")
 	options.adbAddress = get("DROIDHARBOR_ADB_SERVER", "127.0.0.1:5037")
 	options.rtcListen = get("DROIDHARBOR_RTC_LISTEN", "0.0.0.0:8081")
@@ -121,5 +124,43 @@ func loadServeOptions(path string) (serveOptions, error) {
 	if err != nil || options.transferMaxActive <= 0 {
 		return options, errors.New("DROIDHARBOR_TRANSFER_MAX_ACTIVE 必须是正整数")
 	}
+	if strings.TrimSpace(options.adminToken) == "" {
+		return options, errors.New("DROIDHARBOR_ADMIN_TOKEN 必须在 .env 中设置为非空访问令牌")
+	}
 	return options, nil
+}
+
+// The generated configuration is the sole persistent source of the admin token.
+// Exclusive creation never overwrites a configuration another process/user owns.
+func initializeServeEnv(path string) ([]byte, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, err
+	}
+	data := []byte(fmt.Sprintf(`# DroidHarbor：直接双击 EXE 启动。token 为管理入口密码，请保护本文件。
+DROIDHARBOR_ADMIN_TOKEN=%s
+DROIDHARBOR_LISTEN=0.0.0.0:8080
+DROIDHARBOR_ADB_SERVER=127.0.0.1:5037
+DROIDHARBOR_RTC_LISTEN=0.0.0.0:8081
+# 媒体地址默认自动协商；仅特殊网络需要显式覆盖。
+DROIDHARBOR_RTC_ADVERTISED_IP=
+DROIDHARBOR_DATABASE=data/droidharbor.db
+DROIDHARBOR_TRANSFER_TEMP_DIR=data/transfers
+DROIDHARBOR_LOG_FILE=logs/platform.jsonl
+DROIDHARBOR_LOG_LEVEL=info
+DROIDHARBOR_ADMIN_SESSION_TTL=12h
+DROIDHARBOR_ADB_TIMEOUT=10s
+DROIDHARBOR_TRANSFER_MAX_UPLOAD_BYTES=%d
+DROIDHARBOR_TRANSFER_MAX_ACTIVE=%d
+DROIDHARBOR_TRANSFER_MAX_COMMAND_OUTPUT=%d
+`, identity.Secret(), transfers.DefaultMaxUploadBytes, transfers.DefaultMaxActive, transfers.DefaultMaxCommandOutput))
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return nil, err
+	}
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	if err := errors.Join(writeErr, syncErr, file.Close()); err != nil {
+		return nil, err
+	}
+	return data, nil
 }

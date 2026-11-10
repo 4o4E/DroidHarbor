@@ -68,15 +68,15 @@ export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDe
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="全部设备" value={counts.all} icon={LayoutGrid} />
         <Stat label="可供认领" value={counts.available} icon={CircleDot} />
-        <Stat label="AI 使用中" value={counts.leased} icon={MonitorSmartphone} />
+        <Stat label="AI 已分配" value={counts.leased} icon={MonitorSmartphone} />
         <Stat label="需要关注" value={counts.attention} icon={Unplug} />
       </div>
 
       <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
         <ToggleGroup variant="outline" spacing={0} value={[filter]} onValueChange={value => { if (value[0]) setFilter(value[0] as Filter) }} aria-label="设备状态筛选">
           <ToggleGroupItem value="all">全部</ToggleGroupItem>
-          <ToggleGroupItem value="available">空闲</ToggleGroupItem>
-          <ToggleGroupItem value="leased">使用中</ToggleGroupItem>
+          <ToggleGroupItem value="available">可分配</ToggleGroupItem>
+          <ToggleGroupItem value="leased">已分配</ToggleGroupItem>
           <ToggleGroupItem value="offline">离线</ToggleGroupItem>
           <ToggleGroupItem value="attention">需关注</ToggleGroupItem>
         </ToggleGroup>

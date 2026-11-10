@@ -310,6 +310,8 @@ func (s *Stream) readMessages() {
 
 func (s *Stream) drainShell() {
 	defer s.workers.Done()
+	serverLogs := serverDiagnostics{logger: s.manager.logger, deviceID: s.deviceID, captureID: s.id}
+	defer serverLogs.flush()
 	var scratch []byte
 	for {
 		packet, err := adb.ReadShellPacket(s.shell, scratch, maxShellPacket)
@@ -323,7 +325,7 @@ func (s *Stream) drainShell() {
 		scratch = packet.Data
 		switch packet.ID {
 		case 1, 2:
-			continue
+			serverLogs.write(packet.ID, packet.Data)
 		case 3:
 			if s.ctx.Err() == nil {
 				var exitCode any

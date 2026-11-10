@@ -238,6 +238,36 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     }
   }
 
+  async function registerAll() {
+    if (pending || registered) return
+    setPending('all')
+    const failures: string[] = []
+    const processed = new Set<string>()
+    let unverified = 0
+    try {
+      const response = await api<DiscoveredResponse>('/device-discovery')
+      setDiscovery(response.devices)
+      for (const found of response.devices) {
+        try {
+          const result = await api<{ deviceId: string; verified: boolean }>('/devices/discovered', { method: 'POST', body: { endpoint: found.serial } })
+          processed.add(result.deviceId)
+          if (!result.verified) unverified++
+          setDiscovery(current => current?.filter(item => item.serial !== found.serial) ?? null)
+        } catch (error) {
+          failures.push(`${found.serial}：${errorMessage(error)}`)
+        }
+      }
+      await onCreated()
+      const latest = await api<DiscoveredResponse>('/device-discovery')
+      setDiscovery(latest.devices)
+      if (processed.size) toast.add({ title: `已接入 ${processed.size} 台设备`, description: unverified ? `${unverified} 条链路待手机授权或身份核验。` : undefined, type: unverified ? 'warning' : 'success' })
+      else if (!failures.length) toast.add({ title: '没有待添加的设备', type: 'info' })
+      if (failures.length) toast.add({ title: `${failures.length} 项接入未完成`, description: failures.join('\n'), type: 'error', timeout: 0 })
+    } catch (error) {
+      toast.add({ title: '批量接入未完成', description: [...failures, errorMessage(error)].join('\n'), type: 'error', timeout: 0 })
+    } finally { setPending('') }
+  }
+
   async function register(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const name = displayName.trim()
@@ -246,13 +276,22 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
     setPending(registered ? 'verify' : 'register')
     let created = registered
     let failureMessage = ''
+    let verified = false
     try {
       if (!created) {
-        created = await api<{ deviceId: string; linkId: string }>('/devices', { method: 'POST', body: { displayName: name, kind, endpoint: address } })
+        const found = discovery?.find(item => item.serial === address)
+        if (found) {
+          const result = await api<{ deviceId: string; linkId: string; verified: boolean }>('/devices/discovered', { method: 'POST', body: { endpoint: address, displayName: name } })
+          created = result
+          verified = result.verified
+        } else {
+          created = await api<{ deviceId: string; linkId: string }>('/devices', { method: 'POST', body: { displayName: name, kind, endpoint: address } })
+        }
         setRegistered(created)
+        setDiscovery(current => current?.filter(item => item.serial !== address) ?? null)
       }
       setPending('verify')
-      await api('/devices/' + encodeURIComponent(created.deviceId) + '/links/' + encodeURIComponent(created.linkId) + '/verify', { method: 'POST' })
+      if (!verified) await api('/devices/' + encodeURIComponent(created.deviceId) + '/links/' + encodeURIComponent(created.linkId) + '/verify', { method: 'POST' })
     } catch (error) {
       const unknown = error instanceof ApiError && (error.code === 'RESULT_UNKNOWN' || error.code === 'ADB_RESULT_UNKNOWN')
       failureMessage = created ? `设备已登记，身份核验未完成：${errorMessage(error)} 可重新核验，无需重复登记。` : errorMessage(error)
@@ -275,6 +314,7 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
   function selectDiscovered(device: DiscoveredDevice) {
     setKind(/:\d+$/.test(device.serial) ? 'wifi' : 'usb')
     setEndpoint(device.serial)
+    setDisplayName((device.model || device.product || device.serial).replaceAll('_', ' '))
   }
 
   return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }}>
@@ -284,11 +324,12 @@ function CreateDeviceDialog({ open, onOpenChange, onCreated }: { open: boolean; 
         <Button type="button" variant="outline" disabled={Boolean(pending) || Boolean(registered)} onClick={() => void readDiscovery()}>
           <RefreshCw data-icon="inline-start" />{pending === 'discovery' ? '正在读取…' : '读取已发现设备'}
         </Button>
+        <Button type="button" disabled={Boolean(pending) || Boolean(registered)} onClick={() => void registerAll()}>{pending === 'all' ? '正在添加全部设备…' : '一键添加所有设备'}</Button>
         {discovery !== null && <div className="flex flex-col gap-3">
           {discovery.length ? discovery.map(found => <div key={found.serial} className="flex flex-wrap items-center justify-between gap-3">
             <div className="min-w-0"><p className="break-all text-sm">{found.serial}</p><p className="text-xs text-muted-foreground">{found.model} · {found.state}</p></div>
             <Button type="button" variant="outline" size="sm" disabled={Boolean(pending) || Boolean(registered)} onClick={() => selectDiscovered(found)}>使用此设备</Button>
-          </div>) : <p className="text-sm text-muted-foreground">当前没有已发现设备。</p>}
+          </div>) : <p className="text-sm text-muted-foreground">当前没有待添加设备。</p>}
         </div>}
       </div>
       <form onSubmit={register}><FieldGroup>

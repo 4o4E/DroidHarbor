@@ -6,19 +6,16 @@ import { errorMessage } from '@/lib/api'
 import type { Device } from '@/lib/types'
 import { useDevicePreview, type DevicePreviewFrame } from './useDevicePreview'
 
-export type DevicePreviewFrameInfo = { capturedAt: string | null; linkGeneration: string | null }
 export type DevicePreviewProps = {
   device: Device
   compact?: boolean
-  onFrameInfoChange?: (info: DevicePreviewFrameInfo) => void
 }
 
-export function DevicePreview({ device, compact = false, onFrameInfoChange }: DevicePreviewProps) {
+export function DevicePreview({ device, compact = false }: DevicePreviewProps) {
   const rootRef = useRef<HTMLDivElement>(null)
   const [intersecting, setIntersecting] = useState(false)
   const [documentVisible, setDocumentVisible] = useState(() => typeof document !== 'undefined' && document.visibilityState === 'visible')
   const [lastFrame, setLastFrame] = useState<{ deviceId: string; linkSignature: string; capturedAt: string; linkGeneration: string }>()
-  const onFrameInfoChangeRef = useRef(onFrameInfoChange)
   const online = device.connectionState === 'online'
   const linkSignature = JSON.stringify(device.links
     .map(({ linkId, kind, endpoint, connectionState, identityVerified }) => [linkId, kind, endpoint, connectionState, identityVerified] as const)
@@ -56,15 +53,6 @@ export function DevicePreview({ device, compact = false, onFrameInfoChange }: De
   }, [device.deviceId, linkSignature])
 
   useEffect(() => {
-    onFrameInfoChangeRef.current = onFrameInfoChange
-  }, [onFrameInfoChange])
-  useEffect(() => {
-    onFrameInfoChangeRef.current?.({
-      capturedAt: currentFrame?.capturedAt ?? null,
-      linkGeneration: currentFrame?.linkGeneration ?? null,
-    })
-  }, [currentFrame?.capturedAt, currentFrame?.linkGeneration])
-  useEffect(() => {
     if (!online) setLastFrame(undefined)
   }, [online])
   const previousLinkIdentity = useRef(linkIdentity)
@@ -78,13 +66,13 @@ export function DevicePreview({ device, compact = false, onFrameInfoChange }: De
   return (
     <div
       ref={rootRef}
-      className={cn('overflow-hidden rounded-lg border', compact && 'w-12 shrink-0')}
+      className={cn('overflow-hidden border', compact && 'device-list-preview')}
       aria-label={`${device.displayName}的画面预览`}
-      title={currentFrame
+      title={compact ? device.displayName : currentFrame
         ? `${device.displayName} · 拍摄于 ${new Date(currentFrame.capturedAt).toLocaleString('zh-CN')}`
         : `${device.displayName} · ${online ? '暂无最新预览' : '设备不可用'}`}
     >
-      <div className={cn('dark flex items-center justify-center bg-background text-foreground', compact ? 'aspect-[9/20]' : 'h-56')}>
+      <div className={cn('flex items-center justify-center bg-background text-foreground', !compact && 'h-56')}>
         {online && active ? (
           <LivePreview
             key={`${device.deviceId}:${linkSignature}`}

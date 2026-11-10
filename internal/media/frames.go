@@ -232,6 +232,7 @@ func (h *hub) beginEpoch(source *capture.Stream, packet scrcpy.Packet) error {
 	h.mu.Lock()
 	h.width, h.height = uint16(packet.Width), uint16(packet.Height)
 	h.epoch++
+	epoch := h.epoch
 	h.config, h.effective, h.ptsSet, h.waitingSession = nil, nil, false, false
 	h.lastKeyFrameAt = time.Time{}
 	h.statisticsAt, h.statisticsFrames, h.statisticsBytes = time.Now(), 0, 0
@@ -240,6 +241,7 @@ func (h *hub) beginEpoch(source *capture.Stream, packet scrcpy.Packet) error {
 		s.invalidateFrame()
 	}
 	h.mu.Unlock()
+	h.manager.deps.Logger.Info("media_capture_epoch_started", "deviceId", h.deviceID, "captureEpoch", epoch, "width", packet.Width, "height", packet.Height)
 	h.manager.notifyDevice(h.deviceID)
 	return nil
 }

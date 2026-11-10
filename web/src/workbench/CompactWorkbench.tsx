@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Camera, ChevronLeft, Circle, Expand, Monitor, RotateCw, Square, Unplug, ZoomIn, ZoomOut } from 'lucide-react'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
@@ -11,6 +11,7 @@ import { deviceName, deviceNeedsVerification, deviceStatus, type Device, type Se
 import { errorMessage } from '@/lib/api'
 import { downloadScreenshot } from '@/lib/screenshots'
 import { useErrorNotification } from '@/lib/notifications'
+import { compactWindowSize, PHONE_TOOLBAR_WIDTH } from './compactWindowSize'
 
 type CompactWorkbenchProps = { initialDeviceId: string | null; initialMode: string | null }
 
@@ -47,6 +48,7 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
   const needsVerification = deviceNeedsVerification(device)
   const [busy, setBusy] = useState(false)
   const cancelResize = useRef<(() => void) | null>(null)
+  const initializedSize = useRef(false)
   const screenAreaRef = useRef<HTMLDivElement | null>(null)
   const [availableArea, setAvailableArea] = useState({ width: 0, height: 0 })
   useEffect(() => {
@@ -56,7 +58,7 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
   const session = useMediaSession(device.deviceId, mode, device.connectionState === 'online' && sessionAllowed)
   const canControl = mode === 'control' && session.status === 'connected' && session.ready && !!session.sessionId
   const ratio = session.width > 0 && session.height > 0 ? session.width / session.height : 1
-  const frameWidth = Math.min(availableArea.width, availableArea.height * ratio)
+  const frameWidth = Math.min(Math.max(0, availableArea.width - PHONE_TOOLBAR_WIDTH), availableArea.height * ratio)
   const frameHeight = frameWidth / ratio
 
   useEffect(() => {
@@ -72,19 +74,11 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
 
   useEffect(() => () => cancelResize.current?.(), [])
 
-  const resizeWindow = (fraction: number) => {
+  const resizeWindow = useCallback((fraction: number) => {
     cancelResize.current?.()
-    const chromeWidth = Math.max(0, window.outerWidth - window.innerWidth)
-    const chromeHeight = Math.max(0, window.outerHeight - window.innerHeight)
-    const maximumPictureHeight = Math.min(
-      window.screen.availHeight - chromeHeight - 64,
-      (window.screen.availWidth - chromeWidth - 24) / ratio,
-    )
-    const pictureHeight = Math.floor(maximumPictureHeight * fraction)
-    const width = Math.round(pictureHeight * ratio)
-    const height = pictureHeight + 40
-    if (pictureHeight < 120 || width + chromeWidth > window.screen.availWidth) {
-      toast.add({ title: '无法调整小窗尺寸', description: '当前屏幕可用空间不足，无法调整到该尺寸。', type: 'error', timeout: 0 })
+    const size = compactWindowSize(ratio, fraction)
+    if (size.innerHeight < 120) {
+      toast.add({ title: '无法调整小窗尺寸', description: '当前屏幕可用空间不足。', type: 'error', timeout: 0 })
       return
     }
     const finish = () => {
@@ -92,18 +86,22 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
       window.removeEventListener('resize', observeResize)
       cancelResize.current = null
     }
-    const observeResize = () => {
-      if (Math.abs(window.innerWidth - width) <= 2 && Math.abs(window.innerHeight - height) <= 2) finish()
-    }
+    const matches = () => Math.abs(window.innerWidth - size.innerWidth) <= 2 && Math.abs(window.innerHeight - size.innerHeight) <= 2
+    const observeResize = () => { if (matches()) finish() }
     const timer = window.setTimeout(() => {
       finish()
-      if (Math.abs(window.innerWidth - width) > 2 || Math.abs(window.innerHeight - height) > 2) toast.add({ title: '无法调整小窗尺寸', description: '浏览器未允许调整到目标尺寸。可手动调整窗口，或从工作台重新打开小窗。', type: 'error', timeout: 0 })
+      if (!matches()) toast.add({ title: '无法调整小窗尺寸', description: '浏览器未允许调整到目标尺寸，可手动调整窗口。', type: 'error', timeout: 0 })
     }, 1000)
     cancelResize.current = finish
     window.addEventListener('resize', observeResize)
-    window.resizeTo(width + chromeWidth, height + chromeHeight)
+    window.resizeTo(size.innerWidth + size.chromeWidth, size.innerHeight + size.chromeHeight)
     observeResize()
-  }
+  }, [ratio])
+  useEffect(() => {
+    if (initializedSize.current || !session.width || !session.height) return
+    initializedSize.current = true
+    resizeWindow(0.8)
+  }, [session.width, session.height, resizeWindow])
 
   const runCommand = async (type: string) => {
     if (!canControl || busy) return
@@ -123,16 +121,10 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
   }
 
   return (
-    <main className="dark h-svh bg-background text-foreground">
-      <section className="flex h-full flex-col" aria-label={`${deviceName(device)}的小窗`}>
-        <div ref={screenAreaRef} className="flex min-h-0 flex-1 items-center justify-center">
-          <div className="relative flex items-center justify-center" style={{ width: frameWidth, height: frameHeight }} aria-label="设备画面">
-            <VideoSurface session={session} mode={mode} className="size-full overflow-hidden rounded-3xl border border-border bg-card" />
-            {!session.ready && <div className="pointer-events-none absolute inset-0 flex items-center justify-center"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState === 'online' ? session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{needsVerification ? '在主页面核验设备身份后即可投屏。' : session.error || deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
-          </div>
-        </div>
-        <div className="flex h-10 shrink-0 items-center overflow-x-auto border-t px-2" aria-label="小窗底部操作">
-          <div className="mx-auto flex shrink-0 items-center gap-1">
+    <main className="compact-workbench">
+      <section ref={screenAreaRef} className="phone-stage" aria-label={`${deviceName(device)}的小窗`}>
+        <div className="phone-arrangement" style={{ width: frameWidth + PHONE_TOOLBAR_WIDTH, height: frameHeight }}>
+          <div className="phone-toolbar" style={{ width: PHONE_TOOLBAR_WIDTH }} aria-label="小窗操作">
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>
@@ -141,6 +133,10 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
             <Button size="icon-sm" variant="ghost" disabled={!session.width || !session.height} aria-label="小窗口" title="小窗口" onClick={() => resizeWindow(0.6)}><ZoomOut /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!session.width || !session.height} aria-label="标准窗口" title="标准窗口" onClick={() => resizeWindow(0.8)}><Expand /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!session.width || !session.height} aria-label="大窗口" title="大窗口" onClick={() => resizeWindow(1)}><ZoomIn /></Button>
+          </div>
+          <div className="phone-frame" style={{ width: frameWidth, height: frameHeight }} aria-label="设备画面">
+            <VideoSurface session={session} mode={mode} className="size-full" />
+            {!session.ready && <div className="phone-placeholder"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState === 'online' ? session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{needsVerification ? '在主页面核验设备身份后即可投屏。' : session.error || deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
           </div>
         </div>
       </section>

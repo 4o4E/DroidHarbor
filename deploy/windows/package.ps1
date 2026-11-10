@@ -27,8 +27,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "server build failed: $LASTEXITCODE" }
     & $GoExecutable build -trimpath -ldflags '-s -w' -o (Join-Path $clientDirectory 'droidharbor-cli.exe') ./cmd/droidharbor-cli
     if ($LASTEXITCODE -ne 0) { throw "CLI build failed: $LASTEXITCODE" }
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start.cmd'), (Join-Path $PSScriptRoot 'README.md') -Destination $serverDirectory
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '.env.example') -Destination $serverDirectory
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $serverDirectory
     Copy-Item -LiteralPath (Join-Path $root 'skills/droidharbor/SKILL.md') -Destination (Join-Path $clientDirectory 'SKILL.md')
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.client.md') -Destination (Join-Path $clientDirectory 'README.md')
     & (Join-Path $serverDirectory 'droidharbor.exe') version

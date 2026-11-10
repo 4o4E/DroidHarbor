@@ -37,7 +37,26 @@ type Discovered struct {
 	Product     string `json:"product,omitempty"`
 }
 
-func (r *Registry) Discover() ([]Discovered, error) {
+func (r *Registry) Discover(ctx context.Context) ([]Discovered, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT endpoint,coalesce(observed_serial,'') FROM device_links`)
+	if err != nil {
+		return nil, err
+	}
+	registered := make(map[string]bool)
+	for rows.Next() {
+		var endpoint, serial string
+		if err := rows.Scan(&endpoint, &serial); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		registered[endpoint] = true
+		if serial != "" {
+			registered[serial] = true
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if !r.ready {
@@ -45,6 +64,9 @@ func (r *Registry) Discover() ([]Discovered, error) {
 	}
 	result := make([]Discovered, 0, len(r.discovered))
 	for _, device := range r.discovered {
+		if registered[device.Serial] {
+			continue
+		}
 		result = append(result, Discovered{Serial: device.Serial, State: device.State, TransportID: device.TransportID, Model: device.Properties["model"], Product: device.Properties["product"]})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Serial < result[j].Serial })

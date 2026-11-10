@@ -40,27 +40,8 @@ export interface VideoSnapshot {
   captureEpoch: number
   errorCode?: string
 }
-export interface Transfer {
-  transferId: string
-  fileName: string
-  purpose: 'file' | 'apk'
-  targetPath?: string
-  state: 'uploading' | 'transferring' | 'installing' | 'succeeded' | 'failed' | 'cancelled' | 'unknown'
-  bytesReceived: number
-  bytesTransferred: number
-  size: number
-  overwrite: boolean
-  exitCode?: number
-  stdout?: string
-  stderr?: string
-  result?: string
-  errorCode?: string
-  error?: string
-  createdAt: string
-  updatedAt: string
-}
 export const deviceName = (device: Device) => device.displayName
-const allocationLabels: Record<AllocationState, string> = { available: '空闲', leased: 'AI 使用中', reclaiming: '回收中', quarantined: '已隔离', maintenance: '维护中' }
+const allocationLabels: Record<AllocationState, string> = { available: '未分配', leased: '已分配', reclaiming: '回收中', quarantined: '已隔离', maintenance: '维护中' }
 export function deviceNeedsVerification(device: Device) {
   return device.connectionState === 'offline' && device.links.some(link => link.connectionState === 'online' && !link.identityVerified)
 }

@@ -36,7 +36,7 @@ paths:
                   writeOnly: true
       responses:
         '201':
-          description: 创建 Secure、HttpOnly、SameSite=Strict 会话 Cookie；返回 sessionId、expiresAt 和 csrfToken，不回显管理令牌
+          description: 创建 HttpOnly、SameSite=Strict 会话 Cookie（支持 HTTP）；返回 sessionId、expiresAt 和 csrfToken，不回显管理令牌
           content:
             application/json:
               schema:
@@ -211,7 +211,7 @@ paths:
       security: [{adminSession: []}]
       responses:
         '200':
-          description: 当前完整快照；空数组仅表示已连接的 ADB Server 没有设备
+          description: 当前未登记链路快照；已登记 endpoint/observed serial 被排除，空数组表示没有待添加链路
           content:
             application/json:
               schema:
@@ -272,6 +272,44 @@ paths:
                 endpoint: {type: string, description: USB serial 或含端口的 Wi-Fi 地址；不是稳定设备身份}
       responses:
         '201': {$ref: '#/components/responses/Registered'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/devices/discovered:
+    post:
+      operationId: registerDiscoveredDevice
+      summary: 显式接入已发现设备，核验硬件并关联同机 USB/Wi-Fi 链路
+      description: 仅处理本次发现清单中的入口，不连接或配对其他手机。已授权链路核验后启用，未授权链路保留待核验。硬件身份冲突不创建记录；既有物理设备保留原名称和维护状态。新设备使用手机型号或指定名称，默认 60 fps、12 Mbps。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [endpoint]
+              properties:
+                endpoint: {type: string, minLength: 1, description: 发现清单中的 serial}
+                displayName: {type: string, description: 可选；仅创建新物理设备时使用，去首尾空白后至多 120 字符}
+      responses:
+        '200':
+          description: 接入结果；existing 表示沿用已登记的物理设备，verified 为链路身份核验结果，不代表已分配给 AI
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, linkId, verified, existing]
+                properties:
+                  deviceId: {type: string}
+                  linkId: {type: string}
+                  verified: {type: boolean}
+                  existing: {type: boolean}
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
@@ -742,7 +780,7 @@ paths:
       description: |
         仅管理员 Cookie；不接受 bearer。请求不创建、续期或暂停 AI 租约。
         offer 必须包含 recvonly H.264 视频和可靠有序的 droidharbor.control.v1 DataChannel，不含音频。
-        answer 包含完整本地 ICE 候选；只使用显式配置的 UDP endpoint，无 STUN/TURN 或协议降级。
+        answer 包含完整本地 ICE 候选；默认自动收集本机 IPv4，支持可选显式地址覆盖，无 STUN/TURN 或协议降级。
         201 表示会话与信令已建立，不代表浏览器已解码呈现画面。
         DataChannel 逻辑消息为四字节大端长度加 UTF-8 JSON；单条逻辑消息不超过 2 MiB，
         每个二进制 DataChannel chunk 不超过 16 KiB，不接受文本消息；可跨 chunk 拆分长度头和正文。
@@ -751,6 +789,8 @@ paths:
         payload.timestamp/width/height/keyFrame；不是逐帧通知。
         客户端必须在实际呈现新代次画面后，以 requestVideoFrameCallback 的 rtpTimestamp
         发送 frame-ready，不能把收到信令、视频 track 或 frame-boundary 当成已经呈现。
+        手机剪贴板变化通过 clipboard.changed 发送给当前有控制权限的会话，不发给 readonly。
+        网页仅在当前页分设备保存最多 20 条内存历史，手机回声与同内容发送确认合并，不写电脑系统剪贴板或日志。
         确认可以是该代次关键帧之后实际发送的帧，不要求浏览器恰好报告 IDR 本身。
         旧代次输入拒绝；帧确认不包含设备操作，确认失败不能重放此前的设备输入。
         dispatched 只表示已交给设备通道；unknown/RESULT_UNKNOWN 不是确定失败，禁止自动重试。
