@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Camera, ChevronDown, ChevronLeft, Circle, FlipHorizontal2, Monitor, Pause, Play, Power, RefreshCw, RotateCcw, RotateCw, Square, Unplug, Volume2 } from 'lucide-react'
+import { Camera, ChevronDown, ChevronLeft, Circle, FlipHorizontal2, Monitor, Pause, Play, Power, RefreshCw, RotateCcw, RotateCw, Smartphone, Square, Unplug, Volume2 } from 'lucide-react'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
@@ -86,7 +86,7 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
       if (phoneRotation.current === pending) pending.timer = window.setTimeout(() => {
         phoneRotation.current = null
         setRotatingPhone(false)
-        toast.add({ title: '手机方向未改变', description: '当前应用或系统可能限制旋转。仅调整预览可使用“旋转显示”。', type: 'warning', timeout: 0 })
+        toast.add({ title: '手机方向未改变', description: '当前应用或系统可能限制旋转。仅调整网页画面可使用“网页左转”或“网页右转”。', type: 'warning', timeout: 0 })
       }, 5000)
     } catch (error) {
       if (pending.cancelled) return
@@ -98,14 +98,13 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
   }
   return <div className="phone-arrangement" style={{ width: ratio ? frameWidth + PHONE_TOOLBAR_WIDTH : '100%', height: ratio ? frameHeight : '100%' }}>
     <div className="phone-toolbar" style={{ width: PHONE_TOOLBAR_WIDTH }} aria-label="设备快捷操作">
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>
+      <div className="phone-toolbar-actions">
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label={lastPowerCommand ? '关闭实体屏幕' : '点亮实体屏幕'} title={lastPowerCommand ? '关闭实体屏幕' : '点亮实体屏幕'} onClick={() => { const on = !lastPowerCommand; void runCommand('displayPower', { on }).then(sent => { if (sent) setLastPowerCommand(on) }) }}><Power /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="音量增加" title="音量增加" onClick={() => void pressVolume(24)}><Volume2 /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="音量降低" title="音量降低" onClick={() => void pressVolume(25)}><Volume2 className="rotate-180" /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy || rotatingPhone} aria-label="旋转手机" title="旋转手机" onClick={() => void rotatePhone()}><RotateCw /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label="旋转显示" title="旋转显示（不改变手机方向）" onClick={() => setDisplayRotation(current => (current + 90) % 360)}><RotateCcw /></Button>
+      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy || rotatingPhone} aria-label="手机横竖屏切换" title="物理旋转：切换手机横竖屏（由应用和系统决定是否响应）" onClick={() => void rotatePhone()}><Smartphone /></Button>
+      <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label="网页左转" title="网页左转 90°（不改变手机方向）" onClick={() => setDisplayRotation(current => (current + 270) % 360)}><RotateCcw /></Button>
+      <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label="网页右转" title="网页右转 90°（不改变手机方向）" onClick={() => setDisplayRotation(current => (current + 90) % 360)}><RotateCw /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label={mirrored ? '取消镜像显示' : '镜像显示'} aria-pressed={mirrored} title="镜像显示" onClick={() => setMirrored(current => !current)}><FlipHorizontal2 /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label={paused ? '继续画面' : '暂停画面'} aria-pressed={paused} title={paused ? '继续画面' : '暂停画面'} onClick={() => setPaused(current => !current)}>{paused ? <Play /> : <Pause />}</Button>
       <Button size="icon-sm" variant="ghost" disabled={!session.sessionId} aria-label="截图" title="截图" onClick={() => void takeScreenshot()}><Camera /></Button>
@@ -114,6 +113,12 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="收起通知面板" title="收起通知面板" onClick={() => void runCommand('collapse')}><ChevronDown /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="重置视频" title="重置视频" onClick={() => void runCommand('resetVideo')}><RefreshCw /></Button>
       <Button size="icon-sm" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={onReconnect}><RotateCw /></Button>
+      </div>
+      <div className="phone-toolbar-navigation">
+      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
+      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
+      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>
+      </div>
     </div>
     <div className="phone-frame" style={{ width: ratio ? frameWidth : '100%', height: ratio ? frameHeight : '100%' }}><VideoSurface session={session} mode={mode} rotation={displayRotation} mirrored={mirrored} paused={paused} className="size-full" />{!session.hasFrame && <div className="phone-placeholder"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState !== 'online' ? <Unplug /> : <Monitor />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState !== 'online' ? '设备当前不可用' : session.status === 'failed' ? '视频连接失败' : '等待设备画面'}</EmptyTitle><EmptyDescription>{needsVerification ? '在设备管理中核验身份后即可投屏。' : session.error || stateLabel}</EmptyDescription></EmptyHeader></Empty></div>}</div>
   </div>

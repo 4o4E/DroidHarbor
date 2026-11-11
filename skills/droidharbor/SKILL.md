@@ -7,6 +7,15 @@ description: Use DroidHarbor to claim a physical Android device, connect through
 
 Use this Skill only with the released `droidharbor-cli` and a configured DroidHarbor server. It describes product use, not development. The platform serves HTTP; use it on a trusted private/isolated network because HTTP does not encrypt credentials or device data. If infrastructure provides an HTTPS entry, the CLI also accepts it using the operating system's normal trust settings; there are no CLI certificate options. The shared calling machine is trusted: the local native ADB Server does not authenticate its clients, and its loopback port is not a task-isolation boundary. Mutually untrusted tasks require separate caller network environments, such as separate machines or network namespaces. Different OS users alone do not isolate loopback access.
 
+## Install and select the bundled CLI
+
+The client release is `DroidHarbor-skill.zip`. Extract and install its complete `droidharbor` directory as a Skill; keep `SKILL.md` and `scripts` together. Resolve this installed Skill directory to an absolute path, then select:
+
+- Windows amd64: `<skill-directory>\scripts\windows-amd64\droidharbor-cli.exe`.
+- Linux amd64: `<skill-directory>/scripts/linux-amd64/droidharbor-cli`. After extraction, run `chmod u+x` on that binary once.
+
+In every command below, `<cli>` means that selected absolute binary path, quoted for the shell; PowerShell requires `&` before a quoted executable path. No global PATH installation or separate CLI download is needed. Run `<cli> version` first. Supply the locked native ADB separately. Human users access the server in a browser and do not need this Skill or CLI.
+
 ## Prerequisites and secret handling
 
 - Use the released Windows or Linux CLI and the locked native Android Debug Bridge 1.0.41 / platform-tools 37.0.1; `connect` rejects other versions and does not download or upgrade adb. Use the administrator-provided HTTP(S) server address. Never put credentials in URLs or follow a redirect to another server.
@@ -18,10 +27,10 @@ Use this Skill only with the released `droidharbor-cli` and a configured DroidHa
 Set these values in the harness's live environment/configuration (not as secrets in command arguments): `DROIDHARBOR_SERVER`, `DROIDHARBOR_CREDENTIAL_FILE`, `DROIDHARBOR_TASK_DIR`, and `DROIDHARBOR_TASK_ID`. Substitute their values in command examples below; these names are documentation placeholders, not CLI environment-variable interfaces. Ensure the parent directory of `DROIDHARBOR_TASK_DIR` already exists and is private before claiming.
 
 ```text
-droidharbor-cli version
-droidharbor-cli capabilities --server <server-address> --credential-file <caller-JSON>
-droidharbor-cli claim --server <server-address> --credential-file <caller-JSON> --task-dir <private-task-dir> --task-id <task-id> --tag <required-tag> [--tag <another-required-tag>]
-droidharbor-cli status --task-dir <private-task-dir>
+<cli> version
+<cli> capabilities --server <server-address> --credential-file <caller-JSON>
+<cli> claim --server <server-address> --credential-file <caller-JSON> --task-dir <private-task-dir> --task-id <task-id> --tag <required-tag> [--tag <another-required-tag>]
+<cli> status --task-dir <private-task-dir>
 ```
 
 Confirm API major 1 and `remoteAdb` capability before connecting. Each supplied `--tag` is required; selection is not an any-tag match. A claim gets a 900-second lease. Save the task directory and original claim inputs. If claim returns result-unknown (exit 6), preserve the directory, caller credential, task ID, tags, and request ID. `status` cannot query the lease until a lease ID is saved; if it reports that the initial claim result is unknown, explicitly rerun the identical `claim` with the same directory, server, credential, task ID, and tags. The CLI reuses the saved task secret and idempotency key and the server returns the original lease/terminal result; never change the parameters, create another task directory, or use a new key.
@@ -31,19 +40,19 @@ Confirm API major 1 and `remoteAdb` capability before connecting. Each supplied 
 Run `connect` in the foreground of an ordinary OS terminal and leave that process alive for all device work. It emits one readiness JSON line only once the native ADB target is online, then stays running. Use a second terminal for `env`, `renew`, `disconnect`, and `release`; no agent notification, plugin, lifecycle hook, or helper script is required. A harness may use its normal background-process facility only if it keeps this same foreground process alive and captures its stdout JSON line.
 
 ```text
-droidharbor-cli connect --task-dir <private-task-dir> --adb-bin <absolute-native-adb-path>
-droidharbor-cli env --task-dir <private-task-dir>
+<cli> connect --task-dir <private-task-dir> --adb-bin <absolute-native-adb-path>
+<cli> env --task-dir <private-task-dir>
 ```
 Windows PowerShell:
 
 ```powershell
-& 'C:\tools\droidharbor-cli.exe' connect --task-dir 'C:\private\droidharbor\task-42' --adb-bin 'C:\Android\platform-tools\adb.exe'
+& 'C:\skills\droidharbor\scripts\windows-amd64\droidharbor-cli.exe' connect --task-dir 'C:\private\droidharbor\task-42' --adb-bin 'C:\Android\platform-tools\adb.exe'
 ```
 
 Linux shell:
 
 ```sh
-/opt/droidharbor/droidharbor-cli connect --task-dir /var/lib/droidharbor/task-42 --adb-bin /opt/android/platform-tools/adb
+/opt/skills/droidharbor/scripts/linux-amd64/droidharbor-cli connect --task-dir /var/lib/droidharbor/task-42 --adb-bin /opt/android/platform-tools/adb
 ```
 
 These commands run in the foreground until explicitly disconnected or interrupted; leave the terminal open. Use another terminal for task commands.
@@ -143,7 +152,7 @@ Check the command's native exit status and the resulting file. Do not pipe PNG t
 Renewal is explicit and independent of the foreground connection. A lease lasts 900 seconds from each successful claim/renewal; schedule renewals with enough margin before expiry, including while a long native command is running. The connect process does not renew, and traffic does not renew. Use the normal harness facility to issue a second command while the foreground process remains alive:
 
 ```text
-droidharbor-cli renew --task-dir <private-task-dir>
+<cli> renew --task-dir <private-task-dir>
 ```
 
 Do not add automatic retries, reconnect, replay a device action, claim a new task, or switch devices. If a shell/input/file/install command is interrupted after it may have reached Android, treat the result as unknown and inspect current state before deciding on any new action; never replay automatically or repeat the action manually without reconciling its outcome. A result-unknown initial claim is different: use only the exact same claim identity and parameters described above to retrieve its idempotent original result.
@@ -155,8 +164,8 @@ For a fresh `connect` attempt that has not submitted creation, or receives a con
 After device work, stop the local connection explicitly, then release the lease:
 
 ```text
-droidharbor-cli disconnect --task-dir <private-task-dir>
-droidharbor-cli release --task-dir <private-task-dir>
+<cli> disconnect --task-dir <private-task-dir>
+<cli> release --task-dir <private-task-dir>
 ```
 
 Disconnect closes this task's recorded connection; release ends its lease authorization. CLI cleanup is limited to resources recorded for this task and process identities it can verify; never kill an unowned PID/process, target a guessed port, or use a global ADB command. Do not assume lease release resets phone applications. If the harness crashes, there is no hidden renewal; authorization expires under the lease rules.

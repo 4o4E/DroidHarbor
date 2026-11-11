@@ -18,12 +18,12 @@
 - **THEN** ADB 不被要求同时重启，但平台旧租约仍按重启政策失效并回收
 
 #### Scenario: Windows 前台试用包
-- **WHEN** 用户将 Windows amd64 服务端包解压到独立可写目录并双击 EXE
+- **WHEN** 用户将 Windows amd64 服务端 EXE 放到独立可写目录并双击
 - **THEN** 单个控制台 EXE 零参数启动，缺少同目录 `.env` 时自动生成完整配置和随机明文 token，自动初始化数据库；首次初始化结果写入控制台及受保护日志，重启复用。内嵌网页和 scrcpy-server，媒体自动协商地址，ADB 由外部提供，无需源码、开发工具链或额外启动脚本
 
 #### Scenario: 客户端与服务端独立分发
 - **WHEN** 发布 Windows amd64 版本
-- **THEN** 生成角色独立的服务端与客户端 ZIP 及说明；服务端仅含平台 EXE 和说明，客户端含 CLI、Skill 和说明；运行配置由服务端首次启动生成，包中不混装另一角色的程序、真实配置或秘密
+- **THEN** 仅生成一个服务端 EXE 和一个客户端 Skill ZIP。EXE 内嵌网页及采集程序，ZIP 包含产品 Skill 和 Windows/Linux amd64 CLI；使用说明在项目文档及 Skill 内，不另发服务端 ZIP、CLI 包或 README 附件。配置由服务端首次启动生成，交付物不含真实配置或秘密
 
 #### Scenario: 已有配置错误
 - **WHEN** 现有 `.env` 格式、类型、必需令牌或显式媒体覆盖值无效

@@ -18,7 +18,7 @@ type Props = { device: Device; devices: readonly Device[]; onDeviceChange: (devi
 export function Workbench({ device, devices, onDeviceChange, mode, onModeChange }: Props) {
   const [layout, setLayout] = useState<Layout>()
   const selectedKey = workbenchViewKey(device.deviceId, mode)
-  const [views, setViews] = useState<{ selected: string; items: WorkbenchView[]; until: number }>({ selected: selectedKey, items: [{ key: selectedKey, deviceId: device.deviceId, mode, instance: 0 }], until: 0 })
+  const [views, setViews] = useState<{ selected: string; items: WorkbenchView[] }>({ selected: selectedKey, items: [{ key: selectedKey, deviceId: device.deviceId, mode, instance: 0, until: 0 }] })
   const [sessions, setSessions] = useState<Record<string, MediaSession>>({})
   const switchBarrier = useRef<Promise<void> | undefined>(undefined)
   const registerSession = useCallback((key: string, session: MediaSession | null) => {
@@ -31,21 +31,26 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
     })
   }, [])
   if (views.selected !== selectedKey) {
-    const previous = views.items.find(item => item.key === views.selected)
+    const now = performance.now()
     const cached = views.items.find(item => item.key === selectedKey)
-    const target = cached && sessions[selectedKey]?.canRetain ? cached : { key: selectedKey, deviceId: device.deviceId, mode, instance: (cached?.instance ?? 0) + 1 }
-    const retain = previous && previous.mode === mode && previous.deviceId !== device.deviceId && sessions[previous.key]?.canRetain
-    setViews({ selected: selectedKey, items: (retain ? [previous, target] : [target]).sort((a, b) => a.key.localeCompare(b.key)), until: retain ? Date.now() + 15_000 : 0 })
+    const target = cached && cached.until > now && sessions[selectedKey]?.canRetain
+      ? { ...cached, until: 0 }
+      : { key: selectedKey, deviceId: device.deviceId, mode, instance: (cached?.instance ?? 0) + 1, until: 0 }
+    const retained = views.items
+      .filter(item => item.key !== selectedKey && item.mode === mode && sessions[item.key]?.canRetain && (item.key === views.selected || item.until > now))
+      .map(item => item.key === views.selected ? { ...item, until: now + 15_000 } : item)
+    setViews({ selected: selectedKey, items: [...retained, target].sort((a, b) => a.key.localeCompare(b.key)) })
   }
   const session = sessions[selectedKey]
   const previewCapture = useRef<(() => void) | null>(null)
   const videoAreaRef = useRef<HTMLDivElement | null>(null)
   const [videoAreaSize, setVideoAreaSize] = useState({ width: 0, height: 0 })
   useEffect(() => {
-    if (!views.until) return
+    const until = Math.min(...views.items.filter(item => item.key !== views.selected).map(item => item.until))
+    if (!Number.isFinite(until)) return
     const timer = window.setTimeout(() => {
-      setViews(current => current === views ? { ...current, items: current.items.filter(item => item.key === current.selected), until: 0 } : current)
-    }, Math.max(0, views.until - Date.now()))
+      setViews(current => ({ ...current, items: current.items.filter(item => item.key === current.selected || item.until > performance.now()) }))
+    }, Math.max(0, Math.ceil(until - performance.now())))
     return () => window.clearTimeout(timer)
   }, [views])
   useLayoutEffect(() => {
@@ -63,12 +68,13 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
   const selectDevice = (next: Device) => {
     if (next.deviceId === device.deviceId) return
     previewCapture.current?.()
-    const target = sessions[workbenchViewKey(next.deviceId, mode)]
     const handoff = session?.canRetain
-      ? session.suspend(target?.canRetain ? target.sessionId ?? '' : '')
+      ? session.suspend()
       : session?.close() ?? Promise.resolve()
-    switchBarrier.current = handoff
-    void handoff.catch(cause => toast.add({ title: '设备切换未完成', description: errorMessage(cause), type: 'error', timeout: 0 }))
+    // 等待原窗口关闭流程并报告错误；新设备不继承原窗口失败的建流屏障。
+    switchBarrier.current = handoff.catch(cause => {
+      toast.add({ title: '设备切换未完成', description: errorMessage(cause), type: 'error', timeout: 0 })
+    })
     onDeviceChange(next)
   }
   const savedSize = deviceDisplaySize(device)

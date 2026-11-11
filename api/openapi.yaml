@@ -1171,10 +1171,10 @@ components:
           type: object
           description: |
             无参数操作发送 {}，不能省略或为 null。frame-ready 必须含 timestamp。
-            suspend 必须含字符串 nextSessionId，冷目标使用空字符串；存在的回切目标须为本登录的精确媒体会话。
+            suspend 和 resume 均发送 {}，每个窗口独立保留，不需要目标会话标识。
             同一有序通道先完成旧输入再挂起，释放按键/触摸、取消剪贴板与旧 HTTP 操作作用域。
             后台保持 RTP 及解码，只允许 ping、frame-ready 和 suspend/resume；设备操作返回 SESSION_SUSPENDED。
-            全平台最多一个后台候补窗口及正在回切的短交接目标，均计入 64 个会话上限；十五秒原截止时间不延长。
+            每个后台窗口独立保留十五秒，返回取消自身计时，下次离开重新计时；均计入 64 个会话上限。
             resume 发送 {}，核验原权限和链路、逻辑唤醒并实体熄屏；重新实际呈现确认前不能执行设备操作。
             key 包含 keyCode/action，可含 repeat/metaState；按下为 0，释放为 1。
             touch 包含 pointerId/action/x/y/width/height/pressure，scroll 包含

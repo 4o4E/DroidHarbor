@@ -128,14 +128,18 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
       <section ref={screenAreaRef} className="phone-stage" aria-label={`${deviceName(device)}的小窗`}>
         <div className="phone-arrangement" style={{ width: ratio ? frameWidth + PHONE_TOOLBAR_WIDTH : '100%', height: ratio ? frameHeight : '100%' }}>
           <div className="phone-toolbar" style={{ width: PHONE_TOOLBAR_WIDTH }} aria-label="小窗操作">
-            <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>
+            <div className="phone-toolbar-actions">
             <Button size="icon-sm" variant="ghost" disabled={!session.sessionId} aria-label="截图" title="截图" onClick={() => void screenshot()}><Camera /></Button>
             <Button size="icon-sm" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={() => { setSessionAllowed(false); window.setTimeout(() => setSessionAllowed(true), 0) }}><RotateCw /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="小窗口" title="小窗口" onClick={() => resizeWindow(0.6)}><ZoomOut /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="标准窗口" title="标准窗口" onClick={() => resizeWindow(0.8)}><Expand /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="大窗口" title="大窗口" onClick={() => resizeWindow(1)}><ZoomIn /></Button>
+            </div>
+            <div className="phone-toolbar-navigation">
+            <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
+            <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
+            <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>
+            </div>
           </div>
           <div className="phone-frame" style={{ width: ratio ? frameWidth : '100%', height: ratio ? frameHeight : '100%' }} aria-label="设备画面">
             <VideoSurface session={session} mode={mode} className="size-full" />

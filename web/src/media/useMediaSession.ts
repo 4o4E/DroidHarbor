@@ -184,7 +184,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     })
   }, [currentRuntime, deviceId, mode])
 
-  const changePresence = useCallback((active: boolean, nextSessionId = '', after?: Promise<void>) => {
+  const changePresence = useCallback((active: boolean, after?: Promise<void>) => {
     const runtime = currentRuntime
     if (!runtime?.active) return Promise.resolve()
     runtime.foreground = active
@@ -198,7 +198,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         await runtime.close('closed')
         return
       }
-      const reply = await command(active ? 'resume' : 'suspend', active ? {} : { nextSessionId })
+      const reply = await command(active ? 'resume' : 'suspend', {})
       if (!runtime.active) return
       if (reply.status !== 'succeeded') throw new Error(reply.message || '设备窗口切换未完成')
       runtime.present = active
@@ -212,9 +212,9 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     })
     return runtime.presencePromise
   }, [command, currentRuntime])
-  const suspend = useCallback((nextSessionId: string) => changePresence(false, nextSessionId), [changePresence])
+  const suspend = useCallback(() => changePresence(false), [changePresence])
   useEffect(() => {
-    void changePresence(foreground, '', activationBarrier).catch(cause => {
+    void changePresence(foreground, activationBarrier).catch(cause => {
       setSessionError(`切换媒体窗口失败：${errorMessage(cause)}`)
     })
   }, [activationBarrier, changePresence, foreground])

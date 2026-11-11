@@ -113,7 +113,6 @@ type Manager struct {
 	closed          bool
 	sessions        map[string]*session
 	hubs            map[string]*hub
-	retained        *retainedSession
 	watcher         sync.WaitGroup
 	screenshotSlots chan struct{}
 }

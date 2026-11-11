@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"droidharbor/internal/capture"
 )
@@ -28,7 +30,7 @@ func TestSuspensionRevokesOperationsWithoutEndingMedia(t *testing.T) {
 	m := &Manager{deps: Dependencies{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
 	s := retainedTestSession(t, m, "a")
 	operationContext := s.interactionCtx
-	if err := s.suspend(context.Background(), ""); err != nil {
+	if err := s.suspend(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if !errors.Is(operationContext.Err(), context.Canceled) || s.ctx.Err() != nil {
@@ -45,21 +47,29 @@ func TestSuspensionRevokesOperationsWithoutEndingMedia(t *testing.T) {
 	}
 }
 
-func TestReturningClaimsExistingSessionWithoutExtendingItsDeadline(t *testing.T) {
-	m := &Manager{deps: Dependencies{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
-	a, b := retainedTestSession(t, m, "a"), retainedTestSession(t, m, "b")
-	if err := m.retainSession(a, ""); err != nil {
-		t.Fatal(err)
-	}
-	deadline := a.retention.until
-	if err := m.retainSession(b, a.id); err != nil {
-		t.Fatal(err)
-	}
-	if a.ctx.Err() != nil || b.ctx.Err() != nil || !a.retention.until.Equal(deadline) {
-		t.Fatal("returning closed an existing stream or extended its deadline")
-	}
-	m.clearRetention(a)
-	if a.ctx.Err() != nil || b.ctx.Err() != nil || b.retention == nil {
-		t.Fatal("resuming the target ended a live transport or consumed the departing hold")
-	}
+func TestThreeDevicesKeepIndependentStreamsAndRestartDepartureDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := &Manager{deps: Dependencies{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+		a, b, c := retainedTestSession(t, m, "a"), retainedTestSession(t, m, "b"), retainedTestSession(t, m, "c")
+		for _, s := range []*session{a, b, c} {
+			if err := m.retainSession(s); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(5 * time.Second)
+			if s == b {
+				// Returning A cancels its first deadline, while B keeps its own.
+				m.clearRetention(a)
+			}
+		}
+		if a.ctx.Err() != nil || b.ctx.Err() != nil || c.ctx.Err() != nil {
+			t.Fatal("switching a third device ended an existing stream")
+		}
+		if err := m.retainSession(a); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Second)
+		if a.ctx.Err() != nil || b.ctx.Err() != nil || c.ctx.Err() != nil {
+			t.Fatal("a previous departure deadline ended a returned or unrelated stream")
+		}
+	})
 }

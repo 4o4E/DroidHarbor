@@ -23,7 +23,7 @@ export type MediaSession = {
   videoRef: RefObject<HTMLVideoElement | null>
   command(type: string, payload?: Record<string, unknown>): Promise<ControlReply>
   release(): void
-  suspend(nextSessionId: string): Promise<void>
+  suspend(): Promise<void>
   close(): Promise<void>
 }
 

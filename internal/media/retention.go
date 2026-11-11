@@ -8,15 +8,13 @@ import (
 const sessionRetention = 15 * time.Second
 
 type retainedSession struct {
-	session *session
-	until   time.Time
-	timer   *time.Timer
+	timer *time.Timer
 }
 
 // Suspend/resume share the ordered control channel with device input. Commands
 // before suspension finish first; HTTP operations lose their activation context.
 // The peer, RTP sender and browser decoder remain alive without input authority.
-func (s *session) suspend(ctx context.Context, nextSessionID string) error {
+func (s *session) suspend(ctx context.Context) error {
 	h := s.hub
 	h.changeMu.Lock()
 	h.inputMu.Lock()
@@ -44,7 +42,7 @@ func (s *session) suspend(ctx context.Context, nextSessionID string) error {
 	h.inputMu.Unlock()
 	h.changeMu.Unlock()
 	if err == nil {
-		err = s.manager.retainSession(s, nextSessionID)
+		err = s.manager.retainSession(s)
 	}
 	if err != nil {
 		s.beginEnd(err)
@@ -98,9 +96,9 @@ func (s *session) interaction() (context.Context, error) {
 	return s.interactionCtx, nil
 }
 
-// Claim the warm target before parking the departure. Claiming neither creates
-// a transport nor extends the original deadline. All slots count as sessions.
-func (m *Manager) retainSession(s *session, nextSessionID string) error {
+// Each suspended window owns its deadline. Returning cancels only that timer;
+// the next departure starts a fresh interval. All windows count as sessions.
+func (m *Manager) retainSession(s *session) error {
 	m.mu.Lock()
 	if m.closed || s.ctx.Err() != nil {
 		m.mu.Unlock()
@@ -110,17 +108,9 @@ func (m *Manager) retainSession(s *session, nextSessionID string) error {
 		m.mu.Unlock()
 		return nil
 	}
-	if target := m.retained; target != nil && target.session.owner == s.owner && target.session.id == nextSessionID {
-		m.retained = nil
-	}
-	previous := m.retained
-	if previous != nil {
-		m.detachRetentionLocked(previous.session)
-		previous.session.cancel()
-	}
-	entry := &retainedSession{session: s, until: time.Now().Add(sessionRetention)}
-	s.retention, m.retained = entry, entry
-	entry.timer = time.AfterFunc(time.Until(entry.until), func() {
+	entry := &retainedSession{}
+	s.retention = entry
+	entry.timer = time.AfterFunc(sessionRetention, func() {
 		m.mu.Lock()
 		current := s.retention == entry
 		if current {
@@ -134,10 +124,6 @@ func (m *Manager) retainSession(s *session, nextSessionID string) error {
 		}
 	})
 	m.mu.Unlock()
-	if previous != nil {
-		m.deps.Logger.Info("media_session_retention_evicted", "sessionId", previous.session.id, "deviceId", previous.session.hub.deviceID)
-		previous.session.beginEnd(nil)
-	}
 	m.deps.Logger.Info("media_session_retained", "sessionId", s.id, "deviceId", s.hub.deviceID, "retentionMs", sessionRetention.Milliseconds())
 	return nil
 }
@@ -155,7 +141,4 @@ func (m *Manager) detachRetentionLocked(s *session) {
 	}
 	entry.timer.Stop()
 	s.retention = nil
-	if m.retained == entry {
-		m.retained = nil
-	}
 }

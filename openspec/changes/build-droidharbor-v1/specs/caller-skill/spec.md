@@ -7,11 +7,15 @@
 ## ADDED Requirements
 
 ### Requirement: 随产品交付完整调用流程
-平台 SHALL 随版本交付可运行 CLI 和产品 Skill，覆盖能力检查、按标签认领、建立连接、观察设备状态、原生 adb 操作、显式续租、查询和释放；产品 Skill MUST 与项目开发 skills 区分。
+平台 SHALL 随版本交付一个包含产品 Skill 及 Windows/Linux amd64 CLI 的客户端 Skill ZIP，覆盖能力检查、按标签认领、建立连接、观察设备状态、原生 adb 操作、显式续租、查询和释放；产品 Skill MUST 与项目开发 skills 区分。
 
 #### Scenario: 新调用方完整使用
 - **WHEN** 调用方按发布的 Skill 配置平台地址和凭证
 - **THEN** 可以使用同一套说明完成真实设备认领、连接、截图/操作、续租和释放，不依赖未交付的辅助脚本或占位接口
+
+#### Scenario: 安装客户端 Skill 包
+- **WHEN** 调用方解压并安装发布的 `droidharbor` Skill 目录
+- **THEN** 按该目录选择 `scripts/windows-amd64/droidharbor-cli.exe` 或 `scripts/linux-amd64/droidharbor-cli` 的绝对路径，Linux 首次赋予可执行权限；无需另行下载 CLI 或写入全局 PATH，原生 ADB 仍由调用机提供
 
 #### Scenario: 领用保留应用状态的手机
 - **WHEN** 新任务成功认领上一任务释放的手机

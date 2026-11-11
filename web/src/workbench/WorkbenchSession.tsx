@@ -5,7 +5,7 @@ import { deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { useClipboardHistory } from './ClipboardHistory'
 import { PhoneView } from './PhoneView'
 
-export type WorkbenchView = { key: string; deviceId: string; mode: SessionMode; instance: number }
+export type WorkbenchView = { key: string; deviceId: string; mode: SessionMode; instance: number; until: number }
 export const workbenchViewKey = (deviceId: string, mode: SessionMode) => `${deviceId}:${mode}`
 export function mediaStateLabel(device: Device, session?: MediaSession) {
   return device.connectionState !== 'online' ? deviceStatus(device) : session?.status === 'failed' ? '视频连接失败' : session?.status === 'closed' ? '视频已关闭' : session?.ready ? '画面已就绪' : session?.status === 'connected' ? '等待画面' : '正在连接视频'

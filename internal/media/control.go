@@ -278,17 +278,10 @@ func (s *session) handleControl(data []byte) {
 		ctx, cancel := context.WithTimeout(s.ctx, controlTimeout)
 		defer cancel()
 		var err error
-		if envelope.Type == "suspend" {
-			var payload struct {
-				NextSessionID string `json:"nextSessionId"`
-			}
-			if decodeControlPayload(envelope.Payload, &payload, "nextSessionId") != nil {
-				err = problem(422, "INVALID_CONTROL", "窗口保留参数无效")
-			} else {
-				err = s.suspend(ctx, payload.NextSessionID)
-			}
-		} else if decodeControlPayload(envelope.Payload, &struct{}{}) != nil {
-			err = problem(422, "INVALID_CONTROL", "窗口恢复参数无效")
+		if decodeControlPayload(envelope.Payload, &struct{}{}) != nil {
+			err = problem(422, "INVALID_CONTROL", "窗口状态参数无效")
+		} else if envelope.Type == "suspend" {
+			err = s.suspend(ctx)
 		} else {
 			err = s.resume(ctx)
 		}

@@ -65,6 +65,10 @@ func (s *serverDiagnostics) observe(line []byte) {
 		s.logger.Info("scrcpy_display_power_changed", "deviceId", s.deviceID, "captureId", s.captureID, "physicalDisplayOn", bytes.HasSuffix(line, []byte(" on")))
 		return
 	}
+	if bytes.Equal(line, []byte("[server] INFO: Device rotation requested: portrait")) || bytes.Equal(line, []byte("[server] INFO: Device rotation requested: landscape")) {
+		s.logger.Info("scrcpy_device_rotation_requested", "deviceId", s.deviceID, "captureId", s.captureID, "landscape", bytes.HasSuffix(line, []byte("landscape")))
+		return
+	}
 	if bytes.HasPrefix(line, []byte("[server] ERROR:")) {
 		s.logger.Error("scrcpy_server_error", "deviceId", s.deviceID, "captureId", s.captureID)
 		return
