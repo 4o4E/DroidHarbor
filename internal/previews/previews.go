@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	maxConcurrent = 2
 	maxInputBytes = 32 << 20
 	maxPixels     = 16_000_000
 	maxEntries    = 128
@@ -78,7 +77,6 @@ type Manager struct {
 	lastStart map[cacheKey]time.Time
 	flights   map[cacheKey]*flight
 	cacheSize int
-	slots     chan struct{}
 	wg        sync.WaitGroup
 }
 
@@ -86,7 +84,7 @@ func New(ctx context.Context, source Source, client *adb.Client) *Manager {
 	lifetime, cancel := context.WithCancel(ctx)
 	m := &Manager{ctx: lifetime, cancel: cancel, source: source, client: client,
 		entries: make(map[cacheKey]cacheEntry), lastStart: make(map[cacheKey]time.Time),
-		flights: make(map[cacheKey]*flight), slots: make(chan struct{}, maxConcurrent)}
+		flights: make(map[cacheKey]*flight)}
 	m.wg.Add(1)
 	go m.evictLoop()
 	return m
@@ -183,22 +181,11 @@ func (m *Manager) capture(key cacheKey, link leases.Link, linkCtx context.Contex
 	stop := context.AfterFunc(linkCtx, cancel)
 	defer func() { stop(); cancel() }()
 
-	// 同时可见的设备共享两路采集能力；其余在既有有界 flight 中等待，
-	// 不把第三台设备的正常刷新当作容量故障。十秒预算包含排队时间。
-	var data []byte
-	var err error
-	var startedAt time.Time
-	select {
-	case m.slots <- struct{}{}:
-		defer func() { <-m.slots }()
-		startedAt = time.Now()
-		m.mu.Lock()
-		m.lastStart[key] = startedAt
-		m.mu.Unlock()
-		data, err = m.acquire(workCtx, link)
-	case <-workCtx.Done():
-		err = workCtx.Err()
-	}
+	startedAt := time.Now()
+	m.mu.Lock()
+	m.lastStart[key] = startedAt
+	m.mu.Unlock()
+	data, err := m.acquire(workCtx, link)
 	capturedAt := time.Now().UTC()
 	if err == nil {
 		pending.snapshot, err = encode(data, capturedAt, key.link.DeviceID, link.Generation)
