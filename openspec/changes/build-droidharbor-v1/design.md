@@ -314,7 +314,7 @@ ADB 容器单独重启视为底层连接中断，关闭旧子流，状态置离�
 
 ### 13. Windows 前台试用与诊断
 
-- Windows 服务端交付一个内嵌网页和 scrcpy-server 的 EXE；客户端交付一个 Skill ZIP，含根目录 `droidharbor/SKILL.md` 及 `scripts/windows-amd64/droidharbor-cli.exe`、`scripts/linux-amd64/droidharbor-cli`，无需另发 CLI 包或说明文件。Skill 按自身安装目录使用对应平台程序，不要求全局 PATH。双击控制台 EXE 零参数运行；缺 `.env` 时自动生成完整配置与随机明文 token，现有配置复用，错误明确失败。路径相对 `.env`；管理 token 只读文件，其他配置可由进程环境覆盖。旧数据由用户清理，不实现摘要文件兼容或迁移。
+- Windows 服务端交付一个内嵌网页和 scrcpy-server 的 EXE；客户端交付一个 Skill ZIP，含 `droidharbor/SKILL.md`、`droidharbor/scripts/windows-amd64/droidharbor-cli.exe`、`droidharbor/scripts/linux-amd64/droidharbor-cli`，无需另发 CLI 包或说明文件。Skill 按自身安装目录使用对应平台程序，不要求全局 PATH。双击控制台 EXE 零参数运行；缺 `.env` 时自动生成完整配置与随机明文 token，现有配置复用，错误明确失败。路径相对 `.env`；管理 token 只读文件，其他配置可由进程环境覆盖。旧数据由用户清理，不实现摘要文件兼容或迁移。
 - `.env` 是管理 token 的唯一配置来源，不提供 `.env.example`、start.cmd 或 admin-init。数据库仍自动初始化；媒体默认自动协商本机 IPv4，可选显式地址覆盖。保留日志双写和初始化结果，不配置 TLS、证书或固定 origin；Windows Service 仍通过 `serve --env-file` 选择同一格式。
 - 平台及专用 ADB runner 的日志同时写控制台和文件，20 MiB 轮转、最多 5 份压缩历史；日志无法创建直接失败，后续写入故障显式写 stderr。默认 info，可显式开启 debug 记录 requestId、匹配路由和请求耗时。
 - 启动阶段、后台 ADB 清单、媒体采集、资源清理、传输和存储异常保留错误类型/原因链、OS errno、SQLite 结果码及关联 ID。数据库/设备错误正文可能包含业务数据，运行日志只提取已知系统原因，不写入任意错误字符串、请求参数或设备输出。HTTP panic 记录类型与调用栈后继续交给 HTTP Server 关闭异常请求。
