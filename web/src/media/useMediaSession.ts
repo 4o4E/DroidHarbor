@@ -9,7 +9,6 @@ const CONTROL_BUFFER_LIMIT = 4 << 20
 const MAX_PENDING_COMMANDS = 64
 const MAX_DATA_CHANNEL_CHUNK = 16 << 10
 const INCOMPLETE_FRAME_TIMEOUT_MS = 5_000
-const SESSION_SETUP_TIMEOUT_MS = 30_000
 const COMMAND_TIMEOUT_MS = 30_000
 
 type SessionSnapshot = {
@@ -74,28 +73,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validUInt32(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 0xffff_ffff
-}
-
-function waitForIceGathering(peer: RTCPeerConnection, signal: AbortSignal): Promise<void> {
-  if (peer.iceGatheringState === 'complete') return Promise.resolve()
-  return new Promise<void>((resolve, reject) => {
-    const finish = (error?: Error) => {
-      window.clearTimeout(timer)
-      peer.removeEventListener('icegatheringstatechange', onGathering)
-      signal.removeEventListener('abort', onAbort)
-      if (error) reject(error)
-      else resolve()
-    }
-    const onGathering = () => {
-      if (peer.iceGatheringState === 'complete') finish()
-    }
-    const onAbort = () => finish(new DOMException('媒体会话协商已取消', 'AbortError'))
-    const timer = window.setTimeout(() => finish(new Error('等待 ICE 候选收集超时')), SESSION_SETUP_TIMEOUT_MS)
-    peer.addEventListener('icegatheringstatechange', onGathering)
-    signal.addEventListener('abort', onAbort, { once: true })
-    if (peer.iceGatheringState === 'complete') finish()
-    else if (signal.aborted) onAbort()
-  })
 }
 
 function rtpIsAtOrAfter(timestamp: number, boundary: number): boolean {
@@ -246,6 +223,18 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     setFramesPerSecond(0)
     setRemoteState(null)
 
+    const pendingCandidates: RTCIceCandidateInit[] = []
+    const sendCandidate = (candidate: RTCIceCandidateInit) => {
+      if (!runtime.sessionId || !isCurrent()) return
+      void api<void>(`/sessions/${encodeURIComponent(runtime.sessionId)}/candidates`, {
+        method: 'POST',
+        body: candidate,
+        signal: abortController.signal,
+      }).catch(cause => {
+        if (isCurrent()) void teardown('failed', `ICE 候选提交失败：${errorMessage(cause)}`)
+      })
+    }
+
     const failPending = (cause: Error) => {
       for (const pending of runtime.pending.values()) {
         window.clearTimeout(pending.timeout)
@@ -287,7 +276,9 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       if (peer) {
         peer.ontrack = null
         peer.onconnectionstatechange = null
+        peer.onicecandidate = null
       }
+      pendingCandidates.length = 0
       const disposeTransport = () => {
         if (channel) {
           try { channel.close() } catch (cause) {
@@ -479,6 +470,14 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         }
         channel.onmessage = event => consumeControlChunk(event.data)
         peer.onconnectionstatechange = updateConnection
+        // Start signaling immediately; interface discovery continues in parallel.
+        // Candidates collected before the session response stay with this runtime.
+        peer.onicecandidate = event => {
+          if (!event.candidate || !isCurrent()) return
+          const candidate = event.candidate.toJSON()
+          if (runtime.sessionId) sendCandidate(candidate)
+          else pendingCandidates.push(candidate)
+        }
         peer.ontrack = event => {
           if (!isCurrent()) return
           if (event.track.kind !== 'video') {
@@ -497,10 +496,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         if (!isCurrent()) return
         await peer.setLocalDescription(offer)
         if (!isCurrent()) return
-        await waitForIceGathering(peer, abortController.signal)
-        if (!isCurrent()) return
         const sdp = peer.localDescription?.sdp
-        if (!sdp) throw new Error('浏览器未生成完整的 WebRTC offer')
+        if (!sdp) throw new Error('浏览器未生成 WebRTC offer')
         if (runtime.handoff) await runtime.handoff.ended
         if (!isCurrent()) return
         const snapshot = await api<SessionSnapshot>(`/devices/${encodeURIComponent(deviceId)}/sessions`, {
@@ -522,6 +519,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         }
         setSessionId(snapshot.sessionId)
         await peer.setRemoteDescription({ type: 'answer', sdp: snapshot.answer })
+        for (const candidate of pendingCandidates) sendCandidate(candidate)
+        pendingCandidates.length = 0
         if (!isCurrent()) return
       } catch (cause) {
         if (isCurrent()) {

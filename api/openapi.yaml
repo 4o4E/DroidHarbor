@@ -781,6 +781,7 @@ paths:
         仅管理员 Cookie；不接受 bearer。请求不创建、续期或暂停 AI 租约。
         offer 必须包含 recvonly H.264 视频和可靠有序的 droidharbor.control.v1 DataChannel，不含音频。
         answer 包含完整本地 ICE 候选；默认自动收集本机 IPv4，支持可选显式地址覆盖，无 STUN/TURN 或协议降级。
+        浏览器可在候选收集完成前提交 offer；新收集的候选在取得 sessionId 后通过 candidates 接口提交。
         201 表示会话与信令已建立，不代表浏览器已解码呈现画面。
         DataChannel 逻辑消息为四字节大端长度加 UTF-8 JSON；单条逻辑消息不超过 2 MiB，
         每个二进制 DataChannel chunk 不超过 16 KiB，不接受文本消息；可跨 chunk 拆分长度头和正文。

@@ -1,6 +1,8 @@
 package devices
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -33,21 +35,52 @@ type VideoGeometry struct {
 	ObservedAt time.Time `json:"observedAt"`
 }
 
-var primaryDisplayLine = regexp.MustCompile(`(?m)^\s*Display id 0:\s*([^\r\n]+)`)
 var logicalDisplaySize = regexp.MustCompile(`\breal\s+(\d+)\s*x\s*(\d+)\b`)
 var logicalDisplayRotation = regexp.MustCompile(`\brotation\s+([0-3])\b`)
 
-func parseScreenGeometry(output string) (ScreenGeometry, error) {
-	line := primaryDisplayLine.FindStringSubmatch(output)
-	if len(line) != 2 {
+// dumpsys display is available on Android versions without cmd display get-displays.
+// WindowManager's override supplies the current logical orientation; the base
+// describes the physical panel and is used only when the override is null.
+func parseScreenGeometry(output io.Reader) (ScreenGeometry, error) {
+	scanner := bufio.NewScanner(output)
+	scanner.Buffer(make([]byte, 4096), 64<<10)
+	primary := false
+	var base []byte
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if !primary {
+			primary = bytes.Equal(line, []byte("Display 0:"))
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("Display ")) && bytes.HasSuffix(line, []byte(":")) {
+			break
+		}
+		if information, ok := bytes.CutPrefix(line, []byte("mBaseDisplayInfo=")); ok {
+			base = bytes.Clone(information)
+		}
+		if information, ok := bytes.CutPrefix(line, []byte("mOverrideDisplayInfo=")); ok {
+			if bytes.Equal(bytes.TrimSpace(information), []byte("null")) {
+				return parseDisplayGeometry(base)
+			}
+			return parseDisplayGeometry(information)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return ScreenGeometry{}, err
+	}
+	if !primary {
 		return ScreenGeometry{}, diagnostics.New("primary display information missing")
 	}
-	size, rotation := logicalDisplaySize.FindStringSubmatch(line[1]), logicalDisplayRotation.FindStringSubmatch(line[1])
+	return ScreenGeometry{}, diagnostics.New("primary display override information missing")
+}
+
+func parseDisplayGeometry(information []byte) (ScreenGeometry, error) {
+	size, rotation := logicalDisplaySize.FindSubmatch(information), logicalDisplayRotation.FindSubmatch(information)
 	if len(size) != 3 || len(rotation) != 2 {
 		return ScreenGeometry{}, diagnostics.New("primary display geometry missing")
 	}
-	width, widthErr := strconv.Atoi(size[1])
-	height, heightErr := strconv.Atoi(size[2])
+	width, widthErr := strconv.Atoi(string(size[1]))
+	height, heightErr := strconv.Atoi(string(size[2]))
 	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 || width > 65535 || height > 65535 {
 		return ScreenGeometry{}, diagnostics.New("primary display dimensions invalid")
 	}
@@ -57,19 +90,12 @@ func parseScreenGeometry(output string) (ScreenGeometry, error) {
 func (r *Registry) readDisplay(ctx context.Context, transportID uint64) (ScreenGeometry, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	stream, err := r.client.Open(probeCtx, transportID, "exec:cmd display get-displays", probeCtx.Err)
+	stream, err := r.client.Open(probeCtx, transportID, "exec:dumpsys display", probeCtx.Err)
 	if err == nil {
-		data, readErr := io.ReadAll(io.LimitReader(stream, (64<<10)+1))
+		geometry, readErr := parseScreenGeometry(io.LimitReader(stream, 256<<10))
 		err = errors.Join(readErr, stream.Close())
-		if len(data) > 64<<10 {
-			err = errors.Join(err, diagnostics.New("display information exceeds size limit"))
-		}
 		if err == nil {
-			var geometry ScreenGeometry
-			geometry, err = parseScreenGeometry(string(data))
-			if err == nil {
-				return geometry, nil
-			}
+			return geometry, nil
 		}
 	}
 	return ScreenGeometry{}, &Error{Code: "DISPLAY_INFO_UNAVAILABLE", Message: "无法读取设备显示尺寸，请同步设备状态后重试", Status: 503, Cause: err}

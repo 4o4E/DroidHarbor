@@ -435,8 +435,11 @@ func (r *Registry) verifySnapshot(update inventoryUpdate) error {
 		}
 		screen, displayErr := r.readDisplay(update.epoch, observed.TransportID)
 		if displayErr != nil {
-			r.logger.Error("device_display_info_failed", "deviceId", link.deviceID, "code", "DISPLAY_INFO_UNAVAILABLE")
-			return displayErr
+			r.logger.Error("device_display_info_failed", "deviceId", link.deviceID, "linkId", link.id, "code", "DISPLAY_INFO_UNAVAILABLE", "cause", diagnostics.Cause(displayErr))
+			if update.epoch.Err() != nil {
+				return update.epoch.Err()
+			}
+			continue
 		}
 		if err := saveScreenGeometry(update.epoch, r.db, link.deviceID, screen); err != nil {
 			return err

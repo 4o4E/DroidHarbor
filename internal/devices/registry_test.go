@@ -126,7 +126,7 @@ func TestIdentityAssociationRejectsDuplicateAndWrongHardware(t *testing.T) {
 		1: "hardware-one\nMaker\nModel\nproduct\n15\n35\n",
 		2: "hardware-one\nMaker\nModel\nproduct\n15\n35\n",
 		3: "hardware-other\nMaker\nModel\nproduct\n15\n35\n",
-	})
+	}, nil)
 	registry := New(ctx, db, client, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second)
 	defer registry.Close()
 	registry.publish([]adb.Device{{Serial: "usb-one", State: "device", TransportID: 1}, {Serial: "192.0.2.1:5555", State: "device", TransportID: 2}, {Serial: "usb-other", State: "device", TransportID: 3}}, ctx)
@@ -210,7 +210,7 @@ func TestTransportSnapshotInvalidatesExistingLinkContext(t *testing.T) {
 	}
 }
 
-func identityFixture(t *testing.T, properties map[uint64]string) *adb.Client {
+func identityFixture(t *testing.T, properties map[uint64]string, displays map[uint64]string) *adb.Client {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -264,8 +264,11 @@ func identityFixture(t *testing.T, properties map[uint64]string) *adb.Client {
 					return
 				}
 				output := properties[transport]
-				if service == "exec:cmd display get-displays" {
-					output = "Displays:\nDisplay id 0: DisplayInfo{\"Built-in Screen\", displayId 0, real 1080 x 2400, rotation 0}\n"
+				if service == "exec:dumpsys display" {
+					output = "Logical Displays:\n  Display 0:\n    mBaseDisplayInfo=DisplayInfo{real 1080 x 2400, rotation 0}\n    mOverrideDisplayInfo=null\n"
+					if custom, ok := displays[transport]; ok {
+						output = custom
+					}
 				}
 				if _, err = io.WriteString(conn, "OKAY"+output); err != nil {
 					t.Error(err)
@@ -292,7 +295,7 @@ func TestWirelessAddressChangePreservesIdentityAndWithdrawsOldTransport(t *testi
 		1: "hardware-one\nMaker\nModel\nproduct\n15\n35\n",
 		2: "hardware-other\nMaker\nModel\nproduct\n15\n35\n",
 		3: "hardware-one\nMaker\nModel\nproduct\n15\n35\n",
-	})
+	}, nil)
 	registry := New(ctx, db, client, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second)
 	defer registry.Close()
 	oldEndpoint, newEndpoint := "192.0.2.1:5555", "192.0.2.1:6000"
@@ -536,7 +539,7 @@ func TestDiscoveredEnrollmentDeduplicatesHardwareAndKeepsUntrustedLinksDisabled(
 		1: "one-phone\nMaker\nPhone\nproduct\n15\n35\n",
 		2: "one-phone\nMaker\nPhone\nproduct\n15\n35\n",
 		3: "one-phone\nMaker\nDifferent\nproduct\n15\n35\n",
-	})
+	}, nil)
 	registry := New(ctx, db, client, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second)
 	defer registry.Close()
 	registry.publish([]adb.Device{
@@ -593,5 +596,74 @@ func TestDiscoveredEnrollmentDeduplicatesHardwareAndKeepsUntrustedLinksDisabled(
 	}
 	if persisted {
 		t.Fatal("a rejected identity left a registered link")
+	}
+}
+
+func TestRestartDisplayFailureDoesNotBlockOtherPersistedDevices(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "devices.db")
+	db, err := storage.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	properties := map[uint64]string{
+		1: "first-hardware\nMaker\nFirst\nfirst-product\n10\n29\n",
+		2: "second-hardware\nMaker\nSecond\nsecond-product\n15\n35\n",
+	}
+	inventory := []adb.Device{
+		{Serial: "first-usb", State: "device", TransportID: 1},
+		{Serial: "second-usb", State: "device", TransportID: 2},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	original := New(ctx, db, identityFixture(t, properties, nil), logger, time.Second)
+	original.publish(inventory, ctx)
+	var registered []Registered
+	for index, device := range inventory {
+		entry, err := original.Register(ctx, "admin", Registration{DisplayName: device.Serial, LinkRequest: LinkRequest{Kind: "usb", Endpoint: device.Serial}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := original.Verify(ctx, "admin", entry.DeviceID, entry.LinkID); err != nil {
+			t.Fatal(err)
+		}
+		// Make the failing device precede the healthy device in the persisted
+		// restore order, independent of randomly generated registration IDs.
+		linkID := fmt.Sprint(index)
+		if _, err := db.Exec(`UPDATE device_links SET id=? WHERE id=?`, linkID, entry.LinkID); err != nil {
+			t.Fatal(err)
+		}
+		entry.LinkID = linkID
+		registered = append(registered, entry)
+	}
+	if err := original.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = storage.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	restarted := New(ctx, db, identityFixture(t, properties, map[uint64]string{1: "display service unavailable\n"}), logger, time.Second)
+	defer restarted.Close()
+	restarted.publish(inventory, ctx)
+	if err := restarted.verifySnapshot(inventoryUpdate{version: restarted.version, epoch: ctx}); err != nil {
+		t.Fatal(err)
+	}
+	links := restarted.OnlineLinks()
+	if len(links) != 1 || links[0].DeviceID != registered[1].DeviceID {
+		t.Fatalf("one display failure blocked a healthy persisted device: %+v", links)
+	}
+	for index, entry := range registered {
+		var name string
+		var width, height int
+		if err := db.QueryRow(`SELECT display_name,json_extract(display_info,'$.screen.width'),json_extract(display_info,'$.screen.height') FROM devices WHERE id=?`, entry.DeviceID).Scan(&name, &width, &height); err != nil {
+			t.Fatal(err)
+		}
+		if name != inventory[index].Serial || width != 1080 || height != 2400 {
+			t.Fatalf("restart changed persisted device metadata: name=%q dimensions=%dx%d", name, width, height)
+		}
 	}
 }

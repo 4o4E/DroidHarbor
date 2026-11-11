@@ -1,17 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { ImageOff, LoaderCircle, MonitorSmartphone, Unplug } from 'lucide-react'
 import { cn } from 'cn'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { errorMessage } from '@/lib/api'
 import { deviceDisplaySize, type Device } from '@/lib/types'
+import { useErrorNotification } from '@/lib/notifications'
 import { useDevicePreview, type DevicePreviewFrame } from './useDevicePreview'
 
 export type DevicePreviewProps = {
   device: Device
   compact?: boolean
+  videoRef?: RefObject<HTMLVideoElement | null>
+  videoReady?: boolean
 }
 
-export function DevicePreview({ device, compact = false }: DevicePreviewProps) {
+export function DevicePreview({ device, compact = false, videoRef, videoReady = false }: DevicePreviewProps) {
   const rootRef = useRef<HTMLDivElement>(null)
   const [intersecting, setIntersecting] = useState(false)
   const [documentVisible, setDocumentVisible] = useState(() => typeof document !== 'undefined' && document.visibilityState === 'visible')
@@ -73,8 +76,10 @@ export function DevicePreview({ device, compact = false }: DevicePreviewProps) {
         ? `${device.displayName} · 拍摄于 ${new Date(currentFrame.capturedAt).toLocaleString('zh-CN')}`
         : `${device.displayName} · ${online ? '暂无最新预览' : '设备不可用'}`}
     >
-      <div className={cn('flex items-center justify-center bg-background text-foreground', !compact && 'h-56')} style={compact && displaySize ? { aspectRatio: `${displaySize.width} / ${displaySize.height}` } : undefined}>
-        {online && active ? (
+      <div className={cn('flex w-full items-center justify-center bg-background text-foreground', !compact && 'h-56')} style={compact && displaySize ? { aspectRatio: `${displaySize.width} / ${displaySize.height}` } : undefined}>
+        {online && active ? videoRef ? (
+          <BrowserVideoPreview videoRef={videoRef} ready={videoReady} device={device} />
+        ) : (
           <LivePreview
             key={`${device.deviceId}:${linkSignature}`}
             device={device}
@@ -89,6 +94,59 @@ export function DevicePreview({ device, compact = false }: DevicePreviewProps) {
       {!compact && <PreviewFooter device={device} active={active} capturedAt={currentFrame?.capturedAt} />}
     </div>
   )
+}
+
+// The selected device reuses its decoded video; it does not run a second ADB
+// screenshot loop. Draw at most four times a second, at the preview's pixel size.
+function BrowserVideoPreview({ videoRef, ready, device }: { videoRef: RefObject<HTMLVideoElement | null>; ready: boolean; device: Device }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [drawn, setDrawn] = useState(false)
+  const [error, setError] = useState('')
+  useErrorNotification('设备预览更新失败', error)
+  useEffect(() => {
+    setDrawn(false)
+    setError('')
+    const canvas = canvasRef.current
+    const video = videoRef.current
+    if (!ready || !canvas || !video) return
+    const context = canvas.getContext('2d')
+    if (!context) {
+      setError('浏览器无法创建设备预览画布')
+      console.error('browser_preview_context_unavailable', { deviceId: device.deviceId })
+      return
+    }
+    let callback = 0
+    let lastDraw = -Infinity
+    const draw = (now: number) => {
+      try {
+        if (now - lastDraw >= 250 && video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          const width = canvas.parentElement?.clientWidth ?? 0
+          if (width > 0) {
+            const scale = Math.min(1, width * window.devicePixelRatio / video.videoWidth, 1280 / Math.max(video.videoWidth, video.videoHeight))
+            const targetWidth = Math.max(1, Math.round(video.videoWidth * scale))
+            const targetHeight = Math.max(1, Math.round(video.videoHeight * scale))
+            if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+              canvas.width = targetWidth
+              canvas.height = targetHeight
+            }
+            context.drawImage(video, 0, 0, targetWidth, targetHeight)
+            lastDraw = now
+            setDrawn(true)
+          }
+        }
+        callback = video.requestVideoFrameCallback(draw)
+      } catch (cause) {
+        console.error('browser_preview_capture_failed', { deviceId: device.deviceId, errorType: cause instanceof Error ? cause.name : typeof cause })
+        setError(errorMessage(cause))
+      }
+    }
+    draw(performance.now())
+    return () => video.cancelVideoFrameCallback(callback)
+  }, [device.deviceId, ready, videoRef])
+  return <>
+    <canvas ref={canvasRef} aria-label={`${device.displayName}的实时视频预览`} className={cn('max-h-full max-w-full', !drawn && 'hidden')} />
+    {!drawn && <Empty className="p-1"><EmptyHeader><EmptyMedia variant="icon">{error ? <ImageOff /> : <LoaderCircle className="animate-spin" />}</EmptyMedia></EmptyHeader></Empty>}
+  </>
 }
 
 function LivePreview({ device, compact, linkSignature, onPreviewFrame }: {

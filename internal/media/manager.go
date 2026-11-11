@@ -143,6 +143,7 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 		return SessionSnapshot{}, &Error{Status: 503, Code: "STORAGE_UNAVAILABLE", Message: "无法记录人工会话", Cause: err}
 	}
 	m.notifyDevice(deviceID)
+	m.deps.Logger.Info("media_session_prepared", "sessionId", s.id, "deviceId", deviceID, "elapsedMs", time.Since(now).Milliseconds())
 	return SessionSnapshot{SessionID: s.id, DeviceID: deviceID, Mode: mode, Answer: peer.Answer(), ControlProtocol: "droidharbor.control.v1"}, nil
 }
 

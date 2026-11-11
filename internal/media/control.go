@@ -289,6 +289,7 @@ func (s *session) handleControl(data []byte) {
 			return
 		}
 		s.reply(envelope.Sequence, envelope.CaptureEpoch, "frame-ready", "succeeded", nil, nil)
+		s.manager.deps.Logger.Info("media_frame_presented", "sessionId", s.id, "deviceId", s.hub.deviceID, "captureEpoch", envelope.CaptureEpoch, "elapsedMs", time.Since(s.created).Milliseconds())
 		return
 	}
 	if envelope.Type == "request-frame" {
@@ -542,6 +543,7 @@ func (s *session) runVideo() {
 	if peer == nil {
 		return
 	}
+	s.manager.deps.Logger.Info("media_peer_ready", "sessionId", s.id, "deviceId", s.hub.deviceID, "elapsedMs", time.Since(s.created).Milliseconds())
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -574,6 +576,7 @@ func (s *session) runVideo() {
 				sent, notify = s.markFrameSent(frame, generation)
 			}
 			if sent && notify {
+				s.manager.deps.Logger.Info("media_frame_boundary_sent", "sessionId", s.id, "deviceId", s.hub.deviceID, "captureEpoch", frame.epoch, "elapsedMs", time.Since(s.created).Milliseconds())
 				notice := controlReply{
 					SessionID: s.id, CaptureEpoch: frame.epoch, Type: "frame-boundary", Status: "sent",
 					Payload: frameBoundaryPayload{Timestamp: frame.timestamp, Width: frame.width, Height: frame.height, KeyFrame: frame.key},
