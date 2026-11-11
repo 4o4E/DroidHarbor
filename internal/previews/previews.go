@@ -78,7 +78,7 @@ type Manager struct {
 	lastStart map[cacheKey]time.Time
 	flights   map[cacheKey]*flight
 	cacheSize int
-	workers   int
+	slots     chan struct{}
 	wg        sync.WaitGroup
 }
 
@@ -86,7 +86,7 @@ func New(ctx context.Context, source Source, client *adb.Client) *Manager {
 	lifetime, cancel := context.WithCancel(ctx)
 	m := &Manager{ctx: lifetime, cancel: cancel, source: source, client: client,
 		entries: make(map[cacheKey]cacheEntry), lastStart: make(map[cacheKey]time.Time),
-		flights: make(map[cacheKey]*flight)}
+		flights: make(map[cacheKey]*flight), slots: make(chan struct{}, maxConcurrent)}
 	m.wg.Add(1)
 	go m.evictLoop()
 	return m
@@ -130,10 +130,6 @@ func (m *Manager) Get(ctx context.Context, deviceID string) (Snapshot, error) {
 		m.mu.Unlock()
 		return Snapshot{}, ErrRateLimited
 	}
-	if m.workers >= maxConcurrent {
-		m.mu.Unlock()
-		return Snapshot{}, ErrCapacity
-	}
 	if _, known := m.lastStart[key]; !known && len(m.lastStart) >= maxEntries {
 		m.evictIdleLocked(now)
 		if len(m.lastStart) >= maxEntries {
@@ -144,10 +140,9 @@ func (m *Manager) Get(ctx context.Context, deviceID string) (Snapshot, error) {
 	pending := &flight{done: make(chan struct{})}
 	m.flights[key] = pending
 	m.lastStart[key] = now
-	m.workers++
 	m.wg.Add(1)
 	m.mu.Unlock()
-	go m.capture(key, link, linkCtx, now, pending)
+	go m.capture(key, link, linkCtx, pending)
 
 	select {
 	case <-ctx.Done():
@@ -182,13 +177,28 @@ func (m *Manager) validate(ctx context.Context, link leases.Link, snapshot Snaps
 	return snapshot, nil
 }
 
-func (m *Manager) capture(key cacheKey, link leases.Link, linkCtx context.Context, startedAt time.Time, pending *flight) {
+func (m *Manager) capture(key cacheKey, link leases.Link, linkCtx context.Context, pending *flight) {
 	defer m.wg.Done()
 	workCtx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 	stop := context.AfterFunc(linkCtx, cancel)
 	defer func() { stop(); cancel() }()
 
-	data, err := m.acquire(workCtx, link)
+	// 同时可见的设备共享两路采集能力；其余在既有有界 flight 中等待，
+	// 不把第三台设备的正常刷新当作容量故障。十秒预算包含排队时间。
+	var data []byte
+	var err error
+	var startedAt time.Time
+	select {
+	case m.slots <- struct{}{}:
+		defer func() { <-m.slots }()
+		startedAt = time.Now()
+		m.mu.Lock()
+		m.lastStart[key] = startedAt
+		m.mu.Unlock()
+		data, err = m.acquire(workCtx, link)
+	case <-workCtx.Done():
+		err = workCtx.Err()
+	}
 	capturedAt := time.Now().UTC()
 	if err == nil {
 		pending.snapshot, err = encode(data, capturedAt, key.link.DeviceID, link.Generation)
@@ -212,7 +222,6 @@ func (m *Manager) capture(key cacheKey, link leases.Link, linkCtx context.Contex
 		}
 	}
 	delete(m.flights, key)
-	m.workers--
 	close(pending.done)
 	m.mu.Unlock()
 }

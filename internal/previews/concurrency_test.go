@@ -56,6 +56,8 @@ type previewADB struct {
 	mu       sync.Mutex
 	payloads [][]byte
 	calls    int
+	active   int
+	peak     int
 }
 
 func newPreviewADB(t *testing.T, payload []byte) *previewADB {
@@ -90,8 +92,15 @@ func newPreviewADBSequence(t *testing.T, payloads ...[]byte) *previewADB {
 				fixture.mu.Lock()
 				n := fixture.calls
 				fixture.calls++
+				fixture.active++
+				fixture.peak = max(fixture.peak, fixture.active)
 				payload := fixture.payloads[min(n, len(fixture.payloads)-1)]
 				fixture.mu.Unlock()
+				defer func() {
+					fixture.mu.Lock()
+					fixture.active--
+					fixture.mu.Unlock()
+				}()
 				fixture.started <- struct{}{}
 				<-fixture.release
 				_, _ = conn.Write(payload)
