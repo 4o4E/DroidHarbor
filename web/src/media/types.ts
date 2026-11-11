@@ -14,6 +14,8 @@ export type MediaSession = {
   status: 'connecting' | 'connected' | 'closed' | 'failed'
   error: string
   ready: boolean
+  hasFrame: boolean
+  canRetain: boolean
   epoch: number
   width: number
   height: number
@@ -21,6 +23,7 @@ export type MediaSession = {
   videoRef: RefObject<HTMLVideoElement | null>
   command(type: string, payload?: Record<string, unknown>): Promise<ControlReply>
   release(): void
+  suspend(nextSessionId: string): Promise<void>
   close(): Promise<void>
 }
 

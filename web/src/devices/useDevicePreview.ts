@@ -7,9 +7,10 @@ export type DevicePreviewFrame = {
   linkGeneration: string
 }
 
-export function useDevicePreview(deviceId: string, linkSignature: string) {
+export function useDevicePreview(deviceId: string, linkSignature: string, enabled: boolean) {
   return useQuery({
     queryKey: ['device-preview', deviceId, linkSignature],
+    enabled,
     queryFn: async ({ signal }): Promise<DevicePreviewFrame> => {
       const response = await apiResponse(`/devices/${encodeURIComponent(deviceId)}/preview`, { signal })
 

@@ -860,25 +860,14 @@ paths:
       operationId: endMediaSession
       summary: 关闭本人会话并释放该会话持有的输入
       description: |
-        普通关闭回收最后观看者的采集和该登录的空闲保活；不释放其他人的输入，不撤销 AI 租约。
-        明确切换同时提供 reason=switch 与 nextDeviceId：旧会话授权和输入立即结束，
-        已保活目标先进入连接中占位，离开设备进入全平台唯一空闲保活位，最长十五秒。
-        目标占位沿用原剩余期限、计入媒体容量，不启动新编码器；客户端等待本次结束完成后创建目标会话。
-        目标建连前取消、关闭或失败时，以原结束会话 ID、相同 nextDeviceId 和 reason=cancel-switch
-        释放该次交接的占位与空闲保活，不能取消其他窗口的较新交接。退出、撤权、断连、失败及停服务走定向回收。
-        普通关闭不带两个查询参数；切换参数须成对提供。回收无法确认时明确失败。
+        关闭指定窗口及其操作作用域；最后观看者关闭后回收共享采集，不影响其他窗口或 AI 租约。
+        后台保留窗口仍以原 sessionId 计入媒体容量，关闭同样会立即回收本窗口的保留项。
+        正常设备切换使用原有有序 DataChannel 的 suspend/resume，不删除原会话、不重新提交 offer。
+        退出、撤权、链路断开、采集失败及平台停止结束对应窗口。回收无法确认时明确失败。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
         - $ref: '#/components/parameters/CSRFToken'
-        - name: reason
-          in: query
-          schema: {type: string, enum: [switch, cancel-switch]}
-          description: 与 nextDeviceId 同时提供；省略表示普通关闭
-        - name: nextDeviceId
-          in: query
-          schema: {type: string, minLength: 1}
-          description: 此次切换目标；不是凭证
       responses:
         '204': {description: 人工会话已关闭并完成所需回收}
         '401': {$ref: '#/components/responses/Error'}
@@ -1177,11 +1166,16 @@ components:
         sequence: {type: integer, minimum: 1}
         type:
           type: string
-          enum: [ping, frame-ready, request-frame, key, touch, scroll, mouseButton, text, clipboard.get, clipboard.set, clipboard.paste, displayPower, back, home, recent, notification, settings, collapse, rotate, resetVideo, release]
+          enum: [ping, suspend, resume, frame-ready, request-frame, key, touch, scroll, mouseButton, text, clipboard.get, clipboard.set, clipboard.paste, displayPower, back, home, recent, notification, settings, collapse, rotate, resetVideo, release]
         payload:
           type: object
           description: |
             无参数操作发送 {}，不能省略或为 null。frame-ready 必须含 timestamp。
+            suspend 必须含字符串 nextSessionId，冷目标使用空字符串；存在的回切目标须为本登录的精确媒体会话。
+            同一有序通道先完成旧输入再挂起，释放按键/触摸、取消剪贴板与旧 HTTP 操作作用域。
+            后台保持 RTP 及解码，只允许 ping、frame-ready 和 suspend/resume；设备操作返回 SESSION_SUSPENDED。
+            全平台最多一个后台候补窗口及正在回切的短交接目标，均计入 64 个会话上限；十五秒原截止时间不延长。
+            resume 发送 {}，核验原权限和链路、逻辑唤醒并实体熄屏；重新实际呈现确认前不能执行设备操作。
             key 包含 keyCode/action，可含 repeat/metaState；按下为 0，释放为 1。
             touch 包含 pointerId/action/x/y/width/height/pressure，scroll 包含
             x/y/width/height/hScroll/vScroll，可含 buttons；坐标和尺寸属于已确认的当前画面。

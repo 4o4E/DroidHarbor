@@ -70,21 +70,9 @@ func (s *Server) endMediaSession(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	reason := r.URL.Query().Get("reason")
-	nextDeviceID := r.URL.Query().Get("nextDeviceId")
-	if reason != "" && reason != "switch" && reason != "cancel-switch" || (reason == "") != (nextDeviceID == "") {
-		s.fail(w, r, 422, "INVALID_REQUEST", "切换原因和目标设备必须同时提供")
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	var err error
-	if reason == "cancel-switch" {
-		err = s.Media.CancelSwitch(ctx, owner, r.PathValue("id"), nextDeviceID)
-	} else {
-		err = s.Media.End(ctx, owner, r.PathValue("id"), nextDeviceID)
-	}
-	if err != nil {
+	if err := s.Media.End(ctx, owner, r.PathValue("id")); err != nil {
 		s.domainError(w, r, err)
 		return
 	}

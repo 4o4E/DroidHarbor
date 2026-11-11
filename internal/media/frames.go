@@ -54,7 +54,7 @@ func (h *hub) ensureSource(ctx context.Context, authorize func() error) error {
 		if outdated {
 			return h.restart(ctx, authorize)
 		}
-		return nil
+		return h.activateDisplay(ctx, current, authorize)
 	}
 	h.status, h.errorCode, h.effective = "starting", "", nil
 	h.sourceReady, h.sourceReadyClosed = make(chan struct{}), false
@@ -76,6 +76,26 @@ func (h *hub) ensureSource(ctx context.Context, authorize func() error) error {
 	}
 	h.mu.Unlock()
 	go h.pump(source)
+	return h.activateDisplay(ctx, source, authorize)
+}
+
+// Display activation belongs to viewing, not input ownership. WAKEUP is
+// idempotent (unlike POWER); keep-active preserves logical rendering over Wi-Fi.
+// scrcpy's screen-off mode may briefly light the panel while waking Android.
+func (h *hub) activateDisplay(ctx context.Context, source *capture.Stream, authorize func() error) error {
+	workCtx, cancel := context.WithTimeout(ctx, controlTimeout)
+	defer cancel()
+	messages := [...]scrcpy.ControlMessage{
+		{Type: scrcpy.ControlInjectKeycode, Keycode: 224, Action: 0},
+		{Type: scrcpy.ControlInjectKeycode, Keycode: 224, Action: 1},
+		{Type: scrcpy.ControlSetDisplayPower, On: false},
+	}
+	for _, message := range messages {
+		if err := source.Send(workCtx, message, authorize); err != nil {
+			return &Error{Status: 503, Code: "DISPLAY_ACTIVATION_FAILED", Message: "无法激活设备画面并关闭实体屏幕", Cause: err}
+		}
+	}
+	h.manager.deps.Logger.Info("media_display_activation_requested", "deviceId", h.deviceID, "captureId", source.ID(), "physicalDisplayOn", false)
 	return nil
 }
 
@@ -171,7 +191,6 @@ func (h *hub) failSource(source *capture.Stream, err error) {
 		h.manager.deps.Logger.Error("media_source_failed", "deviceId", h.deviceID, "code", errorCode(err), "cause", diagnostics.Cause(err))
 	}
 	h.cancelAllClipboard()
-	h.manager.failRetained(h)
 	h.manager.notifyDevice(h.deviceID)
 	for _, s := range members {
 		s.beginEnd(err)

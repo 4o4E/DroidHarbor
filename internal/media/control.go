@@ -274,6 +274,27 @@ func (s *session) handleControl(data []byte) {
 		s.reply(envelope.Sequence, epoch, "pong", "succeeded", nil, nil)
 		return
 	}
+	if envelope.Type == "suspend" || envelope.Type == "resume" {
+		ctx, cancel := context.WithTimeout(s.ctx, controlTimeout)
+		defer cancel()
+		var err error
+		if envelope.Type == "suspend" {
+			var payload struct {
+				NextSessionID string `json:"nextSessionId"`
+			}
+			if decodeControlPayload(envelope.Payload, &payload, "nextSessionId") != nil {
+				err = problem(422, "INVALID_CONTROL", "窗口保留参数无效")
+			} else {
+				err = s.suspend(ctx, payload.NextSessionID)
+			}
+		} else if decodeControlPayload(envelope.Payload, &struct{}{}) != nil {
+			err = problem(422, "INVALID_CONTROL", "窗口恢复参数无效")
+		} else {
+			err = s.resume(ctx)
+		}
+		s.reply(envelope.Sequence, s.currentEpoch(), envelope.Type, "succeeded", err, nil)
+		return
+	}
 	if envelope.CaptureEpoch != s.currentEpoch() {
 		s.reply(envelope.Sequence, envelope.CaptureEpoch, "result", "failed", problem(409, "STALE_CAPTURE_EPOCH", "控制事件属于旧画面代次"), nil)
 		return
@@ -292,6 +313,11 @@ func (s *session) handleControl(data []byte) {
 		s.manager.deps.Logger.Info("media_frame_presented", "sessionId", s.id, "deviceId", s.hub.deviceID, "captureEpoch", envelope.CaptureEpoch, "elapsedMs", time.Since(s.created).Milliseconds())
 		return
 	}
+	interactionCtx, err := s.interaction()
+	if err != nil {
+		s.reply(envelope.Sequence, envelope.CaptureEpoch, "result", "failed", err, nil)
+		return
+	}
 	if envelope.Type == "request-frame" {
 		if err := decodeControlPayload(envelope.Payload, &struct{}{}); err != nil {
 			s.reply(envelope.Sequence, envelope.CaptureEpoch, "result", "failed", problem(422, "INVALID_CONTROL", "关键帧请求无效"), nil)
@@ -305,7 +331,7 @@ func (s *session) handleControl(data []byte) {
 		s.reply(envelope.Sequence, envelope.CaptureEpoch, "result", "failed", problem(409, "FRAME_NOT_READY", "必须先确认当前画面关键帧"), nil)
 		return
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, controlTimeout)
+	ctx, cancel := context.WithTimeout(interactionCtx, controlTimeout)
 	defer cancel()
 	if err := s.applyControl(ctx, envelope); err != nil {
 		s.reply(envelope.Sequence, envelope.CaptureEpoch, "result", "failed", err, nil)
@@ -1026,6 +1052,9 @@ func (h *hub) deviceMessage(source *capture.Stream, message scrcpy.DeviceMessage
 		ctx, cancel := context.WithTimeout(member.ctx, controlTimeout)
 		err := member.check(ctx, true)
 		cancel()
+		if errorCode(err) == "SESSION_SUSPENDED" {
+			continue
+		}
 		if err != nil {
 			member.beginEnd(err)
 			continue

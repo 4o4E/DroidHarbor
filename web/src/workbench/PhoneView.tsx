@@ -13,7 +13,7 @@ import { downloadScreenshot } from '@/lib/screenshots'
 type Props = { device: Device; mode: SessionMode; session: MediaSession; availableArea: { width: number; height: number }; stateLabel: string; onReconnect: () => void }
 
 export function PhoneView({ device, mode, session, availableArea, stateLabel, onReconnect }: Props) {
-  const [lastPowerCommand, setLastPowerCommand] = useState<boolean | null>(null)
+  const [lastPowerCommand, setLastPowerCommand] = useState(false)
   const [displayRotation, setDisplayRotation] = useState(0)
   const [mirrored, setMirrored] = useState(false)
   const [paused, setPaused] = useState(false)
@@ -40,6 +40,7 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
     }
   }, [session.ready, session.width, session.height])
   useEffect(() => {
+    setLastPowerCommand(false)
     setRotatingPhone(false)
     return () => {
       const pending = phoneRotation.current
@@ -100,7 +101,7 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label={lastPowerCommand === false ? '唤醒屏幕' : '息屏'} title={lastPowerCommand === false ? '唤醒屏幕' : '息屏'} onClick={() => { const on = lastPowerCommand === false; void runCommand('displayPower', { on }).then(sent => { if (sent) setLastPowerCommand(on) }) }}><Power /></Button>
+      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label={lastPowerCommand ? '关闭实体屏幕' : '点亮实体屏幕'} title={lastPowerCommand ? '关闭实体屏幕' : '点亮实体屏幕'} onClick={() => { const on = !lastPowerCommand; void runCommand('displayPower', { on }).then(sent => { if (sent) setLastPowerCommand(on) }) }}><Power /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="音量增加" title="音量增加" onClick={() => void pressVolume(24)}><Volume2 /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="音量降低" title="音量降低" onClick={() => void pressVolume(25)}><Volume2 className="rotate-180" /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy || rotatingPhone} aria-label="旋转手机" title="旋转手机" onClick={() => void rotatePhone()}><RotateCw /></Button>
@@ -114,6 +115,6 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="重置视频" title="重置视频" onClick={() => void runCommand('resetVideo')}><RefreshCw /></Button>
       <Button size="icon-sm" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={onReconnect}><RotateCw /></Button>
     </div>
-    <div className="phone-frame" style={{ width: ratio ? frameWidth : '100%', height: ratio ? frameHeight : '100%' }}><VideoSurface session={session} mode={mode} rotation={displayRotation} mirrored={mirrored} paused={paused} className="size-full" />{!session.ready && <div className="phone-placeholder"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState !== 'online' ? <Unplug /> : <Monitor />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState !== 'online' ? '设备当前不可用' : session.status === 'failed' ? '视频连接失败' : '等待设备画面'}</EmptyTitle><EmptyDescription>{needsVerification ? '在设备管理中核验身份后即可投屏。' : session.error || stateLabel}</EmptyDescription></EmptyHeader></Empty></div>}</div>
+    <div className="phone-frame" style={{ width: ratio ? frameWidth : '100%', height: ratio ? frameHeight : '100%' }}><VideoSurface session={session} mode={mode} rotation={displayRotation} mirrored={mirrored} paused={paused} className="size-full" />{!session.hasFrame && <div className="phone-placeholder"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState !== 'online' ? <Unplug /> : <Monitor />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState !== 'online' ? '设备当前不可用' : session.status === 'failed' ? '视频连接失败' : '等待设备画面'}</EmptyTitle><EmptyDescription>{needsVerification ? '在设备管理中核验身份后即可投屏。' : session.error || stateLabel}</EmptyDescription></EmptyHeader></Empty></div>}</div>
   </div>
 }

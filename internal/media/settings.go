@@ -74,14 +74,15 @@ func (m *Manager) PatchVideo(ctx context.Context, owner, deviceID string, patch 
 	}
 	authorize := func() error { return m.checkAdmin(ctx, owner) }
 	if patch.SessionID != "" {
-		s, err := m.getSession(ctx, owner, patch.SessionID, true)
+		scope, err := m.SessionScope(ctx, owner, patch.SessionID, true)
 		if err != nil {
 			return VideoSnapshot{}, err
 		}
-		if s.hub.deviceID != deviceID {
+		defer scope.Close()
+		if scope.DeviceID != deviceID {
 			return VideoSnapshot{}, problem(403, "SESSION_DEVICE_MISMATCH", "人工会话不属于该设备")
 		}
-		authorize = func() error { return s.check(ctx, true) }
+		ctx, authorize = scope.Context, scope.Check
 	}
 	if patch.Revision < 1 || (patch.MaxSize == nil && patch.MaxFPS == nil && patch.BitRate == nil) {
 		return VideoSnapshot{}, problem(422, "INVALID_VIDEO_SETTINGS", "必须提供当前 revision 和要修改的参数")

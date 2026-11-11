@@ -61,6 +61,10 @@ func (s *serverDiagnostics) flush() {
 }
 func (s *serverDiagnostics) observe(line []byte) {
 	line = bytes.TrimSpace(line)
+	if bytes.Equal(line, []byte("[server] INFO: Device display turned off")) || bytes.Equal(line, []byte("[server] INFO: Device display turned on")) {
+		s.logger.Info("scrcpy_display_power_changed", "deviceId", s.deviceID, "captureId", s.captureID, "physicalDisplayOn", bytes.HasSuffix(line, []byte(" on")))
+		return
+	}
 	if bytes.HasPrefix(line, []byte("[server] ERROR:")) {
 		s.logger.Error("scrcpy_server_error", "deviceId", s.deviceID, "captureId", s.captureID)
 		return

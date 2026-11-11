@@ -2,230 +2,160 @@ package media
 
 import (
 	"context"
-	"errors"
 	"time"
-
-	"droidharbor/internal/capture"
-	"droidharbor/internal/diagnostics"
 )
 
-const captureRetention = 15 * time.Second
+const sessionRetention = 15 * time.Second
 
-type retainedCapture struct {
-	hub             *hub
-	source          *capture.Stream
-	owner, switchID string
-	until           time.Time
-	timer           *time.Timer
-	done            chan struct{}
-	err             error // published by closing done
+type retainedSession struct {
+	session *session
+	until   time.Time
+	timer   *time.Timer
 }
 
-// Caller owns hub.changeMu. Only the most recently departed device is idle;
-// an explicitly selected warm target is transferred to a bounded joining slot.
-func (m *Manager) retainCapture(ctx context.Context, h *hub, source *capture.Stream, owner, switchID string, until time.Time) bool {
-	if !until.After(time.Now()) {
-		return false
+// Suspend/resume share the ordered control channel with device input. Commands
+// before suspension finish first; HTTP operations lose their activation context.
+// The peer, RTP sender and browser decoder remain alive without input authority.
+func (s *session) suspend(ctx context.Context, nextSessionID string) error {
+	h := s.hub
+	h.changeMu.Lock()
+	h.inputMu.Lock()
+	s.mu.Lock()
+	if s.suspended {
+		s.mu.Unlock()
+		h.inputMu.Unlock()
+		h.changeMu.Unlock()
+		return nil
 	}
-	if err := m.checkAdmin(ctx, owner); err != nil {
-		m.deps.Logger.Warn("media_retention_not_authorized", "deviceId", h.deviceID, "code", errorCode(err), "cause", diagnostics.Cause(err))
-		return false
-	}
+	s.suspended = true
+	s.cancelInteraction()
+	s.mu.Unlock()
+	h.cancelClipboard(s)
 	h.mu.Lock()
-	eligible := h.source == source && source != nil && h.status != "failed" && !h.cleanupPending && len(h.members) == 0
+	source, width, height := h.source, h.width, h.height
 	h.mu.Unlock()
-	if !eligible || !m.deps.Source.HasLink(source.Link()) {
-		return false
-	}
-	m.mu.Lock()
-	switcher := m.sessions[switchID]
-	if m.closed || switcher == nil || switcher.switchCancelled {
-		m.mu.Unlock()
-		return false
-	}
-	entry := &retainedCapture{hub: h, source: source, owner: owner, switchID: switchID, until: until, done: make(chan struct{})}
-	previous := m.retained
-	m.watcher.Add(1)
-	entry.timer = time.AfterFunc(time.Until(until), func() { m.finishRetention(entry, "expired") })
-	m.retained = entry
-	if previous != nil && previous.timer.Stop() {
-		go m.finishRetention(previous, "evicted")
-	}
-	m.mu.Unlock()
-	m.deps.Logger.Info("media_capture_retained", "deviceId", h.deviceID, "remainingMs", time.Until(until).Milliseconds())
-	return true
-}
-
-// Claim the requested target before retaining the departing device. Without
-// this transition A -> B -> A evicts A while the browser gathers its new offer.
-// This never starts an encoder or extends the target's original deadline.
-func (m *Manager) claimSwitchTarget(owner, switchID, deviceID string) {
-	m.mu.Lock()
-	previous := m.retained
-	switcher := m.sessions[switchID]
-	if m.closed || switcher == nil || switcher.owner != owner || switcher.switchCancelled || previous == nil || previous.hub.deviceID != deviceID || !previous.until.After(time.Now()) {
-		m.mu.Unlock()
-		return
-	}
-	entry := &retainedCapture{hub: previous.hub, source: previous.source, owner: owner, switchID: switchID, until: previous.until, done: make(chan struct{})}
-	m.retained = nil
-	m.joining[deviceID] = entry
-	m.watcher.Add(1)
-	entry.timer = time.AfterFunc(time.Until(entry.until), func() { m.finishRetention(entry, "switch_expired") })
-	if previous.timer.Stop() {
-		close(previous.done)
-		m.watcher.Done()
-	}
-	m.mu.Unlock()
-	m.deps.Logger.Info("media_capture_switch_pending", "deviceId", deviceID, "remainingMs", time.Until(entry.until).Milliseconds())
-}
-
-// Caller owns hub.changeMu and adds its viewer before releasing that lock.
-func (m *Manager) resumeRetained(h *hub) {
-	m.mu.Lock()
-	entry := m.retained
-	if entry != nil && entry.hub == h {
-		m.retained = nil
+	var err error
+	if source != nil {
+		err = h.inputs.release(ctx, s.id, width, height, source.Send, func() error { return ctx.Err() })
 	} else {
-		entry = m.joining[h.deviceID]
-		delete(m.joining, h.deviceID)
+		h.inputs.discard(s.id)
+		err = problem(503, "CAPTURE_UNAVAILABLE", "采集当前不可用")
 	}
-	if entry == nil {
-		m.mu.Unlock()
-		return
+	h.inputMu.Unlock()
+	h.changeMu.Unlock()
+	if err == nil {
+		err = s.manager.retainSession(s, nextSessionID)
 	}
-	cancelled := entry.timer.Stop()
-	m.mu.Unlock()
-	if cancelled {
-		close(entry.done)
-		m.watcher.Done()
+	if err != nil {
+		s.beginEnd(err)
 	}
-	m.deps.Logger.Info("media_capture_resumed", "deviceId", h.deviceID)
+	return err
 }
 
-func (m *Manager) finishRetention(entry *retainedCapture, reason string) {
-	defer m.watcher.Done()
-	defer close(entry.done)
-	h := entry.hub
+func (s *session) resume(ctx context.Context) error {
+	h := s.hub
 	h.changeMu.Lock()
 	defer h.changeMu.Unlock()
+	h.inputMu.Lock()
+	defer h.inputMu.Unlock()
+	s.mu.Lock()
+	suspended := s.suspended
+	s.mu.Unlock()
+	if !suspended {
+		return s.check(ctx, false)
+	}
+	s.manager.clearRetention(s)
+	if err := s.check(ctx, false); err != nil {
+		s.beginEnd(err)
+		return err
+	}
+	h.mu.Lock()
+	source := h.source
+	h.mu.Unlock()
+	if source == nil {
+		err := problem(503, "CAPTURE_UNAVAILABLE", "采集当前不可用")
+		s.beginEnd(err)
+		return err
+	}
+	if err := h.activateDisplay(ctx, source, func() error { return s.check(ctx, false) }); err != nil {
+		s.beginEnd(err)
+		return err
+	}
+	s.mu.Lock()
+	s.interactionCtx, s.cancelInteraction = context.WithCancel(s.ctx)
+	s.suspended, s.ready = false, false
+	s.mu.Unlock()
+	s.manager.deps.Logger.Info("media_session_resumed", "sessionId", s.id, "deviceId", h.deviceID)
+	return nil
+}
+
+func (s *session) interaction() (context.Context, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.suspended {
+		return nil, problem(409, "SESSION_SUSPENDED", "后台窗口仅保留视频，请先切回该设备")
+	}
+	return s.interactionCtx, nil
+}
+
+// Claim the warm target before parking the departure. Claiming neither creates
+// a transport nor extends the original deadline. All slots count as sessions.
+func (m *Manager) retainSession(s *session, nextSessionID string) error {
 	m.mu.Lock()
-	newerSameDevice := m.retained != nil && m.retained != entry && m.retained.hub == h || m.joining[h.deviceID] != nil && m.joining[h.deviceID] != entry
+	if m.closed || s.ctx.Err() != nil {
+		m.mu.Unlock()
+		return problem(410, "HUMAN_SESSION_CLOSED", "人工会话已结束")
+	}
+	if s.retention != nil {
+		m.mu.Unlock()
+		return nil
+	}
+	if target := m.retained; target != nil && target.session.owner == s.owner && target.session.id == nextSessionID {
+		m.retained = nil
+	}
+	previous := m.retained
+	if previous != nil {
+		m.detachRetentionLocked(previous.session)
+		previous.session.cancel()
+	}
+	entry := &retainedSession{session: s, until: time.Now().Add(sessionRetention)}
+	s.retention, m.retained = entry, entry
+	entry.timer = time.AfterFunc(time.Until(entry.until), func() {
+		m.mu.Lock()
+		current := s.retention == entry
+		if current {
+			m.detachRetentionLocked(s)
+			s.cancel()
+		}
+		m.mu.Unlock()
+		if current {
+			m.deps.Logger.Info("media_session_retention_expired", "sessionId", s.id, "deviceId", s.hub.deviceID)
+			s.beginEnd(nil)
+		}
+	})
+	m.mu.Unlock()
+	if previous != nil {
+		m.deps.Logger.Info("media_session_retention_evicted", "sessionId", previous.session.id, "deviceId", previous.session.hub.deviceID)
+		previous.session.beginEnd(nil)
+	}
+	m.deps.Logger.Info("media_session_retained", "sessionId", s.id, "deviceId", s.hub.deviceID, "retentionMs", sessionRetention.Milliseconds())
+	return nil
+}
+
+func (m *Manager) clearRetention(s *session) {
+	m.mu.Lock()
+	m.detachRetentionLocked(s)
+	m.mu.Unlock()
+}
+
+func (m *Manager) detachRetentionLocked(s *session) {
+	entry := s.retention
+	if entry == nil {
+		return
+	}
+	entry.timer.Stop()
+	s.retention = nil
 	if m.retained == entry {
 		m.retained = nil
 	}
-	if m.joining[h.deviceID] == entry {
-		delete(m.joining, h.deviceID)
-	}
-	m.mu.Unlock()
-	h.mu.Lock()
-	if newerSameDevice || len(h.members) != 0 || h.source != entry.source {
-		h.mu.Unlock()
-		return
-	}
-	if h.status != "failed" {
-		h.status = "stopping"
-	}
-	h.source, h.cleanupSource, h.cleanupPending, h.effective = nil, entry.source, true, nil
-	h.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-	defer cancel()
-	m.deps.Logger.Info("media_retained_capture_stopping", "deviceId", h.deviceID, "reason", reason)
-	entry.err = entry.source.Stop(ctx)
-	h.captureStopped(entry.err, nil)
-	if entry.err != nil {
-		m.deps.Logger.Error("media_retained_cleanup_failed", "deviceId", h.deviceID, "reason", reason, "cause", diagnostics.Cause(entry.err))
-	} else {
-		m.deps.Logger.Info("media_retained_capture_stopped", "deviceId", h.deviceID, "reason", reason)
-	}
-	m.notifyDevice(h.deviceID)
-}
-
-func waitRetentions(ctx context.Context, entries []*retainedCapture) error {
-	var result error
-	for _, entry := range entries {
-		select {
-		case <-entry.done:
-			result = errors.Join(result, entry.err)
-		case <-ctx.Done():
-			return errors.Join(result, problem(503, "CAPTURE_CLEANUP_PENDING", "保留采集尚未确认回收"), ctx.Err())
-		}
-	}
-	return result
-}
-
-func (m *Manager) endRetained(ctx context.Context, owner string) error {
-	m.mu.Lock()
-	var entries []*retainedCapture
-	if entry := m.retained; entry != nil && (owner == "" || entry.owner == owner) {
-		entries = append(entries, entry)
-	}
-	for _, entry := range m.joining {
-		if owner == "" || entry.owner == owner {
-			entries = append(entries, entry)
-		}
-	}
-	for _, entry := range entries {
-		if entry.timer.Stop() {
-			go m.finishRetention(entry, "authorization_or_shutdown")
-		}
-	}
-	m.mu.Unlock()
-	return waitRetentions(ctx, entries)
-}
-
-// Cancel only the two sides of this switch, not another window's later handoff.
-func (m *Manager) CancelSwitch(ctx context.Context, owner, switchID, deviceID string) error {
-	if err := m.checkAdmin(ctx, owner); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	var switcher *session
-	if candidate := m.sessions[switchID]; candidate != nil && candidate.owner == owner {
-		switcher = candidate
-		switcher.switchCancelled = true
-	}
-	var entries []*retainedCapture
-	if entry := m.retained; entry != nil && entry.owner == owner {
-		// A cancellation can beat the original end request. Its already-warm
-		// target predates this session; another window's newer handoff does not.
-		previousTarget := switcher != nil && entry.hub.deviceID == deviceID && !entry.until.Add(-captureRetention).After(switcher.created)
-		if entry.switchID == switchID || previousTarget {
-			entries = append(entries, entry)
-		}
-	}
-	if entry := m.joining[deviceID]; entry != nil && entry.owner == owner && entry.switchID == switchID {
-		entries = append(entries, entry)
-	}
-	for _, entry := range entries {
-		if entry.timer.Stop() {
-			go m.finishRetention(entry, "switch_cancelled")
-		}
-	}
-	m.mu.Unlock()
-	if switcher != nil {
-		switcher.beginEnd(nil)
-	}
-	result := waitRetentions(ctx, entries)
-	if switcher != nil {
-		select {
-		case <-switcher.done:
-			result = errors.Join(result, switcher.endErr)
-		case <-ctx.Done():
-			result = errors.Join(result, ctx.Err())
-		}
-	}
-	return result
-}
-
-func (m *Manager) failRetained(h *hub) {
-	m.mu.Lock()
-	entry := m.retained
-	if entry == nil || entry.hub != h {
-		entry = m.joining[h.deviceID]
-	}
-	if entry != nil && entry.timer.Stop() {
-		go m.finishRetention(entry, "capture_failed")
-	}
-	m.mu.Unlock()
 }

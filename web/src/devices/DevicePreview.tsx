@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
-import { ImageOff, LoaderCircle, MonitorSmartphone, Unplug } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
+import { ImageOff, MonitorSmartphone, Unplug } from 'lucide-react'
 import { cn } from 'cn'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { errorMessage } from '@/lib/api'
@@ -12,13 +12,16 @@ export type DevicePreviewProps = {
   compact?: boolean
   videoRef?: RefObject<HTMLVideoElement | null>
   videoReady?: boolean
+  poll?: boolean
+  captureRef?: RefObject<(() => void) | null>
 }
 
-export function DevicePreview({ device, compact = false, videoRef, videoReady = false }: DevicePreviewProps) {
+export function DevicePreview({ device, compact = false, videoRef, videoReady = false, poll = true, captureRef }: DevicePreviewProps) {
   const rootRef = useRef<HTMLDivElement>(null)
   const [intersecting, setIntersecting] = useState(false)
   const [documentVisible, setDocumentVisible] = useState(() => typeof document !== 'undefined' && document.visibilityState === 'visible')
   const [lastFrame, setLastFrame] = useState<{ deviceId: string; linkSignature: string; capturedAt: string; linkGeneration: string }>()
+  const [videoFrameIdentity, setVideoFrameIdentity] = useState('')
   const online = device.connectionState === 'online'
   const displaySize = deviceDisplaySize(device)
   const linkSignature = JSON.stringify(device.links
@@ -47,6 +50,8 @@ export function DevicePreview({ device, compact = false, videoRef, videoReady = 
   const active = online && intersecting && documentVisible
   const linkIdentity = JSON.stringify([device.deviceId, linkSignature])
   const currentFrame = online && lastFrame?.deviceId === device.deviceId && lastFrame.linkSignature === linkSignature ? lastFrame : undefined
+  const hasVideoFrame = online && videoFrameIdentity === linkIdentity
+  const handleVideoFrame = useCallback(() => setVideoFrameIdentity(linkIdentity), [linkIdentity])
   const handlePreviewFrame = useCallback((frame: DevicePreviewFrame | null) => {
     setLastFrame(frame ? {
       deviceId: device.deviceId,
@@ -57,15 +62,14 @@ export function DevicePreview({ device, compact = false, videoRef, videoReady = 
   }, [device.deviceId, linkSignature])
 
   useEffect(() => {
-    if (!online) setLastFrame(undefined)
+    if (!online) { setLastFrame(undefined); setVideoFrameIdentity('') }
   }, [online])
   const previousLinkIdentity = useRef(linkIdentity)
-  useEffect(() => {
-    if (previousLinkIdentity.current !== linkIdentity) {
-      previousLinkIdentity.current = linkIdentity
-      setLastFrame(undefined)
-    }
-  }, [linkIdentity])
+  if (previousLinkIdentity.current !== linkIdentity) {
+    previousLinkIdentity.current = linkIdentity
+    setLastFrame(undefined)
+    setVideoFrameIdentity('')
+  }
 
   return (
     <div
@@ -77,38 +81,45 @@ export function DevicePreview({ device, compact = false, videoRef, videoReady = 
         : `${device.displayName} · ${online ? '暂无最新预览' : '设备不可用'}`}
     >
       <div className={cn('flex w-full items-center justify-center bg-background text-foreground', !compact && 'h-56')} style={compact && displaySize ? { aspectRatio: `${displaySize.width} / ${displaySize.height}` } : undefined}>
-        {online && active ? videoRef ? (
-          <BrowserVideoPreview videoRef={videoRef} ready={videoReady} device={device} />
-        ) : (
+        <BrowserVideoPreview key={linkIdentity} videoRef={videoRef} ready={videoReady} active={online && active} visible={online} device={device} onFrame={handleVideoFrame} captureRef={captureRef} />
+        {!hasVideoFrame && (online ? (
           <LivePreview
-            key={`${device.deviceId}:${linkSignature}`}
+            key={linkIdentity}
             device={device}
             compact={compact}
             linkSignature={linkSignature}
+            enabled={poll && active && !videoRef}
             onPreviewFrame={handlePreviewFrame}
           />
         ) : (
           <PreviewStatus device={device} compact={compact} />
-        )}
+        ))}
       </div>
       {!compact && <PreviewFooter device={device} active={active} capturedAt={currentFrame?.capturedAt} />}
     </div>
   )
 }
 
-// The selected device reuses its decoded video; it does not run a second ADB
-// screenshot loop. Draw at most four times a second, at the preview's pixel size.
-function BrowserVideoPreview({ videoRef, ready, device }: { videoRef: RefObject<HTMLVideoElement | null>; ready: boolean; device: Device }) {
+// Keep the canvas mounted when selection changes. The explicit capture callback
+// samples the final presented frame before foreground ownership changes.
+function BrowserVideoPreview({ videoRef, ready, active, visible, device, onFrame, captureRef }: {
+  videoRef?: RefObject<HTMLVideoElement | null>
+  ready: boolean
+  active: boolean
+  visible: boolean
+  device: Device
+  onFrame: () => void
+  captureRef?: RefObject<(() => void) | null>
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [drawn, setDrawn] = useState(false)
   const [error, setError] = useState('')
   useErrorNotification('设备预览更新失败', error)
-  useEffect(() => {
-    setDrawn(false)
+  useLayoutEffect(() => {
     setError('')
     const canvas = canvasRef.current
-    const video = videoRef.current
-    if (!ready || !canvas || !video) return
+    const video = videoRef?.current
+    if (!canvas || !video) return
     const context = canvas.getContext('2d')
     if (!context) {
       setError('浏览器无法创建设备预览画布')
@@ -117,9 +128,9 @@ function BrowserVideoPreview({ videoRef, ready, device }: { videoRef: RefObject<
     }
     let callback = 0
     let lastDraw = -Infinity
-    const draw = (now: number) => {
+    const capture = (now: number, force: boolean) => {
       try {
-        if (now - lastDraw >= 250 && video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        if ((force || now - lastDraw >= 250) && video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
           const width = canvas.parentElement?.clientWidth ?? 0
           if (width > 0) {
             const scale = Math.min(1, width * window.devicePixelRatio / video.videoWidth, 1280 / Math.max(video.videoWidth, video.videoHeight))
@@ -132,50 +143,70 @@ function BrowserVideoPreview({ videoRef, ready, device }: { videoRef: RefObject<
             context.drawImage(video, 0, 0, targetWidth, targetHeight)
             lastDraw = now
             setDrawn(true)
+            onFrame()
           }
         }
-        callback = video.requestVideoFrameCallback(draw)
+        return true
       } catch (cause) {
         console.error('browser_preview_capture_failed', { deviceId: device.deviceId, errorType: cause instanceof Error ? cause.name : typeof cause })
         setError(errorMessage(cause))
+        return false
       }
     }
-    draw(performance.now())
-    return () => video.cancelVideoFrameCallback(callback)
-  }, [device.deviceId, ready, videoRef])
+    const captureLatest = () => capture(performance.now(), true)
+    if (captureRef) captureRef.current = captureLatest
+    const draw = (now: number) => {
+      if (capture(now, false)) callback = video.requestVideoFrameCallback(draw)
+    }
+    if (ready && active) draw(performance.now())
+    return () => {
+      captureLatest()
+      video.cancelVideoFrameCallback(callback)
+      if (captureRef?.current === captureLatest) captureRef.current = null
+    }
+  }, [active, captureRef, device.deviceId, onFrame, ready, videoRef])
   return <>
-    <canvas ref={canvasRef} aria-label={`${device.displayName}的实时视频预览`} className={cn('max-h-full max-w-full', !drawn && 'hidden')} />
-    {!drawn && <Empty className="p-1"><EmptyHeader><EmptyMedia variant="icon">{error ? <ImageOff /> : <LoaderCircle className="animate-spin" />}</EmptyMedia></EmptyHeader></Empty>}
+    <canvas ref={canvasRef} aria-label={`${device.displayName}的实时视频预览`} className={cn('max-h-full max-w-full', (!drawn || !visible) && 'hidden')} />
   </>
 }
 
-function LivePreview({ device, compact, linkSignature, onPreviewFrame }: {
+function LivePreview({ device, compact, linkSignature, enabled, onPreviewFrame }: {
   device: Device
   compact: boolean
   linkSignature: string
+  enabled: boolean
   onPreviewFrame: (frame: DevicePreviewFrame | null) => void
 }) {
-  const query = useDevicePreview(device.deviceId, linkSignature)
-  const initialFrame = useRef(query.data)
-  const frame = query.isError || query.data === initialFrame.current ? undefined : query.data
+  const query = useDevicePreview(device.deviceId, linkSignature, enabled)
+  const frame = query.data
   const [image, setImage] = useState<{ frame: DevicePreviewFrame; url: string }>()
+  const [decodeError, setDecodeError] = useState('')
+  useErrorNotification('设备预览更新失败', decodeError || query.error)
 
   useEffect(() => {
     if (!frame) return
     const url = URL.createObjectURL(frame.blob)
-    setImage({ frame, url })
-    return () => URL.revokeObjectURL(url)
+    let active = true
+    const decoded = new Image()
+    decoded.src = url
+    void decoded.decode().then(() => {
+      if (active) {
+        setImage({ frame, url })
+        setDecodeError('')
+      }
+    }).catch(cause => {
+      if (active) setDecodeError(errorMessage(cause))
+    })
+    return () => { active = false; URL.revokeObjectURL(url) }
   }, [frame])
   useEffect(() => {
-    if (query.isError) onPreviewFrame(null)
-    else if (frame) onPreviewFrame(frame)
-  }, [frame, query.isError, onPreviewFrame])
+    if (image) onPreviewFrame(image.frame)
+  }, [image, onPreviewFrame])
 
-  const imageUrl = image && frame && image.frame === frame ? image.url : undefined
-  if (imageUrl && frame) {
+  const imageUrl = image?.url
+  if (imageUrl) {
     return (
       <img
-        key={`${device.deviceId}:${frame.linkGeneration}:${frame.capturedAt}`}
         src={imageUrl}
         alt={`${device.displayName}的设备画面`}
         className="h-full w-full object-contain"
@@ -183,13 +214,11 @@ function LivePreview({ device, compact, linkSignature, onPreviewFrame }: {
     )
   }
 
-  const message = query.isError ? errorMessage(query.error) : '正在获取设备预览'
   return (
     <Empty>
       <EmptyHeader>
-        <EmptyMedia variant="icon">{query.isError ? <ImageOff /> : <LoaderCircle className="animate-spin" />}</EmptyMedia>
-        {!compact && <EmptyTitle>{query.isError ? '预览暂不可用' : '正在获取预览'}</EmptyTitle>}
-        {!compact && <EmptyDescription>{message}</EmptyDescription>}
+        <EmptyMedia variant="icon">{query.isError || decodeError ? <ImageOff /> : <MonitorSmartphone />}</EmptyMedia>
+        {!compact && <EmptyTitle>暂无预览</EmptyTitle>}
       </EmptyHeader>
     </Empty>
   )

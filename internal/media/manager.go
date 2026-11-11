@@ -22,7 +22,6 @@ func New(ctx context.Context, deps Dependencies) *Manager {
 		cancel:          cancel,
 		sessions:        make(map[string]*session),
 		hubs:            make(map[string]*hub),
-		joining:         make(map[string]*retainedCapture),
 		screenshotSlots: make(chan struct{}, 2),
 	}
 	m.watcher.Add(1)
@@ -48,6 +47,12 @@ func (m *Manager) checkAdmin(ctx context.Context, owner string) error {
 func (s *session) check(ctx context.Context, write bool) error {
 	if s.ctx.Err() != nil {
 		return problem(410, "HUMAN_SESSION_CLOSED", "人工会话已结束")
+	}
+	s.mu.Lock()
+	suspended := s.suspended
+	s.mu.Unlock()
+	if write && suspended {
+		return problem(409, "SESSION_SUSPENDED", "后台窗口仅保留视频，请先切回该设备")
 	}
 	if write && s.mode != "control" {
 		return problem(403, "READ_ONLY_SESSION", "只读会话不能执行设备写操作")
@@ -86,28 +91,26 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 		return SessionSnapshot{}, err
 	}
 	lifetime, cancel := context.WithCancel(m.ctx)
+	interactionCtx, cancelInteraction := context.WithCancel(lifetime)
 	now := time.Now()
 	s := &session{
 		manager: m, hub: h, id: identity.Secret(), owner: owner, mode: mode,
 		ctx: lifetime, cancel: cancel, created: now, awaitingKey: true,
+		interactionCtx: interactionCtx, cancelInteraction: cancelInteraction,
 		peerReady: make(chan struct{}), frames: make(chan *videoFrame, maxQueuedFrames),
 		commands: make(chan []byte, 64), output: make(chan []byte, 64), done: make(chan struct{}),
 	}
 	m.mu.Lock()
-	reservedTarget := 0
-	if m.joining[deviceID] != nil {
-		reservedTarget = 1
-	}
-	if m.closed || len(m.sessions)+len(m.joining)-reservedTarget >= maxSessions {
+	if m.closed || len(m.sessions) >= maxSessions {
 		m.mu.Unlock()
 		cancel()
+		cancelInteraction()
 		return SessionSnapshot{}, problem(503, "MEDIA_CAPACITY", "媒体会话暂不可用")
 	}
 	m.sessions[s.id] = s
 	m.mu.Unlock()
 
 	h.changeMu.Lock()
-	m.resumeRetained(h)
 	h.mu.Lock()
 	h.members[s.id] = s
 	h.mu.Unlock()
@@ -164,7 +167,7 @@ func (m *Manager) AddCandidate(ctx context.Context, owner, id string, candidate 
 	return nil
 }
 
-func (m *Manager) End(ctx context.Context, owner, id, nextDeviceID string) error {
+func (m *Manager) End(ctx context.Context, owner, id string) error {
 	if err := m.checkAdmin(ctx, owner); err != nil {
 		return err
 	}
@@ -172,26 +175,14 @@ func (m *Manager) End(ctx context.Context, owner, id, nextDeviceID string) error
 	s := m.sessions[id]
 	m.mu.Unlock()
 	if s == nil {
-		if nextDeviceID == "" {
-			return m.endRetained(ctx, owner)
-		}
 		return nil
 	}
 	if s.owner != owner {
 		return problem(403, "SESSION_OWNER_MISMATCH", "不能关闭其他登录会话的窗口")
 	}
-	if nextDeviceID != "" {
-		s.mu.Lock()
-		s.switchUntil = time.Now().Add(captureRetention)
-		s.mu.Unlock()
-		m.claimSwitchTarget(owner, id, nextDeviceID)
-	}
 	s.beginEnd(nil)
 	select {
 	case <-s.done:
-		if nextDeviceID == "" {
-			return errors.Join(s.endErr, m.endRetained(ctx, owner))
-		}
 		return s.endErr
 	case <-ctx.Done():
 		return ctx.Err()
@@ -219,7 +210,7 @@ func (m *Manager) CloseAdmin(ctx context.Context, owner string) error {
 			return errors.Join(result, ctx.Err())
 		}
 	}
-	return errors.Join(result, m.endRetained(ctx, owner))
+	return result
 }
 
 func (m *Manager) Close(ctx context.Context) error {
@@ -243,13 +234,13 @@ func (m *Manager) Close(ctx context.Context) error {
 			return errors.Join(result, ctx.Err())
 		}
 	}
-	result = errors.Join(result, m.endRetained(ctx, ""))
 	m.watcher.Wait()
 	return result
 }
 
 func (s *session) beginEnd(reason error) {
 	s.endOnce.Do(func() {
+		s.manager.clearRetention(s)
 		s.cancel()
 		if reason != nil {
 			s.manager.deps.Logger.Warn("media_session_ended", "sessionId", s.id, "deviceId", s.hub.deviceID, "code", errorCode(reason), "cause", diagnostics.Cause(reason))
@@ -284,11 +275,7 @@ func (s *session) finish(reason error) {
 	last := len(h.members) == 0
 	h.mu.Unlock()
 	h.inputMu.Unlock()
-	s.mu.Lock()
-	until := s.switchUntil
-	s.mu.Unlock()
-	retained := last && reason == nil && inputErr == nil && !cleanupPending && h.manager.retainCapture(ctx, h, source, s.owner, s.id, until)
-	if last && !retained {
+	if last {
 		h.mu.Lock()
 		if h.status != "failed" {
 			h.status = "stopping"
@@ -382,7 +369,11 @@ func (m *Manager) SessionScope(ctx context.Context, owner, id string, write bool
 	if err != nil {
 		return Scope{}, err
 	}
-	lifetime, cancel := context.WithCancel(s.ctx)
+	interactionCtx, err := s.interaction()
+	if err != nil {
+		return Scope{}, err
+	}
+	lifetime, cancel := context.WithCancel(interactionCtx)
 	stopLink := context.AfterFunc(linkCtx, cancel)
 	stopRequest := context.AfterFunc(ctx, cancel)
 	scope := Scope{
@@ -455,23 +446,7 @@ func (m *Manager) watch() {
 			for _, s := range m.sessions {
 				sessions = append(sessions, s)
 			}
-			retentions := make([]*retainedCapture, 0, len(m.joining)+1)
-			if m.retained != nil {
-				retentions = append(retentions, m.retained)
-			}
-			for _, entry := range m.joining {
-				retentions = append(retentions, entry)
-			}
 			m.mu.Unlock()
-			for _, retained := range retentions {
-				if err := m.checkAdmin(m.ctx, retained.owner); err != nil {
-					cleanup, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-					if stopErr := m.endRetained(cleanup, retained.owner); stopErr != nil {
-						m.deps.Logger.Error("media_retention_revocation_failed", "deviceId", retained.hub.deviceID, "cause", diagnostics.Cause(stopErr))
-					}
-					cancel()
-				}
-			}
 			for _, s := range sessions {
 				s.mu.Lock()
 				waitingForKey := s.peerReadyClosed && s.awaitingKey && !s.waitingSince.IsZero() && now.Sub(s.waitingSince) > keyFrameTimeout

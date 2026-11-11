@@ -113,8 +113,7 @@ type Manager struct {
 	closed          bool
 	sessions        map[string]*session
 	hubs            map[string]*hub
-	retained        *retainedCapture
-	joining         map[string]*retainedCapture
+	retained        *retainedSession
 	watcher         sync.WaitGroup
 	screenshotSlots chan struct{}
 }
@@ -126,8 +125,10 @@ type session struct {
 	ctx                                                     context.Context
 	cancel                                                  context.CancelFunc
 	created                                                 time.Time
-	switchUntil                                             time.Time
-	switchCancelled                                         bool // guarded by manager.mu
+	retention                                               *retainedSession // guarded by manager.mu
+	suspended                                               bool
+	interactionCtx                                          context.Context
+	cancelInteraction                                       context.CancelFunc
 	mu                                                      sync.Mutex
 	peer                                                    *rtc.Peer
 	peerStarted                                             time.Time
