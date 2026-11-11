@@ -121,3 +121,49 @@ func TestFailedMigrationRollsBackAndCanResume(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestDisplayMigrationPreservesEnrolledDevice(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "version-one.db")
+	previous, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionOne, err := migrations.ReadFile("migrations/001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	execute(t, previous, "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at INTEGER NOT NULL) STRICT")
+	execute(t, previous, string(versionOne))
+	execute(t, previous, "INSERT INTO schema_migrations VALUES(1,1)")
+	execute(t, previous, `INSERT INTO devices(id,display_name,allocation_state,generation,maintenance_requested,video_max_size,video_max_fps,video_bit_rate,video_revision) VALUES('kept','我的手机','maintenance',6,1,960,90,20000000,7)`)
+	execute(t, previous, `INSERT INTO device_tags VALUES('kept','购物'),('kept','测试')`)
+	execute(t, previous, `INSERT INTO device_links(id,device_id,kind,endpoint) VALUES('kept-link','kept','wifi','192.0.2.22:5555')`)
+	if err = previous.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := upgraded.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	var name, allocation, tags, endpoint string
+	var generation, maintenance, maxSize, fps, bitRate, revision int
+	var display sql.NullString
+	if err = upgraded.QueryRow(`SELECT display_name,allocation_state,generation,maintenance_requested,video_max_size,video_max_fps,video_bit_rate,video_revision,display_info FROM devices WHERE id='kept'`).Scan(&name, &allocation, &generation, &maintenance, &maxSize, &fps, &bitRate, &revision, &display); err != nil {
+		t.Fatal(err)
+	}
+	if name != "我的手机" || allocation != "maintenance" || generation != 6 || maintenance != 1 || maxSize != 960 || fps != 90 || bitRate != 20000000 || revision != 7 || display.Valid {
+		t.Fatalf("migration changed enrolled device: name=%q allocation=%q generation=%d maintenance=%d video=%d/%d/%d revision=%d display=%v", name, allocation, generation, maintenance, maxSize, fps, bitRate, revision, display)
+	}
+	if err = upgraded.QueryRow(`SELECT group_concat(tag,',') FROM (SELECT tag FROM device_tags WHERE device_id='kept' ORDER BY tag)`).Scan(&tags); err != nil || tags != "测试,购物" {
+		t.Fatalf("device tags changed: tags=%q err=%v", tags, err)
+	}
+	if err = upgraded.QueryRow(`SELECT endpoint FROM device_links WHERE id='kept-link' AND device_id='kept'`).Scan(&endpoint); err != nil || endpoint != "192.0.2.22:5555" {
+		t.Fatalf("device link changed: endpoint=%q err=%v", endpoint, err)
+	}
+}

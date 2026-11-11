@@ -1,7 +1,7 @@
 export const PHONE_TOOLBAR_WIDTH = 44
 
 // Height first; constrain only when the resulting width would leave the display.
-// Recompute in the popup after decoding, using its actual browser chrome size.
+// Calibrate the popup's browser chrome from saved geometry, before video decoding.
 export function compactWindowSize(ratio: number, fraction: number) {
   const chromeWidth = Math.max(0, window.outerWidth - window.innerWidth)
   const chromeHeight = Math.max(0, window.outerHeight - window.innerHeight)

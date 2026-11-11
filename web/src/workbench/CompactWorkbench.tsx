@@ -7,7 +7,7 @@ import { VideoSurface } from '@/media/VideoSurface'
 import { useMediaSession } from '@/media/useMediaSession'
 import { useAuth } from '@/lib/auth'
 import { useDevices, usePlatformEvents } from '@/lib/queries'
-import { deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
+import { deviceDisplaySize, deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { errorMessage } from '@/lib/api'
 import { downloadScreenshot } from '@/lib/screenshots'
 import { useErrorNotification } from '@/lib/notifications'
@@ -57,9 +57,11 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
   }, [device.connectionState])
   const session = useMediaSession(device.deviceId, mode, device.connectionState === 'online' && sessionAllowed)
   const canControl = mode === 'control' && session.status === 'connected' && session.ready && !!session.sessionId
-  const ratio = session.width > 0 && session.height > 0 ? session.width / session.height : 1
-  const frameWidth = Math.min(Math.max(0, availableArea.width - PHONE_TOOLBAR_WIDTH), availableArea.height * ratio)
-  const frameHeight = frameWidth / ratio
+  const savedSize = deviceDisplaySize(device)
+  const savedRatio = savedSize ? savedSize.width / savedSize.height : 0
+  const ratio = session.width > 0 && session.height > 0 ? session.width / session.height : savedRatio
+  const frameWidth = ratio ? Math.min(Math.max(0, availableArea.width - PHONE_TOOLBAR_WIDTH), availableArea.height * ratio) : 0
+  const frameHeight = ratio ? frameWidth / ratio : 0
 
   useEffect(() => {
     const area = screenAreaRef.current
@@ -74,9 +76,10 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
 
   useEffect(() => () => cancelResize.current?.(), [])
 
-  const resizeWindow = useCallback((fraction: number) => {
+  const resizeWindow = useCallback((fraction: number, targetRatio = ratio) => {
+    if (!targetRatio) return
     cancelResize.current?.()
-    const size = compactWindowSize(ratio, fraction)
+    const size = compactWindowSize(targetRatio, fraction)
     if (size.innerHeight < 120) {
       toast.add({ title: '无法调整小窗尺寸', description: '当前屏幕可用空间不足。', type: 'error', timeout: 0 })
       return
@@ -98,10 +101,10 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
     observeResize()
   }, [ratio])
   useEffect(() => {
-    if (initializedSize.current || !session.width || !session.height) return
+    if (initializedSize.current || !savedRatio) return
     initializedSize.current = true
-    resizeWindow(0.8)
-  }, [session.width, session.height, resizeWindow])
+    resizeWindow(0.8, savedRatio)
+  }, [savedRatio, resizeWindow])
 
   const runCommand = async (type: string) => {
     if (!canControl || busy) return
@@ -123,18 +126,18 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
   return (
     <main className="compact-workbench">
       <section ref={screenAreaRef} className="phone-stage" aria-label={`${deviceName(device)}的小窗`}>
-        <div className="phone-arrangement" style={{ width: frameWidth + PHONE_TOOLBAR_WIDTH, height: frameHeight }}>
+        <div className="phone-arrangement" style={{ width: ratio ? frameWidth + PHONE_TOOLBAR_WIDTH : '100%', height: ratio ? frameHeight : '100%' }}>
           <div className="phone-toolbar" style={{ width: PHONE_TOOLBAR_WIDTH }} aria-label="小窗操作">
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!session.sessionId} aria-label="截图" title="截图" onClick={() => void screenshot()}><Camera /></Button>
             <Button size="icon-sm" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={() => { setSessionAllowed(false); window.setTimeout(() => setSessionAllowed(true), 0) }}><RotateCw /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!session.width || !session.height} aria-label="小窗口" title="小窗口" onClick={() => resizeWindow(0.6)}><ZoomOut /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!session.width || !session.height} aria-label="标准窗口" title="标准窗口" onClick={() => resizeWindow(0.8)}><Expand /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!session.width || !session.height} aria-label="大窗口" title="大窗口" onClick={() => resizeWindow(1)}><ZoomIn /></Button>
+            <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="小窗口" title="小窗口" onClick={() => resizeWindow(0.6)}><ZoomOut /></Button>
+            <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="标准窗口" title="标准窗口" onClick={() => resizeWindow(0.8)}><Expand /></Button>
+            <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="大窗口" title="大窗口" onClick={() => resizeWindow(1)}><ZoomIn /></Button>
           </div>
-          <div className="phone-frame" style={{ width: frameWidth, height: frameHeight }} aria-label="设备画面">
+          <div className="phone-frame" style={{ width: ratio ? frameWidth : '100%', height: ratio ? frameHeight : '100%' }} aria-label="设备画面">
             <VideoSurface session={session} mode={mode} className="size-full" />
             {!session.ready && <div className="phone-placeholder"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState === 'online' ? session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{needsVerification ? '在主页面核验设备身份后即可投屏。' : session.error || deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
           </div>

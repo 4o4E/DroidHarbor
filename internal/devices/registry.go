@@ -433,6 +433,14 @@ func (r *Registry) verifySnapshot(update inventoryUpdate) error {
 			}
 			continue
 		}
+		screen, displayErr := r.readDisplay(update.epoch, observed.TransportID)
+		if displayErr != nil {
+			r.logger.Error("device_display_info_failed", "deviceId", link.deviceID, "code", "DISPLAY_INFO_UNAVAILABLE")
+			return displayErr
+		}
+		if err := saveScreenGeometry(update.epoch, r.db, link.deviceID, screen); err != nil {
+			return err
+		}
 		if _, err = r.db.ExecContext(update.epoch, `UPDATE device_links SET last_seen_at=? WHERE id=?`, time.Now().UTC().UnixMilli(), link.id); err != nil {
 			return err
 		}

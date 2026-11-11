@@ -152,7 +152,7 @@
 .device-list-item.device-unavailable { opacity: .48; }
 .device-list-item.device-unavailable[aria-pressed="true"] { opacity: .65; }
 .device-list-preview { width: 100%; min-width: 0; flex: none; }
-.device-list-preview > div { min-height: 150px; max-height: 260px; aspect-ratio: 9 / 20; }
+.device-list-preview > div { min-height: 150px; max-height: 260px; }
 .device-list-info { position: relative; display: flex; min-width: 0; flex-direction: column; align-items: stretch; gap: 10px; padding-top: 2px; }
 .device-list-name { padding-right: 18px; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; line-height: 1.5; }
 .device-occupancy { position: absolute; top: 3px; right: 0; color: var(--muted-foreground); }

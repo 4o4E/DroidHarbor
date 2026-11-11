@@ -55,10 +55,14 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 		return result, err
 	}
 	var evidence *Evidence
+	var screen ScreenGeometry
 	if observed.State == "device" && observed.TransportID != 0 {
 		probeCtx, cancel := context.WithCancel(ctx)
 		stop := context.AfterFunc(epoch, cancel)
 		value, err := r.probe(probeCtx, observed.TransportID)
+		if err == nil {
+			screen, err = r.readDisplay(probeCtx, observed.TransportID)
+		}
 		stop()
 		cancel()
 		if err != nil {
@@ -126,6 +130,9 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 		}
 		encoded = string(data)
 		result.Verified = true
+		if err := saveScreenGeometry(ctx, tx, result.DeviceID, screen); err != nil {
+			return result, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO device_links(id,device_id,kind,endpoint,observed_serial,identity_evidence,enabled,last_seen_at) VALUES(?,?,?,?,?,?,?,?)`, result.LinkID, result.DeviceID, kind, endpoint, observed.Serial, encoded, result.Verified, time.Now().UnixMilli()); err != nil {
 		return result, err

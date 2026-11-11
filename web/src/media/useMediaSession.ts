@@ -47,7 +47,11 @@ type InboundControlFrame = {
   payloadRead: number
   timeout: number | null
 }
+type SwitchHandoff = { sessionId: string; deviceId: string; ended: Promise<void> }
 type MediaRuntime = {
+  deviceId: string
+  mode: SessionMode
+  handoff: SwitchHandoff | null
   active: boolean
   peer: RTCPeerConnection | null
   channel: RTCDataChannel | null
@@ -103,6 +107,10 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
   useEffect(() => { clipboardCallback.current = onClipboard }, [onClipboard])
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const runtimeRef = useRef<MediaRuntime | null>(null)
+  const handoffRef = useRef<SwitchHandoff | null>(null)
+  const desiredDevice = useRef(deviceId)
+  desiredDevice.current = deviceId
+  const stateScope = useRef({ deviceId, mode })
   const [currentRuntime, setCurrentRuntime] = useState<MediaRuntime | null>(null)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [status, setStatus] = useState<MediaSession['status']>(enabled ? 'connecting' : 'closed')
@@ -120,7 +128,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       (type === 'text' && (text.length > 300 || /[^\x00-\x7f]/.test(text)))
     const runtime = currentRuntime
     const channel = runtime?.channel
-    if (!runtime?.active || !runtime.sessionId || !channel || channel.readyState !== 'open') {
+    if (!runtime?.active || runtime.deviceId !== deviceId || runtime.mode !== mode || !runtime.sessionId || !channel || channel.readyState !== 'open') {
       return Promise.reject(new Error('WebRTC 控制通道尚未就绪'))
     }
     const sequence = ++runtime.sequence
@@ -185,10 +193,19 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         })
       }
     })
-  }, [currentRuntime])
+  }, [currentRuntime, deviceId, mode])
 
   useEffect(() => {
+    stateScope.current = { deviceId, mode }
     if (!enabled || !deviceId || (mode !== 'readonly' && mode !== 'control')) {
+      const abandonedHandoff = handoffRef.current
+      if (abandonedHandoff?.deviceId === deviceId) {
+        handoffRef.current = null
+        void api<void>(`/sessions/${encodeURIComponent(abandonedHandoff.sessionId)}?reason=cancel-switch&nextDeviceId=${encodeURIComponent(deviceId)}`, { method: 'DELETE', keepalive: true }).catch(cause => {
+          console.error('media_unavailable_target_cleanup_failed', { deviceId, errorType: cause instanceof Error ? cause.name : typeof cause })
+          setCleanupError(`不可用目标的切换清理失败：${errorMessage(cause)}`)
+        })
+      }
       setCurrentRuntime(null)
       setStatus('closed')
       setReady(false)
@@ -199,6 +216,9 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
 
     const abortController = new AbortController()
     const runtime: MediaRuntime = {
+      deviceId,
+      mode,
+      handoff: handoffRef.current?.deviceId === deviceId ? handoffRef.current : null,
       active: true,
       peer: null,
       channel: null,
@@ -234,7 +254,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       runtime.pending.clear()
     }
 
-    const teardown = (nextStatus: 'closed' | 'failed', failure = ''): Promise<void> => {
+    const teardown = (nextStatus: 'closed' | 'failed', failure = '', switching = false): Promise<void> => {
       if (runtime.teardownPromise) return runtime.teardownPromise
       const wasCurrent = runtimeRef.current === runtime
       runtime.active = false
@@ -253,41 +273,57 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         if (failure) setSessionError(failure)
       }
       failPending(new Error(failure || '媒体会话已关闭'))
+      const currentSession = runtime.sessionId
       const channel = runtime.channel
       runtime.channel = null
+      const peer = runtime.peer
+      runtime.peer = null
       if (channel) {
         channel.onopen = null
         channel.onclose = null
         channel.onerror = null
         channel.onmessage = null
-        try { channel.close() } catch (cause) {
-          console.warn('media_channel_close_failed', { sessionId: runtime.sessionId, errorType: cause instanceof Error ? cause.name : typeof cause })
-        }
       }
-      const peer = runtime.peer
-      runtime.peer = null
       if (peer) {
         peer.ontrack = null
         peer.onconnectionstatechange = null
-        try { peer.close() } catch (cause) {
-          console.warn('media_peer_close_failed', { sessionId: runtime.sessionId, errorType: cause instanceof Error ? cause.name : typeof cause })
+      }
+      const disposeTransport = () => {
+        if (channel) {
+          try { channel.close() } catch (cause) {
+            console.warn('media_channel_close_failed', { sessionId: currentSession, errorType: cause instanceof Error ? cause.name : typeof cause })
+          }
+        }
+        if (peer) {
+          try { peer.close() } catch (cause) {
+            console.warn('media_peer_close_failed', { sessionId: currentSession, errorType: cause instanceof Error ? cause.name : typeof cause })
+          }
         }
       }
+      // Mark a normal device switch server-side before closing WebRTC, so a
+      // transport-close callback cannot race and force immediate capture teardown.
+      if (!switching) disposeTransport()
       runtime.stream?.getTracks().forEach(track => track.stop())
       runtime.stream = null
-      const currentSession = runtime.sessionId
       runtime.sessionId = null
       if (runtimeRef.current === runtime) runtimeRef.current = null
       const closeRequest = currentSession
-        ? api<void>(`/sessions/${encodeURIComponent(currentSession)}`, { method: 'DELETE', keepalive: true })
+        ? api<void>(`/sessions/${encodeURIComponent(currentSession)}${switching ? `?reason=switch&nextDeviceId=${encodeURIComponent(desiredDevice.current)}` : ''}`, { method: 'DELETE', keepalive: true })
         : Promise.resolve()
-      runtime.teardownPromise = closeRequest.catch(cause => {
+      const abandonedHandoff = !currentSession ? runtime.handoff : null
+      const cancelHandoff = abandonedHandoff
+        ? api<void>(`/sessions/${encodeURIComponent(abandonedHandoff.sessionId)}?reason=cancel-switch&nextDeviceId=${encodeURIComponent(abandonedHandoff.deviceId)}`, { method: 'DELETE', keepalive: true })
+        : Promise.resolve()
+      if (switching && currentSession) handoffRef.current = { sessionId: currentSession, deviceId: desiredDevice.current, ended: closeRequest }
+      else if (handoffRef.current === abandonedHandoff) handoffRef.current = null
+      const cleanup = Promise.all([closeRequest, cancelHandoff]).then(() => undefined).catch(cause => {
         console.error('media_session_cleanup_failed', { sessionId: currentSession, errorType: cause instanceof Error ? cause.name : typeof cause })
         const message = `结束媒体会话失败：${errorMessage(cause)}`
         if (wasCurrent) setCleanupError(message)
         if (nextStatus === 'closed' && !failure) throw cause
         if (failure && runtimeRef.current === runtime) setSessionError(`${failure}；${message}`)
       })
+      runtime.teardownPromise = switching ? cleanup.finally(disposeTransport) : cleanup
       return runtime.teardownPromise
     }
 
@@ -465,12 +501,16 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         if (!isCurrent()) return
         const sdp = peer.localDescription?.sdp
         if (!sdp) throw new Error('浏览器未生成完整的 WebRTC offer')
+        if (runtime.handoff) await runtime.handoff.ended
+        if (!isCurrent()) return
         const snapshot = await api<SessionSnapshot>(`/devices/${encodeURIComponent(deviceId)}/sessions`, {
           method: 'POST',
           body: { mode, offer: sdp },
           signal: abortController.signal,
         })
         runtime.sessionId = snapshot.sessionId
+        if (handoffRef.current === runtime.handoff) handoffRef.current = null
+        runtime.handoff = null
         if (!isCurrent()) {
           void api<void>(`/sessions/${encodeURIComponent(snapshot.sessionId)}`, { method: 'DELETE', keepalive: true }).catch(cause => {
             setCleanupError(`迟到的媒体会话未能清理：${errorMessage(cause)}`)
@@ -491,9 +531,16 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       }
     }
 
+    const closeOnPageHide = () => {
+      void teardown('closed').catch(cause => {
+        console.error('media_pagehide_cleanup_failed', { deviceId, errorType: cause instanceof Error ? cause.name : typeof cause })
+      })
+    }
+    window.addEventListener('pagehide', closeOnPageHide)
     void start()
     return () => {
-      void teardown('closed').catch(cause => {
+      window.removeEventListener('pagehide', closeOnPageHide)
+      void teardown('closed', '', desiredDevice.current !== deviceId).catch(cause => {
         setCleanupError(`媒体会话卸载清理失败：${errorMessage(cause)}`)
       })
     }
@@ -573,7 +620,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     }
   }, [command, remoteState])
 
-  const runtimeForRender = currentRuntime
+  const sameScope = stateScope.current.deviceId === deviceId && stateScope.current.mode === mode
+  const runtimeForRender = sameScope && enabled ? currentRuntime : null
   const release = useCallback(() => {
     const runtime = runtimeForRender
     if (mode !== 'control' || !ready || !runtime || runtimeRef.current !== runtime) return
@@ -588,14 +636,14 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
   const close = useCallback(() => currentRuntime?.close('closed') ?? Promise.resolve(), [currentRuntime])
 
   return {
-    sessionId,
-    status,
-    error: [sessionError, cleanupError].filter(Boolean).join('；'),
-    ready,
-    epoch,
-    width: dimensions.width,
-    height: dimensions.height,
-    framesPerSecond,
+    sessionId: sameScope && enabled ? sessionId : null,
+    status: sameScope ? status : enabled ? 'connecting' : 'closed',
+    error: [sameScope ? sessionError : '', cleanupError].filter(Boolean).join('；'),
+    ready: sameScope && enabled && ready,
+    epoch: sameScope ? epoch : 0,
+    width: sameScope ? dimensions.width : 0,
+    height: sameScope ? dimensions.height : 0,
+    framesPerSecond: sameScope ? framesPerSecond : 0,
     videoRef,
     command,
     release,

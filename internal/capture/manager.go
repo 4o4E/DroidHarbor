@@ -1,7 +1,6 @@
 package capture
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -295,9 +294,9 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		}
 		return nil
 	}
-	stage = "push_server"
-	if err := m.adb.Push(ioCtx, link.TransportID, jar, 0644, time.Now().UTC(), bytes.NewReader(m.server), authorized, nil); err != nil {
-		_ = m.markFailureBounded(s, "PUSH_FAILED")
+	stage = "prepare_server"
+	if err := m.prepareArtifact(ioCtx, s, authorized); err != nil {
+		_ = m.markFailureBounded(s, "SERVER_PREPARE_FAILED")
 		return nil, err
 	}
 	gateNonce, err := randomHex(16)

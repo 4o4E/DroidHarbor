@@ -281,7 +281,7 @@ paths:
     post:
       operationId: registerDiscoveredDevice
       summary: 显式接入已发现设备，核验硬件并关联同机 USB/Wi-Fi 链路
-      description: 仅处理本次发现清单中的入口，不连接或配对其他手机。已授权链路核验后启用，未授权链路保留待核验。硬件身份冲突不创建记录；既有物理设备保留原名称和维护状态。新设备使用手机型号或指定名称，默认 60 fps、12 Mbps。
+      description: 仅处理本次发现清单中的入口，不连接或配对其他手机。已授权链路核验身份及主屏尺寸后启用，未授权链路保留待核验。硬件身份冲突不创建记录；既有物理设备保留原名称和维护状态。新设备使用手机型号或指定名称，默认 60 fps、12 Mbps。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -858,17 +858,33 @@ paths:
     delete:
       operationId: endMediaSession
       summary: 关闭本人会话并释放该会话持有的输入
-      description: 最后一个观看者结束时回收共享采集；不释放其他人的输入，不撤销 AI 租约。回收无法确认时明确失败。
+      description: |
+        普通关闭回收最后观看者的采集和该登录的空闲保活；不释放其他人的输入，不撤销 AI 租约。
+        明确切换同时提供 reason=switch 与 nextDeviceId：旧会话授权和输入立即结束，
+        已保活目标先进入连接中占位，离开设备进入全平台唯一空闲保活位，最长十五秒。
+        目标占位沿用原剩余期限、计入媒体容量，不启动新编码器；客户端等待本次结束完成后创建目标会话。
+        目标建连前取消、关闭或失败时，以原结束会话 ID、相同 nextDeviceId 和 reason=cancel-switch
+        释放该次交接的占位与空闲保活，不能取消其他窗口的较新交接。退出、撤权、断连、失败及停服务走定向回收。
+        普通关闭不带两个查询参数；切换参数须成对提供。回收无法确认时明确失败。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
         - $ref: '#/components/parameters/CSRFToken'
+        - name: reason
+          in: query
+          schema: {type: string, enum: [switch, cancel-switch]}
+          description: 与 nextDeviceId 同时提供；省略表示普通关闭
+        - name: nextDeviceId
+          in: query
+          schema: {type: string, minLength: 1}
+          description: 此次切换目标；不是凭证
       responses:
         '204': {description: 人工会话已关闭并完成所需回收}
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
   /api/v1/devices/{id}/video-settings:
     parameters:
@@ -1246,6 +1262,27 @@ components:
         expiresAt: {type: string, format: date-time}
         features: {type: array, items: {type: string}}
         tunnelPath: {type: string, description: 同一平台的相对路径，不含凭证}
+    DisplayGeometry:
+      type: object
+      required: [width, height, observedAt]
+      properties:
+        width: {type: integer, minimum: 1, maximum: 65535}
+        height: {type: integer, minimum: 1, maximum: 65535}
+        observedAt: {type: string, format: date-time}
+    DeviceDisplayInfo:
+      type: object
+      description: 管理员预布局资料；观测未知时对应字段省略，不授予输入权限
+      properties:
+        screen:
+          allOf:
+            - $ref: '#/components/schemas/DisplayGeometry'
+            - type: object
+              required: [rotation]
+              properties:
+                rotation: {type: integer, minimum: 0, maximum: 3, description: Android 主屏当前逻辑方向}
+        video:
+          $ref: '#/components/schemas/DisplayGeometry'
+          description: 最近实际视频 metadata 观测；可能与主屏尺寸存在编码对齐差异
     Device:
       type: object
       required: [deviceId, displayName, tags, connectionState, allocationState]
@@ -1257,6 +1294,9 @@ components:
         allocationState: {type: string, enum: [available, leased, reclaiming, quarantined, maintenance]}
         version: {type: string, description: 仅管理员可见的配置修改版本；不表示媒体或连接版本}
         maintenanceRequested: {type: boolean, description: 仅管理员可见}
+        displayInfo:
+          $ref: '#/components/schemas/DeviceDisplayInfo'
+          description: 仅管理员可见；按较新的有效屏幕或视频观测预布局
         links:
           type: array
           description: 仅管理员可见

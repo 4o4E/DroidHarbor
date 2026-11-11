@@ -3,7 +3,7 @@ import { ImageOff, LoaderCircle, MonitorSmartphone, Unplug } from 'lucide-react'
 import { cn } from 'cn'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { errorMessage } from '@/lib/api'
-import type { Device } from '@/lib/types'
+import { deviceDisplaySize, type Device } from '@/lib/types'
 import { useDevicePreview, type DevicePreviewFrame } from './useDevicePreview'
 
 export type DevicePreviewProps = {
@@ -17,6 +17,7 @@ export function DevicePreview({ device, compact = false }: DevicePreviewProps) {
   const [documentVisible, setDocumentVisible] = useState(() => typeof document !== 'undefined' && document.visibilityState === 'visible')
   const [lastFrame, setLastFrame] = useState<{ deviceId: string; linkSignature: string; capturedAt: string; linkGeneration: string }>()
   const online = device.connectionState === 'online'
+  const displaySize = deviceDisplaySize(device)
   const linkSignature = JSON.stringify(device.links
     .map(({ linkId, kind, endpoint, connectionState, identityVerified }) => [linkId, kind, endpoint, connectionState, identityVerified] as const)
     .sort((left, right) => {
@@ -72,7 +73,7 @@ export function DevicePreview({ device, compact = false }: DevicePreviewProps) {
         ? `${device.displayName} · 拍摄于 ${new Date(currentFrame.capturedAt).toLocaleString('zh-CN')}`
         : `${device.displayName} · ${online ? '暂无最新预览' : '设备不可用'}`}
     >
-      <div className={cn('flex items-center justify-center bg-background text-foreground', !compact && 'h-56')}>
+      <div className={cn('flex items-center justify-center bg-background text-foreground', !compact && 'h-56')} style={compact && displaySize ? { aspectRatio: `${displaySize.width} / ${displaySize.height}` } : undefined}>
         {online && active ? (
           <LivePreview
             key={`${device.deviceId}:${linkSignature}`}

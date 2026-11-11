@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"droidharbor/internal/capture"
+	"droidharbor/internal/devices"
 	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/scrcpy"
 	"github.com/pion/rtp"
@@ -45,9 +46,13 @@ func (h *hub) ensureSource(ctx context.Context, authorize func() error) error {
 	}
 	if current := h.source; current != nil {
 		failed := h.status == "failed"
+		outdated := h.captureRevision != h.revision
 		h.mu.Unlock()
 		if failed {
 			return problem(503, "CAPTURE_FAILED", "已有采集失败，未启动替代采集")
+		}
+		if outdated {
+			return h.restart(ctx, authorize)
 		}
 		return nil
 	}
@@ -166,6 +171,7 @@ func (h *hub) failSource(source *capture.Stream, err error) {
 		h.manager.deps.Logger.Error("media_source_failed", "deviceId", h.deviceID, "code", errorCode(err), "cause", diagnostics.Cause(err))
 	}
 	h.cancelAllClipboard()
+	h.manager.failRetained(h)
 	h.manager.notifyDevice(h.deviceID)
 	for _, s := range members {
 		s.beginEnd(err)
@@ -241,6 +247,9 @@ func (h *hub) beginEpoch(source *capture.Stream, packet scrcpy.Packet) error {
 		s.invalidateFrame()
 	}
 	h.mu.Unlock()
+	if err := devices.RecordVideoGeometry(ctx, h.manager.deps.DB, h.deviceID, int(packet.Width), int(packet.Height)); err != nil {
+		return &Error{Status: 503, Code: "STORAGE_UNAVAILABLE", Message: "无法保存设备画面尺寸", Cause: err}
+	}
 	h.manager.deps.Logger.Info("media_capture_epoch_started", "deviceId", h.deviceID, "captureEpoch", epoch, "width", packet.Width, "height", packet.Height)
 	h.manager.notifyDevice(h.deviceID)
 	return nil
@@ -263,6 +272,10 @@ func (h *hub) publishFrame(source *capture.Stream, packet scrcpy.Packet) error {
 		}
 		h.config = packet.Data
 		h.statisticsBytes += int64(len(packet.Data))
+		h.mu.Unlock()
+		return nil
+	}
+	if len(h.members) == 0 {
 		h.mu.Unlock()
 		return nil
 	}
@@ -335,7 +348,7 @@ func (h *hub) publishFrame(source *capture.Stream, packet scrcpy.Packet) error {
 		}
 		h.statisticsAt, h.statisticsFrames, h.statisticsBytes = now, 0, 0
 	}
-	frame := &videoFrame{packets: packets, size: size, source: source, epoch: h.epoch, width: h.width, height: h.height, timestamp: timestamp, key: packet.KeyFrame}
+	frame := &videoFrame{packets: packets, size: size, source: source, epoch: h.epoch, width: h.width, height: h.height, timestamp: timestamp, key: packet.KeyFrame, observedAt: now}
 	for _, s := range h.members {
 		if err := s.offerFrame(frame); err != nil {
 			s.beginEnd(err)

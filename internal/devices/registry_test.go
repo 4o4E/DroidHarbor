@@ -258,11 +258,16 @@ func identityFixture(t *testing.T, properties map[uint64]string) *adb.Client {
 					t.Error(err)
 					return
 				}
-				if !strings.HasPrefix(readService(), "exec:") {
+				service := readService()
+				if !strings.HasPrefix(service, "exec:") {
 					t.Error("unexpected service in identity fixture")
 					return
 				}
-				if _, err = io.WriteString(conn, "OKAY"+properties[transport]); err != nil {
+				output := properties[transport]
+				if service == "exec:cmd display get-displays" {
+					output = "Displays:\nDisplay id 0: DisplayInfo{\"Built-in Screen\", displayId 0, real 1080 x 2400, rotation 0}\n"
+				}
+				if _, err = io.WriteString(conn, "OKAY"+output); err != nil {
 					t.Error(err)
 				}
 			}()

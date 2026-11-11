@@ -10,6 +10,11 @@ export interface DeviceLink {
   identityVerified: boolean
   lastError?: string
 }
+export interface DisplayGeometry { width: number; height: number; observedAt: string }
+export interface DeviceDisplayInfo {
+  screen?: DisplayGeometry & { rotation: number }
+  video?: DisplayGeometry
+}
 export interface Device {
   deviceId: string
   displayName: string
@@ -19,6 +24,7 @@ export interface Device {
   version: string
   maintenanceRequested: boolean
   links: DeviceLink[]
+  displayInfo?: DeviceDisplayInfo
 }
 export interface Caller {
   id: string
@@ -41,6 +47,12 @@ export interface VideoSnapshot {
   errorCode?: string
 }
 export const deviceName = (device: Device) => device.displayName
+
+export function deviceDisplaySize(device: Device): DisplayGeometry | null {
+  const { screen, video } = device.displayInfo ?? {}
+  if (screen && video) return Date.parse(video.observedAt) >= Date.parse(screen.observedAt) ? video : screen
+  return video ?? screen ?? null
+}
 const allocationLabels: Record<AllocationState, string> = { available: '未分配', leased: '已分配', reclaiming: '回收中', quarantined: '已隔离', maintenance: '维护中' }
 export function deviceNeedsVerification(device: Device) {
   return device.connectionState === 'offline' && device.links.some(link => link.connectionState === 'online' && !link.identityVerified)

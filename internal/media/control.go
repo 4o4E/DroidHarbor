@@ -96,14 +96,33 @@ func (s *session) onPeerReady() {
 	s.mu.Lock()
 	if !s.peerReadyClosed && s.ctx.Err() == nil {
 		s.peerReadyClosed = true
-		s.awaitingKey = true
-		s.waitingSince = time.Now()
+		freshStartup := !s.awaitingKey && len(s.frames) != 0 && !s.startupKeyAt.IsZero() && time.Since(s.startupKeyAt) <= initialFrameMaxAge
+		if !freshStartup {
+			s.discardStartupFramesLocked()
+			s.awaitingKey = true
+			s.waitingSince = time.Now()
+			requested = true
+		}
 		close(s.peerReady)
-		requested = true
 	}
 	s.mu.Unlock()
 	if requested {
 		go s.resetDeviceVideo()
+	}
+}
+
+// Discard an incomplete or stale startup GOP as a unit, never from a P frame.
+func (s *session) discardStartupFramesLocked() {
+	s.frameGeneration++
+	s.startupKeyAt = time.Time{}
+	for {
+		select {
+		case frame := <-s.frames:
+			s.queuedFrameBytes -= frame.size
+			delete(s.frameGenerations, frame)
+		default:
+			return
+		}
 	}
 }
 
@@ -373,8 +392,16 @@ func (s *session) acknowledgeFrame(epoch uint64, timestamp uint32) bool {
 func (s *session) offerFrame(frame *videoFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.ctx.Err() != nil || !s.peerReadyClosed {
+	if s.ctx.Err() != nil {
 		return nil
+	}
+	if !s.peerReadyClosed && frame.key {
+		s.discardStartupFramesLocked()
+		s.awaitingKey = true
+	}
+	if !s.peerReadyClosed && (len(s.frames) == cap(s.frames) || s.queuedFrameBytes+frame.size > maxFrameQueueBytes) {
+		s.discardStartupFramesLocked()
+		s.awaitingKey = true
 	}
 	if s.awaitingKey && !frame.key {
 		return nil
@@ -391,6 +418,9 @@ func (s *session) offerFrame(frame *videoFrame) error {
 		s.frameGenerations[frame] = s.frameGeneration
 		if frame.key {
 			s.awaitingKey = false
+			if !s.peerReadyClosed {
+				s.startupKeyAt = frame.observedAt
+			}
 			s.waitingSince = time.Time{}
 		}
 		return nil
@@ -402,6 +432,7 @@ func (s *session) offerFrame(frame *videoFrame) error {
 func (s *session) invalidateFrame() {
 	s.mu.Lock()
 	s.awaitingKey = true
+	s.startupKeyAt = time.Time{}
 	s.ready, s.readyEpoch, s.boundaryTimestamp = false, 0, 0
 	s.frameTimestampCount, s.frameTimestampNext = 0, 0
 	s.keyNoticeSent = false
@@ -424,6 +455,7 @@ func (s *session) requestKeyFrame() {
 		s.frameGeneration++
 		s.ready, s.readyEpoch, s.boundaryTimestamp = false, 0, 0
 		s.awaitingKey = true
+		s.startupKeyAt = time.Time{}
 		s.frameTimestampCount, s.frameTimestampNext = 0, 0
 		s.keyNoticeSent = false
 		for {
@@ -443,7 +475,7 @@ func (s *session) requestKeyFrame() {
 
 // resetDeviceVideo forces the scrcpy encoder to emit a fresh key frame. The
 // server's default I-frame interval is ten seconds, longer than the viewer
-// key-frame timeout, so a new or recovering viewer must request one.
+// key-frame timeout. Request one when no fresh, complete startup GOP exists.
 func (s *session) resetDeviceVideo() {
 	h := s.hub
 	h.mu.Lock()

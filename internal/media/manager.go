@@ -10,6 +10,7 @@ import (
 	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/identity"
+	"droidharbor/internal/rtc"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -21,6 +22,7 @@ func New(ctx context.Context, deps Dependencies) *Manager {
 		cancel:          cancel,
 		sessions:        make(map[string]*session),
 		hubs:            make(map[string]*hub),
+		joining:         make(map[string]*retainedCapture),
 		screenshotSlots: make(chan struct{}, 2),
 	}
 	m.watcher.Add(1)
@@ -92,7 +94,11 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 		commands: make(chan []byte, 64), output: make(chan []byte, 64), done: make(chan struct{}),
 	}
 	m.mu.Lock()
-	if m.closed || len(m.sessions) >= maxSessions {
+	reservedTarget := 0
+	if m.joining[deviceID] != nil {
+		reservedTarget = 1
+	}
+	if m.closed || len(m.sessions)+len(m.joining)-reservedTarget >= maxSessions {
 		m.mu.Unlock()
 		cancel()
 		return SessionSnapshot{}, problem(503, "MEDIA_CAPACITY", "媒体会话暂不可用")
@@ -101,11 +107,13 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 	m.mu.Unlock()
 
 	h.changeMu.Lock()
+	m.resumeRetained(h)
 	h.mu.Lock()
 	h.members[s.id] = s
 	h.mu.Unlock()
+	var peer *rtc.Peer
 	if err = s.check(ctx, false); err == nil {
-		err = h.ensureSource(ctx, func() error { return s.check(ctx, false) })
+		peer, err = m.preparePeerAndCapture(ctx, s, offer)
 	}
 	h.changeMu.Unlock()
 	if err != nil {
@@ -114,16 +122,7 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 	}
 	if err = ctx.Err(); err != nil {
 		s.beginEnd(err)
-		return SessionSnapshot{}, err
-	}
-	acceptCtx, cancelAccept := context.WithTimeout(m.ctx, negotiationTimeout)
-	stopRequest := context.AfterFunc(ctx, cancelAccept)
-	peer, err := m.deps.Transport.Accept(acceptCtx, offer, rtcCallbacks(s))
-	stopRequest()
-	cancelAccept()
-	if err != nil {
-		s.beginEnd(err)
-		return SessionSnapshot{}, &Error{Status: 422, Code: "MEDIA_NEGOTIATION_FAILED", Message: "WebRTC 协商失败", Cause: err}
+		return SessionSnapshot{}, errors.Join(err, peer.Close())
 	}
 	s.mu.Lock()
 	s.peer = peer
@@ -134,8 +133,7 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 	}
 	s.mu.Unlock()
 	if !alive {
-		_ = peer.Close()
-		return SessionSnapshot{}, problem(410, "HUMAN_SESSION_CLOSED", "人工会话已结束")
+		return SessionSnapshot{}, errors.Join(problem(410, "HUMAN_SESSION_CLOSED", "人工会话已结束"), peer.Close())
 	}
 	go s.runVideo()
 	go s.runCommands()
@@ -165,7 +163,7 @@ func (m *Manager) AddCandidate(ctx context.Context, owner, id string, candidate 
 	return nil
 }
 
-func (m *Manager) End(ctx context.Context, owner, id string) error {
+func (m *Manager) End(ctx context.Context, owner, id, nextDeviceID string) error {
 	if err := m.checkAdmin(ctx, owner); err != nil {
 		return err
 	}
@@ -173,14 +171,26 @@ func (m *Manager) End(ctx context.Context, owner, id string) error {
 	s := m.sessions[id]
 	m.mu.Unlock()
 	if s == nil {
+		if nextDeviceID == "" {
+			return m.endRetained(ctx, owner)
+		}
 		return nil
 	}
 	if s.owner != owner {
 		return problem(403, "SESSION_OWNER_MISMATCH", "不能关闭其他登录会话的窗口")
 	}
+	if nextDeviceID != "" {
+		s.mu.Lock()
+		s.switchUntil = time.Now().Add(captureRetention)
+		s.mu.Unlock()
+		m.claimSwitchTarget(owner, id, nextDeviceID)
+	}
 	s.beginEnd(nil)
 	select {
 	case <-s.done:
+		if nextDeviceID == "" {
+			return errors.Join(s.endErr, m.endRetained(ctx, owner))
+		}
 		return s.endErr
 	case <-ctx.Done():
 		return ctx.Err()
@@ -208,7 +218,7 @@ func (m *Manager) CloseAdmin(ctx context.Context, owner string) error {
 			return errors.Join(result, ctx.Err())
 		}
 	}
-	return result
+	return errors.Join(result, m.endRetained(ctx, owner))
 }
 
 func (m *Manager) Close(ctx context.Context) error {
@@ -232,6 +242,7 @@ func (m *Manager) Close(ctx context.Context) error {
 			return errors.Join(result, ctx.Err())
 		}
 	}
+	result = errors.Join(result, m.endRetained(ctx, ""))
 	m.watcher.Wait()
 	return result
 }
@@ -270,7 +281,14 @@ func (s *session) finish(reason error) {
 	h.mu.Lock()
 	delete(h.members, s.id)
 	last := len(h.members) == 0
-	if last {
+	h.mu.Unlock()
+	h.inputMu.Unlock()
+	s.mu.Lock()
+	until := s.switchUntil
+	s.mu.Unlock()
+	retained := last && reason == nil && inputErr == nil && !cleanupPending && h.manager.retainCapture(ctx, h, source, s.owner, s.id, until)
+	if last && !retained {
+		h.mu.Lock()
 		if h.status != "failed" {
 			h.status = "stopping"
 		}
@@ -280,19 +298,18 @@ func (s *session) finish(reason error) {
 			h.cleanupSource = source
 			h.cleanupPending = true
 		}
-	}
-	h.mu.Unlock()
-	h.inputMu.Unlock()
-	if last && source != nil && !cleanupPending {
-		stopErr = source.Stop(ctx)
+		h.mu.Unlock()
+		if source != nil && !cleanupPending {
+			stopErr = source.Stop(ctx)
+		}
+		if !cleanupPending {
+			h.captureStopped(stopErr, inputErr)
+		}
 	}
 	if last {
 		h.cancelAllClipboard()
 	}
 	cleanupErr = errors.Join(cleanupErr, stopErr)
-	if last && !cleanupPending {
-		h.captureStopped(stopErr, inputErr)
-	}
 	if inputErr != nil && stopErr == nil {
 		h.fail(inputErr)
 	}
@@ -437,7 +454,23 @@ func (m *Manager) watch() {
 			for _, s := range m.sessions {
 				sessions = append(sessions, s)
 			}
+			retentions := make([]*retainedCapture, 0, len(m.joining)+1)
+			if m.retained != nil {
+				retentions = append(retentions, m.retained)
+			}
+			for _, entry := range m.joining {
+				retentions = append(retentions, entry)
+			}
 			m.mu.Unlock()
+			for _, retained := range retentions {
+				if err := m.checkAdmin(m.ctx, retained.owner); err != nil {
+					cleanup, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+					if stopErr := m.endRetained(cleanup, retained.owner); stopErr != nil {
+						m.deps.Logger.Error("media_retention_revocation_failed", "deviceId", retained.hub.deviceID, "cause", diagnostics.Cause(stopErr))
+					}
+					cancel()
+				}
+			}
 			for _, s := range sessions {
 				s.mu.Lock()
 				waitingForKey := s.peerReadyClosed && s.awaitingKey && !s.waitingSince.IsZero() && now.Sub(s.waitingSince) > keyFrameTimeout

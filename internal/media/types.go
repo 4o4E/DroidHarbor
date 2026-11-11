@@ -31,6 +31,7 @@ const (
 	maxScreenshotBytes    = 32 << 20
 	maxFrameBoundaries    = 256
 	screenshotTimeout     = 30 * time.Second
+	initialFrameMaxAge    = 250 * time.Millisecond
 )
 
 type Error struct {
@@ -112,6 +113,8 @@ type Manager struct {
 	closed          bool
 	sessions        map[string]*session
 	hubs            map[string]*hub
+	retained        *retainedCapture
+	joining         map[string]*retainedCapture
 	watcher         sync.WaitGroup
 	screenshotSlots chan struct{}
 }
@@ -123,6 +126,8 @@ type session struct {
 	ctx                                                     context.Context
 	cancel                                                  context.CancelFunc
 	created                                                 time.Time
+	switchUntil                                             time.Time
+	switchCancelled                                         bool // guarded by manager.mu
 	mu                                                      sync.Mutex
 	peer                                                    *rtc.Peer
 	peerStarted                                             time.Time
@@ -137,6 +142,7 @@ type session struct {
 	keyNoticeSent                                           bool
 	awaitingKey                                             bool
 	waitingSince                                            time.Time
+	startupKeyAt                                            time.Time
 	frameGenerations                                        map[*videoFrame]uint64
 	ready                                                   bool
 	queuedFrameBytes, queuedControlBytes, queuedOutputBytes int
@@ -157,6 +163,7 @@ type videoFrame struct {
 	width, height uint16
 	timestamp     uint32
 	key           bool
+	observedAt    time.Time
 }
 
 type hub struct {

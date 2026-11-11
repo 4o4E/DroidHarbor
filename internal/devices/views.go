@@ -2,6 +2,7 @@ package devices
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -19,14 +20,15 @@ type LinkView struct {
 }
 
 type View struct {
-	ID                   string     `json:"deviceId"`
-	DisplayName          string     `json:"displayName"`
-	Tags                 []string   `json:"tags"`
-	ConnectionState      string     `json:"connectionState"`
-	AllocationState      string     `json:"allocationState"`
-	Version              string     `json:"version,omitempty"`
-	MaintenanceRequested *bool      `json:"maintenanceRequested,omitempty"`
-	Links                []LinkView `json:"links,omitempty"`
+	ID                   string       `json:"deviceId"`
+	DisplayName          string       `json:"displayName"`
+	Tags                 []string     `json:"tags"`
+	ConnectionState      string       `json:"connectionState"`
+	AllocationState      string       `json:"allocationState"`
+	Version              string       `json:"version,omitempty"`
+	MaintenanceRequested *bool        `json:"maintenanceRequested,omitempty"`
+	Links                []LinkView   `json:"links,omitempty"`
+	DisplayInfo          *DisplayInfo `json:"displayInfo,omitempty"`
 }
 
 type Discovered struct {
@@ -81,7 +83,7 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,display_name,allocation_state,maintenance_requested FROM devices ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT id,display_name,allocation_state,maintenance_requested,CASE WHEN ? THEN display_info END FROM devices ORDER BY id`, admin)
 	if err != nil {
 		return nil, false, err
 	}
@@ -90,9 +92,17 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 	for rows.Next() {
 		var view View
 		var maintenance bool
-		if err = rows.Scan(&view.ID, &view.DisplayName, &view.AllocationState, &maintenance); err != nil {
+		var display sql.NullString
+		if err = rows.Scan(&view.ID, &view.DisplayName, &view.AllocationState, &maintenance, &display); err != nil {
 			rows.Close()
 			return nil, false, err
+		}
+		if admin {
+			view.DisplayInfo, err = decodeDisplayInfo(display)
+			if err != nil {
+				rows.Close()
+				return nil, false, err
+			}
 		}
 		view.Tags = []string{}
 		view.ConnectionState = "offline"

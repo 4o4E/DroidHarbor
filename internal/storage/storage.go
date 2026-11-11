@@ -18,7 +18,7 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	absolute, err := filepath.Abs(path)

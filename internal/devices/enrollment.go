@@ -344,6 +344,10 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 	if err != nil {
 		return Evidence{}, err
 	}
+	screen, err := r.readDisplay(probeCtx, observed.TransportID)
+	if err != nil {
+		return Evidence{}, err
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Evidence{}, err
@@ -377,6 +381,9 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 		return Evidence{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE device_links SET identity_evidence=?,observed_serial=?,enabled=1,last_seen_at=? WHERE id=?`, string(encoded), observed.Serial, time.Now().UTC().UnixMilli(), linkID); err != nil {
+		return Evidence{}, err
+	}
+	if err = saveScreenGeometry(ctx, tx, deviceID, screen); err != nil {
 		return Evidence{}, err
 	}
 	if err = record(ctx, tx, actorID, deviceID, linkID, "device.link.verify"); err != nil {
