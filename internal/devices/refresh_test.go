@@ -2,6 +2,7 @@ package devices
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -126,5 +127,134 @@ func TestManualRefreshPreservesNewerInventoryAndTrackerLifetime(t *testing.T) {
 				t.Fatal("stale query replaced the current transport or canceled its authorization")
 			}
 		})
+	}
+}
+
+func TestManualRefreshReconnectsSavedPhoneWithoutRebindingOrAllocating(t *testing.T) {
+	for _, wrongPhone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrongPhone=%t", wrongPhone), func(t *testing.T) {
+			const endpoint = "192.0.2.8:43217"
+			connected := false
+			registry := wirelessRegistry(t, func(request string) string {
+				switch request {
+				case "host:devices-l":
+					if connected {
+						return endpoint + " device product:product model:Phone transport_id:8\n"
+					}
+					return ""
+				case "host:connect:" + endpoint:
+					connected = true
+					return "connected to " + endpoint
+				default:
+					t.Errorf("unexpected ADB request %q", request)
+					return ""
+				}
+			})
+			ctx := context.Background()
+			registered, err := registry.Register(ctx, "admin", Registration{DisplayName: "saved phone", LinkRequest: LinkRequest{Kind: "wifi", Endpoint: endpoint}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence := Evidence{Serial: "hardware-one", Manufacturer: "Maker", Model: "Phone", Product: "product", Android: "15", SDK: "35"}
+			if wrongPhone {
+				evidence.Serial = "original-phone"
+			}
+			encoded, err := json.Marshal(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = registry.db.Exec(`UPDATE device_links SET identity_evidence=? WHERE id=?`, string(encoded), registered.LinkID); err != nil {
+				t.Fatal(err)
+			}
+			err = registry.Refresh(ctx, "admin", registered.DeviceID)
+			if wrongPhone {
+				var failure *Error
+				if !errors.As(err, &failure) || failure.Code != "IDENTITY_CONFLICT" {
+					t.Fatalf("saved address rebound to a different phone: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			views, _, err := registry.List(ctx, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			view := views[0]
+			if !*view.MaintenanceRequested || view.AllocationState != "maintenance" {
+				t.Fatalf("refresh enabled AI allocation: %+v", view)
+			}
+			if !wrongPhone && !view.Links[0].IdentityVerified {
+				t.Fatal("reconnected phone was not identity-verified")
+			}
+			var saved string
+			if err = registry.db.QueryRow(`SELECT identity_evidence FROM device_links WHERE id=?`, registered.LinkID).Scan(&saved); err != nil {
+				t.Fatal(err)
+			}
+			var retained Evidence
+			if err = json.Unmarshal([]byte(saved), &retained); err != nil || !retained.SameHardware(evidence) {
+				t.Fatalf("refresh replaced the saved hardware identity: err=%v saved=%+v", err, retained)
+			}
+		})
+	}
+}
+
+func TestManualRefreshRepairsOnlineDisplayMetadataWithoutInterruptingLiveLink(t *testing.T) {
+	const serial = "saved-usb"
+	registry := wirelessRegistry(t, func(request string) string {
+		if request != "host:devices-l" {
+			t.Errorf("unexpected ADB request %q", request)
+		}
+		return serial + " device product:product model:Phone transport_id:8\n"
+	})
+	ctx := context.Background()
+	registry.publish([]adb.Device{{Serial: serial, State: "device", TransportID: 8}}, ctx)
+	registered, err := registry.Register(ctx, "admin", Registration{DisplayName: "phone", LinkRequest: LinkRequest{Kind: "usb", Endpoint: serial}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = registry.Verify(ctx, "admin", registered.DeviceID, registered.LinkID); err != nil {
+		t.Fatal(err)
+	}
+	if err = registry.verifySnapshot(inventoryUpdate{version: registry.version, epoch: ctx}); err != nil {
+		t.Fatal(err)
+	}
+	links := registry.OnlineLinks()
+	if len(links) != 1 {
+		t.Fatalf("expected verified online device: %+v", links)
+	}
+	before := links[0]
+	linkCtx, err := registry.LinkContext(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce an online identity with a failed initial display observation.
+	if _, err = registry.db.Exec(`UPDATE devices SET display_info=NULL WHERE id=?`, registered.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	registry.mu.Lock()
+	registry.issues[registered.LinkID] = "读取屏幕尺寸失败"
+	registry.mu.Unlock()
+	if err = registry.Refresh(ctx, "admin", registered.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if linkCtx.Err() != nil {
+		t.Fatal("metadata refresh interrupted the current live context")
+	}
+	if _, err = registry.LinkContext(before); err != nil {
+		t.Fatalf("metadata refresh replaced the current live generation: %v", err)
+	}
+	views, _, err := registry.List(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if views[0].ConnectionState != "online" || views[0].Links[0].LastError != "" || views[0].AllocationState != "maintenance" {
+		t.Fatalf("metadata recovery lost online state, retained the error or changed allocation intent: %+v", views[0])
+	}
+	var width, height int
+	if err = registry.db.QueryRow(`SELECT json_extract(display_info,'$.screen.width'),json_extract(display_info,'$.screen.height') FROM devices WHERE id=?`, registered.DeviceID).Scan(&width, &height); err != nil {
+		t.Fatal(err)
+	}
+	if width != 1080 || height != 2400 {
+		t.Fatalf("missing recovered screen geometry: %dx%d", width, height)
 	}
 }

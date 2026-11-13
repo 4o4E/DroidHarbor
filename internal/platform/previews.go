@@ -19,7 +19,22 @@ func (s *Server) devicePreview(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, 503, "PREVIEW_UNAVAILABLE", "设备预览暂不可用")
 		return
 	}
-	snapshot, err := s.Previews.Get(r.Context(), r.PathValue("id"))
+	cachedOnly := false
+	if value := r.URL.Query().Get("cached"); value != "" {
+		var err error
+		cachedOnly, err = strconv.ParseBool(value)
+		if err != nil {
+			s.fail(w, r, 400, "INVALID_REQUEST", "封面缓存参数无效")
+			return
+		}
+	}
+	var snapshot previews.Snapshot
+	var err error
+	if cachedOnly {
+		snapshot, err = s.Previews.Cached(r.Context(), r.PathValue("id"))
+	} else {
+		snapshot, err = s.Previews.Get(r.Context(), r.PathValue("id"))
+	}
 	if err != nil {
 		s.previewError(w, r, err)
 		return
@@ -51,6 +66,8 @@ func (s *Server) previewError(w http.ResponseWriter, r *http.Request, err error)
 		return
 	}
 	switch {
+	case errors.Is(err, previews.ErrNotReady):
+		s.fail(w, r, 404, "PREVIEW_NOT_READY", "设备初始封面尚不可用")
 	case errors.Is(err, previews.ErrRateLimited):
 		s.fail(w, r, 503, "PREVIEW_RATE_LIMITED", "预览采集频率受限，请稍后重试")
 	case errors.Is(err, previews.ErrCapacity):

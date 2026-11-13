@@ -68,8 +68,8 @@ function AuthenticatedManagement() {
     } catch (error) {
       failure += `${failure ? ' ' : ''}设备列表读取失败：${errorMessage(error)}`
     }
-    if (failure) toast.add({ title: '状态同步未完成', description: failure, type: 'error', timeout: 0 })
-    else toast.add({ title: '设备状态已同步', type: 'success' })
+    if (failure) toast.add({ title: '设备刷新未完成', description: failure, type: 'error', timeout: 0 })
+    else toast.add({ title: '设备状态已刷新', type: 'success' })
     setSyncingDeviceId(null)
   }
 

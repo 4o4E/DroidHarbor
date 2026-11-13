@@ -27,17 +27,26 @@ func startupCommand(jar, gateNonce string, scid int32, settings Settings) (strin
 	if err != nil {
 		return "", err
 	}
-	// Android's app_process rejects --nice-name on tested Android 13/16
-	// devices and exits before the server runs. Ownership verification uses
-	// the JAR environment plus PID/start ticks instead of a process name.
+	return gatedStartupCommand(jar, gateNonce, args), nil
+}
+
+func startupPowerCommand(jar, gateNonce string, scid int32) (string, error) {
+	args, err := powerServerOptions(scid)
+	if err != nil {
+		return "", err
+	}
+	return gatedStartupCommand(jar, gateNonce, args), nil
+}
+
+func gatedStartupCommand(jar, gateNonce string, args []string) string {
+	// Gate execution behind persisted PID/start ticks, for both controller roles.
 	quoted := make([]string, 0, len(args)+4)
 	quoted = append(quoted, "app_process", "/system/bin", "com.genymobile.scrcpy.Server", "5.0.1")
 	quoted = append(quoted, args...)
 	for i := range quoted {
 		quoted[i] = "'" + strings.ReplaceAll(quoted[i], "'", "'\\''") + "'"
 	}
-	command := "CLASSPATH='" + jar + "'; export CLASSPATH; stat=$(cat /proc/$$/stat) || exit 1; rest=${stat##*) }; set -- $rest; ticks=${20}; boot=$(cat /proc/sys/kernel/random/boot_id) || exit 1; printf 'DHREADY %s %s %s\\n' \"$$\" \"$boot\" \"$ticks\"; IFS= read -r gate || exit 1; [ \"$gate\" = '" + gateNonce + "' ] || exit 1; IFS= read -r go || exit 1; [ \"$go\" = GO ] || exit 1; exec " + strings.Join(quoted, " ")
-	return command, nil
+	return "CLASSPATH='" + jar + "'; export CLASSPATH; stat=$(cat /proc/$$/stat) || exit 1; rest=${stat##*) }; set -- $rest; ticks=${20}; boot=$(cat /proc/sys/kernel/random/boot_id) || exit 1; printf 'DHREADY %s %s %s\\n' \"$$\" \"$boot\" \"$ticks\"; IFS= read -r gate || exit 1; [ \"$gate\" = '" + gateNonce + "' ] || exit 1; IFS= read -r go || exit 1; [ \"$go\" = GO ] || exit 1; exec " + strings.Join(quoted, " ")
 }
 
 func readReady(ctx context.Context, conn net.Conn) (readyIdentity, error) {

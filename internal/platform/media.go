@@ -33,18 +33,29 @@ func (s *Server) createMediaSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Mode  string `json:"mode"`
-		Offer string `json:"offer"`
+		Mode            string `json:"mode"`
+		Offer           string `json:"offer"`
+		RecoveryAttempt uint64 `json:"recoveryAttempt,omitempty"`
 	}
 	if !s.decodeLimit(w, r, &body, false, 96<<10) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if body.RecoveryAttempt > 0 {
+		s.Logger.Info("media_recovery_attempt", "requestId", r.Context().Value(requestKey{}), "deviceId", r.PathValue("id"), "attempt", body.RecoveryAttempt)
+	}
 	snapshot, err := s.Media.Join(ctx, owner, r.PathValue("id"), body.Mode, body.Offer)
 	if err != nil {
+		if r.Context().Err() != nil {
+			s.fail(w, r, http.StatusRequestTimeout, "REQUEST_CANCELED", "观看请求已取消")
+			return
+		}
 		s.domainError(w, r, err)
 		return
+	}
+	if body.RecoveryAttempt > 0 {
+		s.Logger.Info("media_recovery_session_prepared", "requestId", r.Context().Value(requestKey{}), "deviceId", r.PathValue("id"), "sessionId", snapshot.SessionID, "attempt", body.RecoveryAttempt)
 	}
 	s.json(w, http.StatusCreated, snapshot)
 }

@@ -89,17 +89,18 @@ func (e *Error) Is(target error) bool {
 }
 
 var (
-	ErrUnauthenticated = &Error{Code: "INVALID_CREDENTIAL", Message: "凭证无效", HTTPStatus: http.StatusUnauthorized}
-	ErrForbidden       = &Error{Code: "FORBIDDEN", Message: "无权访问该资源", HTTPStatus: http.StatusForbidden}
-	ErrNotFound        = &Error{Code: "NOT_FOUND", Message: "资源不存在", HTTPStatus: http.StatusNotFound}
-	ErrInvalidRequest  = &Error{Code: "INVALID_REQUEST", Message: "请求参数无效", HTTPStatus: http.StatusUnprocessableEntity}
-	ErrConflict        = &Error{Code: "CONFLICT", Message: "请求与已绑定状态冲突", HTTPStatus: http.StatusConflict}
-	ErrUnavailable     = &Error{Code: "NO_MATCHING_DEVICE", Message: "没有满足条件的可用设备", HTTPStatus: http.StatusConflict}
-	ErrLeaseEnded      = &Error{Code: "LEASE_ENDED", Message: "租约已结束或已过期", HTTPStatus: http.StatusGone}
-	ErrDeviceOffline   = &Error{Code: "DEVICE_DISCONNECTED", Message: "租约链路当前不可用", HTTPStatus: http.StatusServiceUnavailable}
-	ErrClosed          = &Error{Code: "SERVICE_CLOSED", Message: "租约管理器已关闭", HTTPStatus: http.StatusServiceUnavailable}
-	ErrStorage         = &Error{Code: "STORAGE_UNAVAILABLE", Message: "持久化操作暂不可用", HTTPStatus: http.StatusServiceUnavailable}
-	ErrReclaimFailed   = &Error{Code: "RECLAIM_FAILED", Message: "平台资源回收失败，设备已隔离", HTTPStatus: http.StatusServiceUnavailable}
+	ErrUnauthenticated        = &Error{Code: "INVALID_CREDENTIAL", Message: "凭证无效", HTTPStatus: http.StatusUnauthorized}
+	ErrForbidden              = &Error{Code: "FORBIDDEN", Message: "无权访问该资源", HTTPStatus: http.StatusForbidden}
+	ErrNotFound               = &Error{Code: "NOT_FOUND", Message: "资源不存在", HTTPStatus: http.StatusNotFound}
+	ErrInvalidRequest         = &Error{Code: "INVALID_REQUEST", Message: "请求参数无效", HTTPStatus: http.StatusUnprocessableEntity}
+	ErrConflict               = &Error{Code: "CONFLICT", Message: "请求与已绑定状态冲突", HTTPStatus: http.StatusConflict}
+	ErrAllocationConfirmation = &Error{Code: "ALLOCATION_CONFIRMATION_REQUIRED", Message: "设备正在被 AI 使用，请确认结束当前任务后再关闭分配", HTTPStatus: http.StatusConflict}
+	ErrUnavailable            = &Error{Code: "NO_MATCHING_DEVICE", Message: "没有满足条件的可用设备", HTTPStatus: http.StatusConflict}
+	ErrLeaseEnded             = &Error{Code: "LEASE_ENDED", Message: "租约已结束或已过期", HTTPStatus: http.StatusGone}
+	ErrDeviceOffline          = &Error{Code: "DEVICE_DISCONNECTED", Message: "租约链路当前不可用", HTTPStatus: http.StatusServiceUnavailable}
+	ErrClosed                 = &Error{Code: "SERVICE_CLOSED", Message: "租约管理器已关闭", HTTPStatus: http.StatusServiceUnavailable}
+	ErrStorage                = &Error{Code: "STORAGE_UNAVAILABLE", Message: "持久化操作暂不可用", HTTPStatus: http.StatusServiceUnavailable}
+	ErrReclaimFailed          = &Error{Code: "RECLAIM_FAILED", Message: "平台资源回收失败，设备已隔离", HTTPStatus: http.StatusServiceUnavailable}
 )
 
 func domain(base *Error, cause error) error {

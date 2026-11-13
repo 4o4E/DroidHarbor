@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/identity"
 )
 
@@ -344,9 +345,12 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 	if err != nil {
 		return Evidence{}, err
 	}
-	screen, err := r.readDisplay(probeCtx, observed.TransportID)
-	if err != nil {
-		return Evidence{}, err
+	screen, displayErr := r.readDisplay(probeCtx, evidence.Serial, observed.TransportID)
+	if displayErr != nil {
+		r.logger.Error("device_display_info_failed", "deviceId", deviceID, "linkId", linkID, "code", "DISPLAY_INFO_UNAVAILABLE", "cause", diagnostics.Cause(displayErr))
+		if probeCtx.Err() != nil {
+			return Evidence{}, probeCtx.Err()
+		}
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -383,8 +387,10 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 	if _, err = tx.ExecContext(ctx, `UPDATE device_links SET identity_evidence=?,observed_serial=?,enabled=1,last_seen_at=? WHERE id=?`, string(encoded), observed.Serial, time.Now().UTC().UnixMilli(), linkID); err != nil {
 		return Evidence{}, err
 	}
-	if err = saveScreenGeometry(ctx, tx, deviceID, screen); err != nil {
-		return Evidence{}, err
+	if displayErr == nil {
+		if err = saveScreenGeometry(ctx, tx, deviceID, screen); err != nil {
+			return Evidence{}, err
+		}
 	}
 	if err = record(ctx, tx, actorID, deviceID, linkID, "device.link.verify"); err != nil {
 		return Evidence{}, err
@@ -398,24 +404,36 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 	if err = tx.Commit(); err != nil {
 		return Evidence{}, err
 	}
+	r.mu.Lock()
+	if r.ready && r.version == version && epoch.Err() == nil {
+		if displayErr != nil {
+			r.issues[linkID] = "读取屏幕尺寸失败"
+		} else {
+			delete(r.issues, linkID)
+		}
+	}
+	r.mu.Unlock()
 	r.changed(deviceID)
 	return evidence, nil
 }
 
-// Refresh reconciles an already registered phone after its authorization was
-// handled on-device. It neither pairs/connects endpoints nor changes allocation.
+// Refresh re-reads ADB, reconnects a saved Wi-Fi route when needed and verifies
+// the same phone. It preserves allocation intent and never revives an AI task.
 func (r *Registry) Refresh(ctx context.Context, actorID, deviceID string) error {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
 	if err := r.refreshInventory(ctx); err != nil {
 		return err
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT l.id,coalesce(l.observed_serial,l.endpoint) FROM devices d LEFT JOIN device_links l ON l.device_id=d.id WHERE d.id=? ORDER BY CASE WHEN l.kind='usb' THEN 0 ELSE 1 END,l.id`, deviceID)
+	rows, err := r.db.QueryContext(ctx, `SELECT l.id,l.kind,coalesce(l.observed_serial,l.endpoint) FROM devices d LEFT JOIN device_links l ON l.device_id=d.id WHERE d.id=? ORDER BY CASE WHEN l.kind='usb' THEN 0 ELSE 1 END,l.id`, deviceID)
 	if err != nil {
 		return err
 	}
-	found, online, candidate := false, false, ""
+	found, online, unauthorized := false, false, false
+	candidate, wireless, retryOnline := "", "", ""
 	for rows.Next() {
-		var linkID, serial sql.NullString
-		if err = rows.Scan(&linkID, &serial); err != nil {
+		var linkID, kind, serial sql.NullString
+		if err = rows.Scan(&linkID, &kind, &serial); err != nil {
 			rows.Close()
 			return err
 		}
@@ -423,13 +441,22 @@ func (r *Registry) Refresh(ctx context.Context, actorID, deviceID string) error 
 		if !linkID.Valid {
 			continue
 		}
+		if wireless == "" && kind.String == "wifi" {
+			wireless = linkID.String
+		}
 		r.mu.RLock()
 		if current := r.live[linkID.String]; current != nil && current.ctx.Err() == nil {
 			online = true
+			if retryOnline == "" && r.issues[linkID.String] != "" {
+				retryOnline = linkID.String
+			}
 		}
 		observed, exists := r.discovered[serial.String]
 		if candidate == "" && r.ready && exists && !r.ambiguous[serial.String] && observed.State == "device" && observed.TransportID != 0 {
 			candidate = linkID.String
+		}
+		if exists && observed.State == "unauthorized" {
+			unauthorized = true
 		}
 		r.mu.RUnlock()
 	}
@@ -440,10 +467,48 @@ func (r *Registry) Refresh(ctx context.Context, actorID, deviceID string) error 
 		return &Error{Code: "DEVICE_NOT_FOUND", Message: "设备不存在", Status: 404}
 	}
 	if !online {
+		if candidate == "" && unauthorized {
+			return &Error{Code: "DEVICE_UNAUTHORIZED", Message: "请在手机上允许调试连接后再刷新", Status: 503}
+		}
+		if candidate == "" && wireless != "" {
+			if err = r.Connect(ctx, actorID, deviceID, wireless); err != nil {
+				return err
+			}
+			link, _, lookupErr := r.registered(ctx, deviceID, wireless)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if err = r.refreshInventory(ctx); err != nil {
+				// A newer tracker observation wins over this one-shot read.
+				var stateError *Error
+				r.mu.RLock()
+				observed, exists := r.discovered[link.serial]
+				current := r.ready && exists && !r.ambiguous[link.serial] && observed.State == "device" && observed.TransportID != 0
+				r.mu.RUnlock()
+				if !errors.As(err, &stateError) || stateError.Code != "DEVICE_STATE_CHANGED" || !current {
+					return err
+				}
+			}
+			candidate = wireless
+		}
 		if candidate == "" {
-			return &Error{Code: "DEVICE_DISCONNECTED", Message: "手机仍未授权或链路未连接；请完成手机确认后再同步", Status: 503}
+			return &Error{Code: "DEVICE_DISCONNECTED", Message: "设备仍未连接，请检查 USB 连接或手机无线调试状态后再刷新", Status: 503}
 		}
 		if _, err = r.Verify(ctx, actorID, deviceID, candidate); err != nil {
+			return err
+		}
+	} else if retryOnline != "" {
+		// Repair failed metadata without replacing the verified live generation.
+		if _, err = r.Verify(ctx, actorID, deviceID, retryOnline); err != nil {
+			return err
+		}
+	}
+	var allocation string
+	if err = r.db.QueryRowContext(ctx, `SELECT allocation_state FROM devices WHERE id=?`, deviceID).Scan(&allocation); err != nil {
+		return err
+	}
+	if allocation == "quarantined" || allocation == "reclaiming" {
+		if err = r.manager.RetryRecovery(ctx, deviceID); err != nil {
 			return err
 		}
 	}

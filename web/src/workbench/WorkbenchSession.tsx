@@ -4,11 +4,13 @@ import type { MediaSession } from '@/media/types'
 import { deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { useClipboardHistory } from './ClipboardHistory'
 import { PhoneView } from './PhoneView'
+import { useInitializedDevice } from '@/devices/DeviceMetrics'
 
 export type WorkbenchView = { key: string; deviceId: string; mode: SessionMode; instance: number; until: number }
 export const workbenchViewKey = (deviceId: string, mode: SessionMode) => `${deviceId}:${mode}`
 export function mediaStateLabel(device: Device, session?: MediaSession) {
-  return device.connectionState !== 'online' ? deviceStatus(device) : session?.status === 'failed' ? '视频连接失败' : session?.status === 'closed' ? '视频已关闭' : session?.ready ? '画面已就绪' : session?.status === 'connected' ? '等待画面' : '正在连接视频'
+  if (device.connectionState === 'online' && device.runtime?.powerState !== 'active' && !session?.sessionId) return device.runtime?.powerState === 'failed' ? '设备保活异常' : '正在初始化设备状态'
+  return device.connectionState !== 'online' ? deviceStatus(device) : session?.status === 'recovering' ? '正在恢复视频' : session?.status === 'failed' ? '视频连接失败' : session?.status === 'closed' ? '视频已关闭' : session?.ready ? '画面已就绪' : session?.status === 'connected' ? '等待画面' : '正在连接视频'
 }
 
 type Props = {
@@ -24,15 +26,11 @@ type Props = {
 // input authority and visibility change; sidebar canvases have their own freeze.
 export function WorkbenchSession({ view, device, selected, after, availableArea, onSession }: Props) {
   const [allowed, setAllowed] = useState(true)
-  const hasBeenOnline = useRef(device.connectionState === 'online')
   const reconnectTimer = useRef<number | undefined>(undefined)
   const history = useClipboardHistory(device.deviceId)
-  useEffect(() => {
-    if (device.connectionState === 'online') hasBeenOnline.current = true
-    else if (hasBeenOnline.current) setAllowed(false)
-  }, [device.connectionState])
+  const initialized = useInitializedDevice(device)
   useEffect(() => () => window.clearTimeout(reconnectTimer.current), [])
-  const session = useMediaSession(device.deviceId, view.mode, device.connectionState === 'online' && allowed, history.record, { active: selected, after })
+  const session = useMediaSession(device.deviceId, view.mode, initialized && allowed, history.record, { active: selected, after })
   useLayoutEffect(() => { onSession(view.key, session) }, [onSession, session, view.key])
   useLayoutEffect(() => () => onSession(view.key, null), [onSession, view.key])
   const reconnect = () => {

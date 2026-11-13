@@ -10,6 +10,7 @@ import type { MediaSession } from '@/media/types'
 import { deviceDisplaySize, deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { WorkbenchTools } from './WorkbenchTools'
 import { WorkbenchSession, mediaStateLabel, workbenchViewKey, type WorkbenchView } from './WorkbenchSession'
+import { DeviceMetrics } from '@/devices/DeviceMetrics'
 import { errorMessage } from '@/lib/api'
 import { compactWindowSize } from './compactWindowSize'
 
@@ -104,8 +105,9 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
               const selected = item.deviceId === device.deviceId
               const size = selected ? displaySize : deviceDisplaySize(item)
               return <ToggleGroupItem key={item.deviceId} value={item.deviceId} aria-label={`切换到${deviceName(item)}`} className={`device-list-item ${item.connectionState !== 'online' ? 'device-unavailable' : ''}`}>
+              <span className="device-list-heading"><span className="device-list-name">{deviceName(item)}</span><span className="device-occupancy" role="img" aria-label={item.allocationState === 'leased' ? '已分配' : '未分配'} title={item.allocationState === 'leased' ? '已分配给 AI 任务' : '未分配给 AI 任务'}>{item.allocationState === 'leased' ? <CircleDot /> : <Circle />}</span></span>
               <DevicePreview device={item} compact poll={false} videoRef={selected ? session?.videoRef : undefined} videoReady={selected && !!session?.ready} captureRef={selected ? previewCapture : undefined} />
-              <span className="device-list-info"><span className="device-list-name">{deviceName(item)}</span><span className="device-occupancy" role="img" aria-label={item.allocationState === 'leased' ? '已分配' : '未分配'} title={item.allocationState === 'leased' ? '已分配给 AI 任务' : '未分配给 AI 任务'}>{item.allocationState === 'leased' ? <CircleDot /> : <Circle />}</span>
+              <span className="device-list-info">
                 <span className="device-exceptions">
                   {deviceNeedsVerification(item) ? <ShieldAlert aria-label="待核验"><title>待核验</title></ShieldAlert> : item.connectionState !== 'online' ? <Unplug aria-label="设备不可用"><title>{deviceStatus(item)}</title></Unplug> : null}
                   {item.allocationState === 'maintenance' && <Wrench aria-label="维护中"><title>维护中</title></Wrench>}
@@ -114,6 +116,7 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
                 </span>
                 <span className={`device-video-state ${selected && session?.status === 'failed' ? 'text-destructive' : ''}`}>{selected && <span className="flex items-center gap-1" title={`当前页面：${stateLabel}`}><Video />{stateLabel}</span>}{size && <span>{size.width} × {size.height}{selected && session?.ready && <><br />{session.framesPerSecond.toFixed(1)} fps</>}</span>}</span>
               </span>
+              <DeviceMetrics device={item} compact />
             </ToggleGroupItem>})}
           </ToggleGroup>
         </aside>

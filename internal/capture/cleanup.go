@@ -57,7 +57,7 @@ func (m *Manager) authorizeCleanup(ctx context.Context, link leases.Link, id, bo
 	if err != nil {
 		return err
 	}
-	if owner != id || device != link.DeviceID || storedBoot != bootID || kind != resourceKind || state == "cleaned" {
+	if owner != id || device != link.DeviceID || storedBoot != bootID || kind != m.kind() || state == "cleaned" {
 		return diagnostics.New("capture cleanup ownership changed")
 	}
 	var current locator
@@ -92,7 +92,7 @@ func (m *Manager) cleanup(ctx context.Context, s *Stream) (cleanupErr error) {
 		m.recordCleanupFailure(s.id, "LINK_UNAVAILABLE")
 		return fmt.Errorf("%w: pinned link unavailable", ErrCleanupDeferred)
 	}
-	cleaning, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaning',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND state!='cleaned'`, s.id, ownerKind, s.id, s.deviceID, m.bootID, resourceKind)
+	cleaning, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaning',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND state!='cleaned'`, s.id, ownerKind, s.id, s.deviceID, m.bootID, m.kind())
 	if err != nil {
 		return err
 	}
@@ -111,7 +111,7 @@ func (m *Manager) cleanup(ctx context.Context, s *Stream) (cleanupErr error) {
 		m.recordCleanupFailure(s.id, "CLEANUP_FAILED")
 		return err
 	}
-	res, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaned',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND locator=? AND state!='cleaned'`, s.id, ownerKind, s.id, s.deviceID, m.bootID, resourceKind, mustJSON(s.resource))
+	res, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaned',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND locator=? AND state!='cleaned'`, s.id, ownerKind, s.id, s.deviceID, m.bootID, m.kind(), mustJSON(s.resource))
 	if err != nil {
 		return err
 	}
@@ -126,7 +126,7 @@ func (m *Manager) cleanup(ctx context.Context, s *Stream) (cleanupErr error) {
 }
 
 func (m *Manager) setCleanupFailure(ctx context.Context, id, code string) error {
-	_, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='failed',cleanup_error=? WHERE id=? AND owner_kind=? AND owner_id=? AND kind=? AND state!='cleaned'`, code, id, ownerKind, id, resourceKind)
+	_, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='failed',cleanup_error=? WHERE id=? AND owner_kind=? AND owner_id=? AND kind=? AND state!='cleaned'`, code, id, ownerKind, id, m.kind())
 	return err
 }
 
@@ -263,12 +263,26 @@ func helperProbeCommand(jar string) string {
 
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
-func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
+type recoveryFlight struct {
+	done     chan struct{}
+	complete bool
+	err      error
+}
+
+func (m *Manager) Recover(ctx context.Context, deviceID string) (complete bool, recoveryErr error) {
 	if ctx == nil {
 		return false, diagnostics.New("capture recovery context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return false, err
+	}
+	if m.controlOnly {
+		// Previous video cleanup can restore panel power or request sleep.
+		// Finish that owned work before starting the online power controller.
+		complete, err := m.videoOwner.Recover(ctx, deviceID)
+		if err != nil || !complete {
+			return complete, err
+		}
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -278,16 +292,42 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 	if current := m.streams[deviceID]; current != nil {
 		live := current.live
 		m.mu.Unlock()
+		if m.controlOnly {
+			selected, _, err := m.source.ReadLink(ctx, deviceID)
+			if err == nil && selected == current.link && live && current.ctx.Err() == nil {
+				return true, nil
+			}
+			// Power control follows the selected incarnation. Retire its prior
+			// owner before a replacement; viewing captures remain independent.
+			if err := current.Stop(ctx); err != nil {
+				return false, err
+			}
+			return m.Recover(ctx, deviceID)
+		}
 		return live && current.ctx.Err() == nil && m.source.HasLink(current.link), nil
 	}
-	if m.recovering[deviceID] {
+	if flight := m.recovering[deviceID]; flight != nil {
 		m.mu.Unlock()
-		return false, nil
+		select {
+		case <-flight.done:
+			return flight.complete, flight.err
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
 	}
-	m.recovering[deviceID] = true
+	// Foreground media recovery joins the same ownership check already running
+	// after reconnect; "in progress" is not an unconfirmed cleanup result.
+	flight := &recoveryFlight{done: make(chan struct{})}
+	m.recovering[deviceID] = flight
 	m.mu.Unlock()
-	defer func() { m.mu.Lock(); delete(m.recovering, deviceID); m.mu.Unlock() }()
-	rows, err := m.db.QueryContext(ctx, `SELECT id,owner_id,boot_id,locator FROM owned_resources WHERE device_id=? AND owner_kind=? AND kind=? AND state!='cleaned'`, deviceID, ownerKind, resourceKind)
+	defer func() {
+		m.mu.Lock()
+		flight.complete, flight.err = complete, recoveryErr
+		delete(m.recovering, deviceID)
+		close(flight.done)
+		m.mu.Unlock()
+	}()
+	rows, err := m.db.QueryContext(ctx, `SELECT id,owner_id,boot_id,locator FROM owned_resources WHERE device_id=? AND owner_kind=? AND kind=? AND state!='cleaned'`, deviceID, ownerKind, m.kind())
 	if err != nil {
 		return false, err
 	}
@@ -332,7 +372,7 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 		if loc.PID != 0 && (!validBootUUID(loc.BootUUID) || loc.StartTicks == 0) {
 			return false, diagnostics.New("invalid capture process identity journal")
 		}
-		cleaning, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaning',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND locator=? AND state!='cleaned'`, x.id, ownerKind, x.id, deviceID, x.boot, resourceKind, x.encoded)
+		cleaning, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaning',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND locator=? AND state!='cleaned'`, x.id, ownerKind, x.id, deviceID, x.boot, m.kind(), x.encoded)
 		if err != nil {
 			return false, err
 		}
@@ -353,7 +393,7 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (bool, error) {
 			}
 			return false, err
 		}
-		result, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaned',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND locator=? AND state!='cleaned'`, x.id, ownerKind, x.id, deviceID, x.boot, resourceKind, x.encoded)
+		result, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='cleaned',cleanup_error=NULL WHERE id=? AND owner_kind=? AND owner_id=? AND device_id=? AND boot_id=? AND kind=? AND locator=? AND state!='cleaned'`, x.id, ownerKind, x.id, deviceID, x.boot, m.kind(), x.encoded)
 		if err != nil {
 			return false, err
 		}

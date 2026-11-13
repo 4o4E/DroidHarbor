@@ -470,10 +470,10 @@ func (m *Manager) RevokeCaller(ctx context.Context, callerID, adminSessionID str
 	return errors.Join(recoveryErrors...)
 }
 
-// SetMaintenance revokes AI access before persisting a maintenance transition.
+// SetMaintenance requires confirmation of the current AI lease before revoking it.
 // DeviceSource.Recover must preserve independent human-session resources.
-func (m *Manager) SetMaintenance(ctx context.Context, deviceID string, requested bool, adminSessionID string) error {
-	if ctx == nil || deviceID == "" || adminSessionID == "" {
+func (m *Manager) SetMaintenance(ctx context.Context, deviceID string, requested bool, adminSessionID string, confirmedGeneration *int64) error {
+	if ctx == nil || deviceID == "" || adminSessionID == "" || (!requested && confirmedGeneration != nil) {
 		return ErrInvalidRequest
 	}
 	m.mu.Lock()
@@ -484,18 +484,26 @@ func (m *Manager) SetMaintenance(ctx context.Context, deviceID string, requested
 	now := m.now().UTC()
 	var runtimeLeases []*leaseState
 	if requested {
-		m.blockedDevices[deviceID] = struct{}{}
+		// Bind confirmation to this lease generation: a new task must receive
+		// a new confirmation, even if the dialog was already open.
 		for _, state := range m.leases {
 			if state.lease.DeviceID == deviceID && state.lease.Status == LeaseActive {
-				state.lease.Status = LeaseEnded
-				state.lease.EndReason = "maintenance_requested"
-				ended := now
-				state.lease.EndedAt = &ended
-				stopExpiryTicket(state)
-				m.closeGrantsLocked(state)
-				m.publishLeaseChange(state.lease, true)
+				if confirmedGeneration == nil || *confirmedGeneration != state.lease.Generation {
+					m.mu.Unlock()
+					return ErrAllocationConfirmation
+				}
 				runtimeLeases = append(runtimeLeases, state)
 			}
+		}
+		m.blockedDevices[deviceID] = struct{}{}
+		for _, state := range runtimeLeases {
+			state.lease.Status = LeaseEnded
+			state.lease.EndReason = "maintenance_requested"
+			ended := now
+			state.lease.EndedAt = &ended
+			stopExpiryTicket(state)
+			m.closeGrantsLocked(state)
+			m.publishLeaseChange(state.lease, true)
 		}
 	}
 	fail := func(err error) error {

@@ -23,9 +23,25 @@ func serverOptions(scid int32, settings Settings) ([]string, error) {
 		"max_size=" + strconv.Itoa(settings.MaxSize),
 		"max_fps=" + strconv.Itoa(settings.MaxFPS),
 		"video_bit_rate=" + strconv.Itoa(settings.BitRate),
-		"downsize_on_error=false", "power_on=true", "stay_awake=false",
-		"keep_active=true", "show_touches=false", "clipboard_autosync=true",
-		"cleanup=true", "power_off_on_close=true", "send_dummy_byte=true", "send_device_meta=true",
+		"downsize_on_error=false", "power_on=false", "stay_awake=false",
+		"keep_active=false", "show_touches=false", "clipboard_autosync=true",
+		"cleanup=false", "power_off_on_close=false", "send_dummy_byte=true", "send_device_meta=true",
 		"send_stream_meta=true", "send_frame_meta=true", "tunnel_forward=true",
+	}, nil
+}
+
+// The online device controller owns activity and display power independently of
+// video viewers. Global settings stay untouched; the platform journals cleanup.
+func powerServerOptions(scid int32) ([]string, error) {
+	if scid <= 0 {
+		return nil, errors.New("invalid scrcpy scid")
+	}
+	return []string{
+		"scid=" + fmt.Sprintf("%08x", uint32(scid)),
+		"video=false", "audio=false", "control=true",
+		"power_on=true", "stay_awake=false", "keep_active=true",
+		"show_touches=false", "clipboard_autosync=false",
+		"cleanup=false", "power_off_on_close=false",
+		"send_dummy_byte=true", "send_device_meta=false", "tunnel_forward=true",
 	}, nil
 }

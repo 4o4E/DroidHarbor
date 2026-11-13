@@ -7,12 +7,12 @@ export type DevicePreviewFrame = {
   linkGeneration: string
 }
 
-export function useDevicePreview(deviceId: string, linkSignature: string, enabled: boolean) {
+export function useDevicePreview(deviceId: string, linkSignature: string, enabled: boolean, poll: boolean) {
   return useQuery({
     queryKey: ['device-preview', deviceId, linkSignature],
     enabled,
     queryFn: async ({ signal }): Promise<DevicePreviewFrame> => {
-      const response = await apiResponse(`/devices/${encodeURIComponent(deviceId)}/preview`, { signal })
+      const response = await apiResponse(`/devices/${encodeURIComponent(deviceId)}/preview${poll ? '' : '?cached=true'}`, { signal })
 
       const capturedAt = response.headers.get('X-DroidHarbor-Captured-At')
       const linkGeneration = response.headers.get('X-DroidHarbor-Link-Generation')
@@ -35,7 +35,7 @@ export function useDevicePreview(deviceId: string, linkSignature: string, enable
     retry: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
-    refetchInterval: 5_000,
+    refetchInterval: poll ? 5_000 : false,
     refetchIntervalInBackground: false,
   })
 }

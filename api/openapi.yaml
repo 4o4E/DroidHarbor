@@ -211,7 +211,7 @@ paths:
       security: [{adminSession: []}]
       responses:
         '200':
-          description: 当前未登记链路快照；已登记 endpoint/observed serial 被排除，空数组表示没有待添加链路
+          description: 当前未登记链路快照；已登记 endpoint、observed serial 及当前 mDNS 广播可确认属于同一 endpoint 的服务名别名被排除。只过滤相同连接地址，不按 IP 或型号判断物理身份；空数组表示没有待添加链路。
           content:
             application/json:
               schema:
@@ -220,16 +220,92 @@ paths:
                 properties:
                   devices:
                     type: array
-                    items:
-                      type: object
-                      required: [serial, state, transportId]
-                      properties:
-                        serial: {type: string}
-                        state: {type: string}
-                        transportId: {type: integer, minimum: 0}
-                        model: {type: string}
-                        product: {type: string}
+                    items: {$ref: '#/components/schemas/DiscoveredDevice'}
         '401': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/device-discovery/wireless:
+    get:
+      operationId: scanWirelessDevices
+      summary: 管理员扫描 ADB Server 所在局域网的无线 ADB 广播
+      description: 读取官方 ADB 的 mDNS 快照，不遍历 IP/端口，不建立连接、配对或设备记录。已登记 endpoint 或已知 mDNS serial 被排除。无广播返回空数组；ADB/mDNS 故障明确返回 WIRELESS_DISCOVERY_UNAVAILABLE，不作为空结果。
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 当前仍在广播的未登记无线连接及配对服务，不代表已连接或已核验
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [services]
+                properties:
+                  services: {type: array, items: {$ref: '#/components/schemas/WirelessService'}}
+        '401': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/device-discovery/wireless/connect:
+    post:
+      operationId: connectWirelessDevice
+      summary: 显式连接选定的当前无线广播，不自动登记
+      description: 动作前重新核对完整服务名称、类型与地址；变化返回 WIRELESS_SERVICE_CHANGED。成功更新当前 ADB 待添加清单，后续通过既有登记接口核验硬件、保存尺寸并关联原设备。外部动作结果未知返回 ADB_RESULT_UNKNOWN；连接已确认但清单未同步返回 WIRELESS_INVENTORY_UNAVAILABLE，无需重放连接。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/WirelessService'
+                - type: object
+                  properties:
+                    type: {type: string, enum: [_adb._tcp, _adb-tls-connect._tcp]}
+      responses:
+        '200':
+          description: 无线连接已确认，返回未登记的当前 ADB 清单
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices: {type: array, items: {$ref: '#/components/schemas/DiscoveredDevice'}}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/device-discovery/wireless/pair:
+    post:
+      operationId: pairWirelessDevice
+      summary: 显式配对当前广播的临时配对服务
+      description: 配对地址与连接地址独立；动作前重新核对广播。配对码不持久化或写入普通日志，不创建设备记录；配对成功后重新扫描，再显式连接及登记。无法确认结果时不自动重放。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, type, endpoint, pairingCode]
+              properties:
+                name: {type: string}
+                type: {type: string, const: _adb-tls-pairing._tcp}
+                endpoint: {type: string}
+                pairingCode: {type: string, writeOnly: true}
+      responses:
+        '204':
+          description: 官方 ADB 已确认配对，不代表设备已登记或可分配
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
   /api/v1/devices:
     get:
@@ -340,7 +416,7 @@ paths:
     patch:
       operationId: updateDevice
       summary: 按预期配置版本修改信息或启停分配
-      description: 名称/标签与分配启停分别提交；后者含撤销及外部回收，不能伪装成与标签修改原子完成。版本包含本次启动标识，重启或冲突后必须刷新。回收失败也可能已持久化维护意图，失败后须读取最新视图。
+      description: 名称/标签与分配启停分别提交；后者含撤销及外部回收。开启及空闲关闭直接生效；AI 占用时，关闭请求须携带经用户确认的当前 leaseGeneration，否则返回 ALLOCATION_CONFIRMATION_REQUIRED/409 且不终止任务；旧任务的确认不能终止后续新任务。版本包含本次启动标识，重启或冲突后必须刷新。回收失败也可能已持久化分配意图，失败后须读取最新视图。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -358,10 +434,11 @@ paths:
                 displayName: {type: string}
                 tags: {type: array, items: {type: string}}
                 maintenanceRequested: {type: boolean}
+                confirmedLeaseGeneration: {type: integer, format: int64, minimum: 0, description: 关闭分配时用户确认的当前 AI 任务代次；只与 maintenanceRequested=true 一起提交}
               oneOf:
                 - required: [maintenanceRequested]
                   properties: {displayName: false, tags: false}
-                - properties: {maintenanceRequested: false}
+                - properties: {maintenanceRequested: false, confirmedLeaseGeneration: false}
                   anyOf: [{required: [displayName]}, {required: [tags]}]
       responses:
         '204': {description: 修改完成；读取设备视图确认当前分配状态}
@@ -376,8 +453,8 @@ paths:
       - $ref: '#/components/parameters/ID'
     post:
       operationId: refreshDevice
-      summary: 手机授权处理完成后同步已登记设备状态
-      description: 读取当前 ADB 清单，保持订阅代次，并对该设备当前可用链路完成必要身份核验。不配对、connect、切换任务链路或更改维护/标签。更新的订阅状态优先于较慢的一次性查询；连接仍未授权或离线时返回明确错误，调用方应读取最新视图。
+      summary: 刷新已登记设备，必要时重连已保存的无线地址
+      description: 读取当前 ADB 清单并核验该手机；已断开的无线设备尝试已登记连接地址，USB 设备重新读取连接与授权状态。更新的订阅状态优先于较慢的一次性查询；离线、未授权、连接失败或身份不符返回明确错误。已隔离或待清理设备按既有恢复流程重新核验资源。保留名称、标签及分配意图，不配对、不新增链路、不复活旧 AI 任务；无线地址变化时仍从新增设备流程显式扫描接入。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -405,10 +482,17 @@ paths:
         仅管理员 Cookie 可访问；调用凭证或任务 bearer 本身不授予截图权限。
         读取既有已核验链路，不自动连接、登记或创建租约。
         同一完整链路身份的并发请求共用采集，采集开始间隔至少五秒；
-        失败、离线或链路变化时不返回旧画面。空闲时不主动截图。
+        普通采集失败不以旧图兜底；离线或链路变化使旧画面失效。
+        已登记设备核验上线后主动初始化一张封面，空闲时不循环截图。
+        cached=true 仅读取当前链路最近封面，不发起 ADB 截图；保留真实采集时间。
         JPEG 最长边不超过 480 像素，保留比例；不是原始 PNG 截图接口。
         Capture 时间属于实际采集，不是本次 HTTP 响应时间。
       security: [{adminSession: []}]
+      parameters:
+        - in: query
+          name: cached
+          description: 仅读取上线初始化或最近成功的封面；尚不可用返回 PREVIEW_NOT_READY/404
+          schema: {type: boolean, default: false}
       responses:
         '200':
           description: 已重新核验会话及链路身份的 JPEG，Cache-Control 为 private, no-store
@@ -425,6 +509,7 @@ paths:
           content:
             image/jpeg:
               schema: {type: string, format: binary}
+        '400': {$ref: '#/components/responses/Error'}
         '401': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
@@ -755,7 +840,8 @@ paths:
         每次连接首先发送 resync，必须随后读取权威快照。
         Last-Event-ID 不提供持久化重放保证；重新连接、bootId 改变或版本缺口均重新读取快照。
         SSE event 名为 change，data 是 JSON，且仅有 eventId、bootId、
-        entityVersion、entityType、entityId。entityType 为 resync/device/lease/caller；
+        entityVersion、entityType、entityId。entityType 为 resync/device/device-runtime/lease/caller；
+        device-runtime 仅发送给管理员，用于重新读取最新运行态，不向任务泄露指标通知；
         resync 的 entityId 为 snapshot。entityVersion 是 boot 内单调递增的通知序号，
         不承诺不同授权范围内连续，不是设备配置 PATCH 所用 version。
         taskId、路由设备字段、凭证和 endpoint 不进入公共通知。
@@ -795,6 +881,9 @@ paths:
         确认可以是该代次关键帧之后实际发送的帧，不要求浏览器恰好报告 IDR 本身。
         旧代次输入拒绝；帧确认不包含设备操作，确认失败不能重放此前的设备输入。
         dispatched 只表示已交给设备通道；unknown/RESULT_UNKNOWN 不是确定失败，禁止自动重试。
+        当前目标瞬时媒体故障可自动重建观看会话，不重放设备输入；CAPTURE_START_INTERRUPTED 表示可恢复的采集启动传输中断，
+        CAPTURE_START_FAILED 表示其他启动失败，不自动重试；清理未确认或登录失效时停止恢复。
+        recoveryAttempt 仅用于诊断，不提供权限；关联 media_recovery_session_prepared 和同 sessionId 的 media_frame_presented 判断实际出画面。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -810,6 +899,7 @@ paths:
               properties:
                 mode: {type: string, enum: [readonly, control]}
                 offer: {type: string, maxLength: 65536}
+                recoveryAttempt: {type: integer, minimum: 0, description: 本窗口当前恢复次数，首次为 0，仅用于日志关联}
       responses:
         '201':
           description: 本次人工会话，不在 URL 中携带凭证
@@ -818,6 +908,7 @@ paths:
               schema: {$ref: '#/components/schemas/MediaSession'}
         '401': {$ref: '#/components/responses/Error'}
         '403': {$ref: '#/components/responses/Error'}
+        '408': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
@@ -1146,6 +1237,23 @@ components:
               message: {type: string}
               requestId: {type: string}
   schemas:
+    DiscoveredDevice:
+      type: object
+      required: [serial, state, transportId]
+      properties:
+        serial: {type: string}
+        state: {type: string}
+        transportId: {type: integer, minimum: 0}
+        model: {type: string}
+        product: {type: string}
+    WirelessService:
+      type: object
+      additionalProperties: false
+      required: [name, type, endpoint]
+      properties:
+        name: {type: string, description: mDNS 实例名称，不作为硬件身份证据}
+        type: {type: string, enum: [_adb._tcp, _adb-tls-connect._tcp, _adb-tls-pairing._tcp]}
+        endpoint: {type: string, description: 广播中实际 IP 与端口，配对与连接端口分别使用}
     MediaSession:
       type: object
       required: [sessionId, deviceId, mode, answer, controlProtocol]
@@ -1278,6 +1386,38 @@ components:
         video:
           $ref: '#/components/schemas/DisplayGeometry'
           description: 最近实际视频 metadata 观测；可能与主屏尺寸存在编码对齐差异
+    DeviceMetrics:
+      type: object
+      description: 管理员最新整机观测；每设备共享五秒采样，首个 CPU 样本仅建基线，未知或失败字段为 null，不存历史
+      required: [observedAt, cpuPercent, memoryUsedBytes, memoryTotalBytes, batteryTemperatureC, batteryPercent, powerConnected, chargingStatus]
+      properties:
+        observedAt: {type: string, format: date-time}
+        cpuPercent: {type: [number, 'null'], minimum: 0, maximum: 100}
+        memoryUsedBytes: {type: [integer, 'null'], minimum: 0}
+        memoryTotalBytes: {type: [integer, 'null'], minimum: 0}
+        batteryTemperatureC: {type: [number, 'null'], description: 来自电池服务的摄氏温度，不代表 CPU 温度}
+        batteryPercent: {type: [number, 'null'], minimum: 0, maximum: 100}
+        powerConnected: {type: [boolean, 'null'], description: 接电不等于正在充电}
+        chargingStatus: {type: [string, 'null'], enum: [unknown, charging, discharging, not-charging, full, null]}
+    DeviceRuntimeInfo:
+      type: object
+      description: 仅管理员可见的当前链路运行态，不改变配置 version；离线或代次结束不返回旧状态
+      required: [linkId, linkGeneration, powerState, coverState, issues]
+      properties:
+        linkId: {type: string}
+        linkGeneration: {type: integer, minimum: 1}
+        powerState: {type: string, enum: [starting, active, failed], description: 在线控制专用进程及实体熄屏请求确认状态，不代表密码锁已解除}
+        coverState: {type: string, enum: [pending, ready, failed]}
+        metrics: {$ref: '#/components/schemas/DeviceMetrics'}
+        issues:
+          type: array
+          items:
+            type: object
+            required: [stage, code, message]
+            properties:
+              stage: {type: string, enum: [power, cover, cpu, memory, battery]}
+              code: {type: string}
+              message: {type: string}
     Device:
       type: object
       required: [deviceId, displayName, tags, connectionState, allocationState]
@@ -1289,9 +1429,12 @@ components:
         allocationState: {type: string, enum: [available, leased, reclaiming, quarantined, maintenance]}
         version: {type: string, description: 仅管理员可见的配置修改版本；不表示媒体或连接版本}
         maintenanceRequested: {type: boolean, description: 仅管理员可见}
+        leaseGeneration: {type: integer, format: int64, minimum: 0, description: 仅管理员可见；分配确认绑定的任务代次，新任务递增}
         displayInfo:
           $ref: '#/components/schemas/DeviceDisplayInfo'
           description: 仅管理员可见；按较新的有效屏幕或视频观测预布局
+        runtime:
+          $ref: '#/components/schemas/DeviceRuntimeInfo'
         links:
           type: array
           description: 仅管理员可见

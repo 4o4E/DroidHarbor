@@ -177,7 +177,7 @@ func TestIdentityAssociationRejectsDuplicateAndWrongHardware(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, view := range views {
-		if view.Links != nil || view.Version != "" || view.MaintenanceRequested != nil {
+		if view.Links != nil || view.Version != "" || view.MaintenanceRequested != nil || view.LeaseGeneration != nil {
 			t.Fatal("caller summary exposed administrator metadata")
 		}
 	}
@@ -653,8 +653,23 @@ func TestRestartDisplayFailureDoesNotBlockOtherPersistedDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 	links := restarted.OnlineLinks()
-	if len(links) != 1 || links[0].DeviceID != registered[1].DeviceID {
-		t.Fatalf("one display failure blocked a healthy persisted device: %+v", links)
+	if len(links) != 2 {
+		t.Fatalf("display metadata failure changed verified link availability: %+v", links)
+	}
+	views, _, err := restarted.List(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range views {
+		if view.ConnectionState != "online" {
+			t.Fatalf("verified device became unavailable: %+v", view)
+		}
+		if view.ID == registered[0].DeviceID && (len(view.Links) != 1 || view.Links[0].LastError == "") {
+			t.Fatalf("failed display observation was hidden: %+v", view)
+		}
+		if view.ID == registered[1].DeviceID && (len(view.Links) != 1 || view.Links[0].LastError != "") {
+			t.Fatalf("display failure contaminated another device: %+v", view)
+		}
 	}
 	for index, entry := range registered {
 		var name string

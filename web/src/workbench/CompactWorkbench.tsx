@@ -12,6 +12,7 @@ import { errorMessage } from '@/lib/api'
 import { downloadScreenshot } from '@/lib/screenshots'
 import { useErrorNotification } from '@/lib/notifications'
 import { compactWindowSize, PHONE_TOOLBAR_WIDTH } from './compactWindowSize'
+import { useDeviceRuntimeNotification, useInitializedDevice } from '@/devices/DeviceMetrics'
 
 type CompactWorkbenchProps = { initialDeviceId: string | null; initialMode: string | null }
 
@@ -44,18 +45,15 @@ function Unavailable({ invalidMode, message }: { invalidMode: boolean; message?:
 
 function CompactSession({ device, mode }: { device: Device; mode: SessionMode }) {
   const [sessionAllowed, setSessionAllowed] = useState(true)
-  const hasBeenOnline = useRef(device.connectionState === 'online')
+  useDeviceRuntimeNotification(device)
+  const initialized = useInitializedDevice(device)
   const needsVerification = deviceNeedsVerification(device)
   const [busy, setBusy] = useState(false)
   const cancelResize = useRef<(() => void) | null>(null)
   const initializedSize = useRef(false)
   const screenAreaRef = useRef<HTMLDivElement | null>(null)
   const [availableArea, setAvailableArea] = useState({ width: 0, height: 0 })
-  useEffect(() => {
-    if (device.connectionState === 'online') hasBeenOnline.current = true
-    else if (hasBeenOnline.current) setSessionAllowed(false)
-  }, [device.connectionState])
-  const session = useMediaSession(device.deviceId, mode, device.connectionState === 'online' && sessionAllowed)
+  const session = useMediaSession(device.deviceId, mode, initialized && sessionAllowed)
   const canControl = mode === 'control' && session.status === 'connected' && session.ready && !!session.sessionId
   const savedSize = deviceDisplaySize(device)
   const savedRatio = savedSize ? savedSize.width / savedSize.height : 0
@@ -143,7 +141,7 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
           </div>
           <div className="phone-frame" style={{ width: ratio ? frameWidth : '100%', height: ratio ? frameHeight : '100%' }} aria-label="设备画面">
             <VideoSurface session={session} mode={mode} className="size-full" />
-            {!session.ready && <div className="phone-placeholder"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState === 'online' ? session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{needsVerification ? '在主页面核验设备身份后即可投屏。' : session.error || deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
+            {!session.ready && <div className="phone-placeholder"><Empty><EmptyHeader><EmptyMedia variant="icon">{device.connectionState === 'online' ? <Monitor /> : <Unplug />}</EmptyMedia><EmptyTitle>{needsVerification ? '设备待核验' : device.connectionState === 'online' ? session.status === 'recovering' ? '正在恢复视频' : session.status === 'failed' ? '视频连接失败' : '等待设备画面' : '设备已离线'}</EmptyTitle><EmptyDescription>{needsVerification ? '在主页面完成手机授权和刷新后即可投屏。' : deviceStatus(device)}</EmptyDescription></EmptyHeader></Empty></div>}
           </div>
         </div>
       </section>

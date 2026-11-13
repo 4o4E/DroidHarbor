@@ -90,6 +90,27 @@ func New(ctx context.Context, source Source, client *adb.Client) *Manager {
 	return m
 }
 
+// Cached reads the latest frame without starting device I/O. Initial workbench
+// covers must not revive the periodic screenshot path when selection changes.
+func (m *Manager) Cached(ctx context.Context, deviceID string) (Snapshot, error) {
+	link, _, err := m.source.ReadLink(ctx, deviceID)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	key := cacheKey{link: link}
+	m.mu.Lock()
+	entry, found := m.entries[key]
+	if found {
+		entry.lastUsed = time.Now()
+		m.entries[key] = entry
+	}
+	m.mu.Unlock()
+	if !found {
+		return Snapshot{}, ErrNotReady
+	}
+	return m.validate(ctx, link, entry.snapshot, nil)
+}
+
 func (m *Manager) Get(ctx context.Context, deviceID string) (Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
@@ -112,8 +133,6 @@ func (m *Manager) Get(ctx context.Context, deviceID string) (Snapshot, error) {
 			m.mu.Unlock()
 			return m.validate(ctx, link, cached.snapshot, nil)
 		}
-		m.cacheSize -= len(cached.snapshot.JPEG)
-		delete(m.entries, key)
 	}
 	if pending := m.flights[key]; pending != nil {
 		m.mu.Unlock()
@@ -198,14 +217,18 @@ func (m *Manager) capture(key cacheKey, link leases.Link, linkCtx context.Contex
 	pending.err = err
 	if err == nil && !m.closed {
 		if len(pending.snapshot.JPEG) > maxCacheBytes {
-			err = ErrCapacity
-			pending.err = err
-		} else if m.makeRoomLocked(len(pending.snapshot.JPEG)) {
-			m.entries[key] = cacheEntry{result: result{snapshot: pending.snapshot}, lastUsed: time.Now(), startedAt: startedAt}
-			m.cacheSize += len(pending.snapshot.JPEG)
+			pending.err = ErrCapacity
 		} else {
-			err = ErrCapacity
-			pending.err = err
+			if previous, found := m.entries[key]; found {
+				m.cacheSize -= len(previous.snapshot.JPEG)
+				delete(m.entries, key)
+			}
+			if m.makeRoomLocked(len(pending.snapshot.JPEG)) {
+				m.entries[key] = cacheEntry{result: result{snapshot: pending.snapshot}, lastUsed: time.Now(), startedAt: startedAt}
+				m.cacheSize += len(pending.snapshot.JPEG)
+			} else {
+				pending.err = ErrCapacity
+			}
 		}
 	}
 	delete(m.flights, key)
@@ -312,7 +335,7 @@ func (m *Manager) evictLoop() {
 
 func (m *Manager) evictIdleLocked(now time.Time) {
 	for key, entry := range m.entries {
-		if now.Sub(entry.lastUsed) >= idleLifetime {
+		if !m.source.HasLink(key.link) && now.Sub(entry.lastUsed) >= idleLifetime {
 			m.cacheSize -= len(entry.snapshot.JPEG)
 			delete(m.entries, key)
 		}
@@ -343,6 +366,7 @@ func (m *Manager) Close() error {
 
 var (
 	ErrRateLimited   = errors.New("preview capture rate limited")
+	ErrNotReady      = errors.New("initial device cover is not available")
 	ErrCapacity      = errors.New("preview capacity exhausted")
 	ErrLinkChanged   = errors.New("device link changed during preview")
 	ErrInputTooLarge = errors.New("screenshot exceeds encoded input limit")

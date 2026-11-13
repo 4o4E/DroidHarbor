@@ -52,8 +52,10 @@ type Manager struct {
 	bootID          string
 	resourceFailure func(context.Context, string) error
 	closed          bool
+	controlOnly     bool
+	videoOwner      *Manager
 	streams         map[string]*Stream
-	recovering      map[string]bool
+	recovering      map[string]*recoveryFlight
 }
 
 type locator struct {
@@ -74,6 +76,7 @@ type Stream struct {
 	cancel           context.CancelFunc
 	frames           chan scrcpy.Packet
 	messages         chan scrcpy.DeviceMessage
+	displayPower     chan bool
 	done             chan struct{}
 	started          chan struct{}
 	startedOnce      sync.Once
@@ -120,7 +123,7 @@ func New(ctx context.Context, db *sql.DB, client *adb.Client, source Source, con
 		return nil, err
 	}
 	root, cancel := context.WithCancel(ctx)
-	return &Manager{db: db, adb: client, source: source, server: artifact, logger: logger, ctx: root, cancel: cancel, streams: make(map[string]*Stream), recovering: make(map[string]bool)}, nil
+	return &Manager{db: db, adb: client, source: source, server: artifact, logger: logger, ctx: root, cancel: cancel, streams: make(map[string]*Stream), recovering: make(map[string]*recoveryFlight)}, nil
 }
 
 func (m *Manager) SetBootID(id string) {
@@ -195,7 +198,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		m.mu.Unlock()
 		return nil, diagnostics.New("capture resource failure callback is not bound")
 	}
-	if m.recovering[deviceID] {
+	if m.recovering[deviceID] != nil {
 		m.mu.Unlock()
 		return nil, diagnostics.New("capture device recovery is in progress")
 	}
@@ -234,9 +237,17 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	streamCtx, cancelStream := context.WithCancel(m.ctx)
 	stopLink := context.AfterFunc(linkCtx, cancelStream)
 	stopStartup := context.AfterFunc(startCtx, cancelStream)
-	s := &Stream{manager: m, id: id, deviceID: deviceID, link: link, resource: resource, ctx: streamCtx, cancel: cancelStream, frames: make(chan scrcpy.Packet, videoQueueSize), messages: make(chan scrcpy.DeviceMessage, messageQueueSize), done: make(chan struct{}), started: make(chan struct{}), workersDone: make(chan struct{}), stopLink: stopLink, startupAuth: authorizeStartup}
+	var frames chan scrcpy.Packet
+	if !m.controlOnly {
+		frames = make(chan scrcpy.Packet, videoQueueSize)
+	}
+	var displayPower chan bool
+	if m.controlOnly {
+		displayPower = make(chan bool, 1)
+	}
+	s := &Stream{manager: m, id: id, deviceID: deviceID, link: link, resource: resource, ctx: streamCtx, cancel: cancelStream, frames: frames, messages: make(chan scrcpy.DeviceMessage, messageQueueSize), displayPower: displayPower, done: make(chan struct{}), started: make(chan struct{}), workersDone: make(chan struct{}), stopLink: stopLink, startupAuth: authorizeStartup}
 	m.mu.Lock()
-	if m.closed || m.recovering[deviceID] || m.streams[deviceID] != nil {
+	if m.closed || m.recovering[deviceID] != nil || m.streams[deviceID] != nil {
 		m.mu.Unlock()
 		stopLink()
 		cancelStream()
@@ -271,7 +282,7 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	defer stopStreamIO()
 	stage = "resource_journal"
 	var outstanding bool
-	if err := m.db.QueryRowContext(ioCtx, `SELECT EXISTS(SELECT 1 FROM owned_resources WHERE device_id=? AND owner_kind=? AND kind=? AND state!='cleaned')`, deviceID, ownerKind, resourceKind).Scan(&outstanding); err != nil {
+	if err := m.db.QueryRowContext(ioCtx, `SELECT EXISTS(SELECT 1 FROM owned_resources WHERE device_id=? AND owner_kind=? AND kind=? AND state!='cleaned')`, deviceID, ownerKind, m.kind()).Scan(&outstanding); err != nil {
 		return nil, err
 	}
 	if outstanding {
@@ -303,7 +314,12 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	if err != nil {
 		return nil, err
 	}
-	cmd, err := startupCommand(jar, gateNonce, scid, settings)
+	var cmd string
+	if m.controlOnly {
+		cmd, err = startupPowerCommand(jar, gateNonce, scid)
+	} else {
+		cmd, err = startupCommand(jar, gateNonce, scid, settings)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -371,46 +387,57 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		case <-timer.C:
 		}
 	}
-	stage = "open_video"
-	video, err := m.adb.Open(s.ctx, link.TransportID, "localabstract:"+socket, authorized)
+	stage = "open_socket"
+	first, err := m.adb.Open(s.ctx, link.TransportID, "localabstract:"+socket, authorized)
 	if err != nil {
 		return nil, err
 	}
 	s.connMu.Lock()
-	s.video = video
+	if m.controlOnly {
+		s.control = first
+	} else {
+		s.video = first
+	}
 	s.connMu.Unlock()
 	if deadline, ok := startCtx.Deadline(); ok {
-		if err := video.SetDeadline(deadline); err != nil {
+		if err := first.SetDeadline(deadline); err != nil {
 			return nil, err
 		}
-		defer video.SetDeadline(time.Time{})
 	}
-	stage = "video_dummy"
-	if err := scrcpy.ReadDummy(video); err != nil {
+	stage = "socket_dummy"
+	if err := scrcpy.ReadDummy(first); err != nil {
 		return nil, err
 	}
-	stage = "open_control"
-	control, err := m.adb.Open(s.ctx, link.TransportID, "localabstract:"+socket, authorized)
-	if err != nil {
-		return nil, err
+	if !m.controlOnly {
+		stage = "open_control"
+		control, err := m.adb.Open(s.ctx, link.TransportID, "localabstract:"+socket, authorized)
+		if err != nil {
+			return nil, err
+		}
+		s.connMu.Lock()
+		s.control = control
+		s.connMu.Unlock()
+		stage = "video_preamble"
+		metadata, err := scrcpy.ReadPreamble(first)
+		if err != nil {
+			return nil, err
+		}
+		if metadata.Codec != scrcpy.CodecH264 {
+			return nil, diagnostics.New("scrcpy server did not negotiate H.264")
+		}
 	}
-	s.connMu.Lock()
-	s.control = control
-	s.connMu.Unlock()
-	stage = "video_preamble"
-	metadata, err := scrcpy.ReadPreamble(video)
-	if err != nil {
+	if err := first.SetDeadline(time.Time{}); err != nil {
 		return nil, err
-	}
-	if metadata.Codec != scrcpy.CodecH264 {
-		return nil, diagnostics.New("scrcpy server did not negotiate H.264")
 	}
 	stage = "activate"
 	if err := m.activate(ioCtx, s); err != nil {
 		return nil, err
 	}
-	s.workers.Add(3)
-	go s.readFrames()
+	s.workers.Add(2)
+	if !m.controlOnly {
+		s.workers.Add(1)
+		go s.readFrames()
+	}
 	go s.readMessages()
 	go s.drainShell()
 	stage = "deliver"
@@ -444,7 +471,7 @@ func (m *Manager) register(ctx context.Context, s *Stream) error {
 	if err != nil {
 		return err
 	}
-	_, err = m.db.ExecContext(ctx, `INSERT INTO owned_resources(id,device_id,owner_kind,owner_id,boot_id,kind,locator,state,created_at) VALUES(?,?,?, ?,?,?,?,'pending',?)`, s.id, s.deviceID, ownerKind, s.id, m.bootID, resourceKind, string(encoded), time.Now().UTC().UnixMilli())
+	_, err = m.db.ExecContext(ctx, `INSERT INTO owned_resources(id,device_id,owner_kind,owner_id,boot_id,kind,locator,state,created_at) VALUES(?,?,?, ?,?,?,?,'pending',?)`, s.id, s.deviceID, ownerKind, s.id, m.bootID, m.kind(), string(encoded), time.Now().UTC().UnixMilli())
 	return err
 }
 func (m *Manager) updateLocator(ctx context.Context, s *Stream) error {
@@ -452,7 +479,7 @@ func (m *Manager) updateLocator(ctx context.Context, s *Stream) error {
 	if err != nil {
 		return err
 	}
-	res, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET locator=? WHERE id=? AND device_id=? AND owner_kind=? AND owner_id=? AND boot_id=? AND kind=? AND state='pending'`, string(data), s.id, s.deviceID, ownerKind, s.id, m.bootID, resourceKind)
+	res, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET locator=? WHERE id=? AND device_id=? AND owner_kind=? AND owner_id=? AND boot_id=? AND kind=? AND state='pending'`, string(data), s.id, s.deviceID, ownerKind, s.id, m.bootID, m.kind())
 	if err != nil {
 		return err
 	}
@@ -466,7 +493,7 @@ func (m *Manager) updateLocator(ctx context.Context, s *Stream) error {
 	return nil
 }
 func (m *Manager) activate(ctx context.Context, s *Stream) error {
-	res, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='active',locator=? WHERE id=? AND device_id=? AND owner_kind=? AND owner_id=? AND boot_id=? AND kind=? AND state='pending'`, mustJSON(s.resource), s.id, s.deviceID, ownerKind, s.id, m.bootID, resourceKind)
+	res, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='active',locator=? WHERE id=? AND device_id=? AND owner_kind=? AND owner_id=? AND boot_id=? AND kind=? AND state='pending'`, mustJSON(s.resource), s.id, s.deviceID, ownerKind, s.id, m.bootID, m.kind())
 	if err != nil {
 		return err
 	}
@@ -484,7 +511,7 @@ func (m *Manager) markFailure(ctx context.Context, s *Stream, code string) error
 	if len(code) > 64 {
 		code = "CAPTURE_FAILED"
 	}
-	_, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='failed',cleanup_error=? WHERE id=? AND device_id=? AND owner_kind=? AND owner_id=? AND boot_id=? AND kind=? AND state!='cleaned'`, code, s.id, s.deviceID, ownerKind, s.id, m.bootID, resourceKind)
+	_, err := m.db.ExecContext(ctx, `UPDATE owned_resources SET state='failed',cleanup_error=? WHERE id=? AND device_id=? AND owner_kind=? AND owner_id=? AND boot_id=? AND kind=? AND state!='cleaned'`, code, s.id, s.deviceID, ownerKind, s.id, m.bootID, m.kind())
 	return err
 }
 func (m *Manager) markFailureBounded(s *Stream, code string) error {

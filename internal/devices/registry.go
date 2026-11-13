@@ -63,19 +63,23 @@ type registeredLink struct {
 }
 
 type Registry struct {
-	db          *sql.DB
-	client      *adb.Client
-	logger      *slog.Logger
-	timeout     time.Duration
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	updates     chan inventoryUpdate
-	manager     *leases.Manager
-	taskCleanup func(context.Context, string) (bool, error)
-	events      *events.Bus
+	db            *sql.DB
+	client        *adb.Client
+	logger        *slog.Logger
+	timeout       time.Duration
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	updates       chan inventoryUpdate
+	manager       *leases.Manager
+	taskCleanup   func(context.Context, string) (bool, error)
+	events        *events.Bus
+	runtimeView   func(string) *RuntimeInfo
+	runtimeNotify func()
 
 	mutations            sync.Mutex
+	displayMu            sync.Mutex
+	displayReads         map[string]chan struct{}
 	mu                   sync.RWMutex
 	bootID               string
 	version              uint64
@@ -304,6 +308,9 @@ func (r *Registry) refreshInventory(ctx context.Context) error {
 }
 
 func (r *Registry) enqueueLocked() {
+	if r.runtimeNotify != nil {
+		r.runtimeNotify()
+	}
 	update := inventoryUpdate{version: r.version, epoch: r.epoch}
 	select {
 	case r.updates <- update:
@@ -319,6 +326,9 @@ func (r *Registry) enqueueLocked() {
 	}
 }
 func (r *Registry) notifyLocked(deviceID string) {
+	if r.runtimeNotify != nil {
+		r.runtimeNotify()
+	}
 	if r.events == nil {
 		return
 	}
@@ -433,16 +443,17 @@ func (r *Registry) verifySnapshot(update inventoryUpdate) error {
 			}
 			continue
 		}
-		screen, displayErr := r.readDisplay(update.epoch, observed.TransportID)
+		screen, displayErr := r.readDisplay(update.epoch, actual.Serial, observed.TransportID)
 		if displayErr != nil {
 			r.logger.Error("device_display_info_failed", "deviceId", link.deviceID, "linkId", link.id, "code", "DISPLAY_INFO_UNAVAILABLE", "cause", diagnostics.Cause(displayErr))
 			if update.epoch.Err() != nil {
 				return update.epoch.Err()
 			}
-			continue
 		}
-		if err := saveScreenGeometry(update.epoch, r.db, link.deviceID, screen); err != nil {
-			return err
+		if displayErr == nil {
+			if err := saveScreenGeometry(update.epoch, r.db, link.deviceID, screen); err != nil {
+				return err
+			}
 		}
 		if _, err = r.db.ExecContext(update.epoch, `UPDATE device_links SET last_seen_at=? WHERE id=?`, time.Now().UTC().UnixMilli(), link.id); err != nil {
 			return err
@@ -455,7 +466,11 @@ func (r *Registry) verifySnapshot(update inventoryUpdate) error {
 		r.nextLink++
 		linkCtx, cancel := context.WithCancel(update.epoch)
 		r.live[link.id] = &liveLink{link: leases.Link{DeviceID: link.deviceID, LinkID: link.id, TransportID: observed.TransportID, Generation: r.nextLink}, serial: link.serial, evidence: actual, ctx: linkCtx, cancel: cancel}
-		delete(r.issues, link.id)
+		if displayErr != nil {
+			r.issues[link.id] = "读取屏幕尺寸失败"
+		} else {
+			delete(r.issues, link.id)
+		}
 		r.setLinkStateLocked(link, "online")
 		r.mu.Unlock()
 		var reclaiming bool

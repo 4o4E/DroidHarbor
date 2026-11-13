@@ -22,7 +22,7 @@ func TestSetMaintenanceRevokesAndRecoversLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, true, "admin-session"); err != nil {
+	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, true, "admin-session", &lease.Generation); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -42,7 +42,7 @@ func TestSetMaintenanceRevokesAndRecoversLease(t *testing.T) {
 	if _, err = manager.Renew(context.Background(), principal, lease.ID); !errors.Is(err, ErrLeaseEnded) {
 		t.Fatalf("clearing maintenance or recovery revived the ended lease: %v", err)
 	}
-	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, false, "admin-session"); err != nil {
+	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, false, "admin-session", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.QueryRow(`SELECT allocation_state,maintenance_requested FROM devices WHERE id=?`, lease.DeviceID).Scan(&state, &requested); err != nil || state != "available" || requested != 0 {
@@ -55,7 +55,7 @@ func TestMaintenanceRequiresConfirmedRecoveryWithoutLease(t *testing.T) {
 	source.setRecovery(func(context.Context, string) (bool, error) {
 		return false, errors.New("platform resource cleanup failed")
 	})
-	if err := manager.SetMaintenance(context.Background(), "a", true, "admin-session"); !errors.Is(err, ErrReclaimFailed) {
+	if err := manager.SetMaintenance(context.Background(), "a", true, "admin-session", nil); !errors.Is(err, ErrReclaimFailed) {
 		t.Fatalf("maintenance ignored unconfirmed cleanup: %v", err)
 	}
 	var failedState string
@@ -71,7 +71,7 @@ func TestMaintenanceRequiresConfirmedRecoveryWithoutLease(t *testing.T) {
 		t.Fatalf("maintenance was not set after confirmed cleanup: state=%q err=%v", state, err)
 	}
 	source.setRecovery(func(context.Context, string) (bool, error) { return false, nil })
-	if err := manager.SetMaintenance(context.Background(), "a", false, "admin-session"); err != nil {
+	if err := manager.SetMaintenance(context.Background(), "a", false, "admin-session", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT allocation_state FROM devices WHERE id='a'`).Scan(&state); err != nil || state != "reclaiming" {
@@ -101,7 +101,7 @@ func TestMaintenanceWriteFailureLeavesLeaseDeniedAndDeviceBlocked(t *testing.T) 
 	if _, err = db.Exec(`CREATE TRIGGER block_maintenance BEFORE UPDATE OF maintenance_requested ON devices BEGIN SELECT RAISE(FAIL,'blocked'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, true, "admin-session"); !errors.Is(err, ErrStorage) {
+	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, true, "admin-session", &lease.Generation); !errors.Is(err, ErrStorage) {
 		t.Fatalf("failed maintenance persistence was hidden: %v", err)
 	}
 	select {
@@ -134,7 +134,7 @@ func TestClearingMaintenanceDoesNotRevokeActiveLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, false, "admin-session"); !errors.Is(err, ErrConflict) {
+	if err = manager.SetMaintenance(context.Background(), lease.DeviceID, false, "admin-session", nil); !errors.Is(err, ErrConflict) {
 		t.Fatalf("maintenance clear interrupted an active lease: %v", err)
 	}
 	if err = manager.Check(lease.ID, lease.Generation, lease.BootID); err != nil {
@@ -175,5 +175,49 @@ func TestStaleRecoveryPreservesActiveTaskResource(t *testing.T) {
 	}
 	if err := manager.Check(lease.ID, lease.Generation, lease.BootID); err != nil {
 		t.Fatalf("stale recovery changed current authorization: %v", err)
+	}
+}
+
+func TestMaintenanceRequiresConfirmationOfCurrentTask(t *testing.T) {
+	ctx := context.Background()
+	manager, db, source, _, bearer := newLeaseTestManager(t, 1)
+	secret := identity.Secret()
+	first := claimForTest(t, manager, bearer, "first-task", secret, "first-key")
+	principal, err := manager.Authenticate(ctx, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongGeneration := first.Generation + 1
+	for _, confirmation := range []*int64{nil, &wrongGeneration} {
+		if err = manager.SetMaintenance(ctx, first.DeviceID, true, "admin-session", confirmation); !errors.Is(err, ErrAllocationConfirmation) {
+			t.Fatalf("unconfirmed task was not protected: %v", err)
+		}
+		if err = manager.Check(first.ID, first.Generation, first.BootID); err != nil {
+			t.Fatalf("rejected change interrupted the current task: %v", err)
+		}
+	}
+	var requested bool
+	var allocation string
+	if err = db.QueryRow(`SELECT maintenance_requested,allocation_state FROM devices WHERE id=?`, first.DeviceID).Scan(&requested, &allocation); err != nil || requested || allocation != "leased" {
+		t.Fatalf("rejected change altered allocation: requested=%v state=%s err=%v", requested, allocation, err)
+	}
+	if source.calls(first.DeviceID) != 0 {
+		t.Fatal("unconfirmed change cleaned up an active task")
+	}
+	if _, err = manager.Release(ctx, principal, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second := claimForTest(t, manager, bearer, "second-task", identity.Secret(), "second-key")
+	if err = manager.SetMaintenance(ctx, second.DeviceID, true, "admin-session", &first.Generation); !errors.Is(err, ErrAllocationConfirmation) {
+		t.Fatalf("old dialog could end a later task: %v", err)
+	}
+	if err = manager.Check(second.ID, second.Generation, second.BootID); err != nil {
+		t.Fatalf("old confirmation interrupted the new task: %v", err)
+	}
+	if err = manager.SetMaintenance(ctx, second.DeviceID, true, "admin-session", &second.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = manager.Claim(ctx, bearer, ClaimRequest{TaskID: "third-task", TaskSecret: identity.Secret(), IdempotencyKey: "third-key"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("confirmed allocation shutdown still allowed a new task: %v", err)
 	}
 }

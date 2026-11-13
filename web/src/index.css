@@ -147,13 +147,14 @@
 .device-sidebar-header [data-slot="toggle-group"] { flex: 1; }
 .device-sidebar-header [data-slot="toggle-group-item"] { flex: 1; }
 .device-list { display: flex; width: 100%; min-height: 0; flex: 1; flex-direction: column; align-items: stretch; gap: 8px; overflow-y: auto; padding: 8px; }
-.device-list-item { position: relative; display: grid; width: 100%; height: auto; flex: none; grid-template-columns: minmax(0, 45%) minmax(0, 1fr); align-items: stretch; gap: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 7px; text-align: left; white-space: normal; }
+.device-list-item { position: relative; display: grid; width: 100%; height: auto; flex: none; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 7px; text-align: left; white-space: normal; }
 .device-list-item[aria-pressed="true"] { border-color: var(--primary); background: color-mix(in oklab, var(--primary) 11%, var(--card)); box-shadow: inset 0 0 0 1px var(--primary); }
 .device-list-item.device-unavailable { opacity: .48; }
 .device-list-item.device-unavailable[aria-pressed="true"] { opacity: .65; }
 .device-list-preview { width: 100%; min-width: 0; flex: none; }
 .device-list-preview > div { min-height: 150px; max-height: 260px; }
 .device-list-info { position: relative; display: flex; min-width: 0; flex-direction: column; align-items: stretch; gap: 10px; padding-top: 2px; }
+.device-list-heading { position: relative; display: block; min-width: 0; min-height: 20px; }
 .device-list-name { padding-right: 18px; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; line-height: 1.5; }
 .device-occupancy { position: absolute; top: 3px; right: 0; color: var(--muted-foreground); }
 .device-occupancy svg { width: 14px; height: 14px; }
@@ -162,6 +163,14 @@
 .device-exceptions svg { width: 14px; height: 14px; }
 .device-video-state { display: flex; margin-top: auto; flex-direction: column; gap: 5px; color: var(--muted-foreground); font-size: 10px; line-height: 1.5; }
 .device-video-state svg { width: 12px; height: 12px; }
+.device-metrics { display: flex; width: 100%; min-width: 0; flex-direction: column; gap: 8px; margin: 0; font-size: 12px; font-weight: 400; }
+.device-metrics > div { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 8px; }
+.device-metrics dt { display: flex; min-width: 0; align-items: center; gap: 5px; overflow: hidden; color: var(--muted-foreground); white-space: nowrap; }
+.device-metrics dd { display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; margin: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.device-metrics svg { width: 13px; height: 13px; flex: none; }
+.device-metrics-compact { gap: 6px; font-size: 10px; }
+.device-metrics-compact svg { width: 11px; height: 11px; }
+.device-charge-state { display: inline-flex; align-items: center; gap: 2px; color: var(--muted-foreground); font-size: 10px; }
 .phone-stage { position: relative; display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; align-items: center; justify-content: center; background: var(--background); }
 .phone-arrangement { display: flex; flex: none; align-items: stretch; }
 .phone-toolbar { display: flex; height: 100%; min-height: 0; flex: none; flex-direction: column; align-items: center; gap: 8px; overflow: hidden; border: 1px solid var(--border); background: var(--card); padding: 5px 3px; }

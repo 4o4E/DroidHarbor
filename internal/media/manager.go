@@ -242,7 +242,9 @@ func (s *session) beginEnd(reason error) {
 	s.endOnce.Do(func() {
 		s.manager.clearRetention(s)
 		s.cancel()
-		if reason != nil {
+		if errors.Is(reason, context.Canceled) {
+			s.manager.deps.Logger.Info("media_session_canceled", "sessionId", s.id, "deviceId", s.hub.deviceID, "code", errorCode(reason))
+		} else if reason != nil {
 			s.manager.deps.Logger.Warn("media_session_ended", "sessionId", s.id, "deviceId", s.hub.deviceID, "code", errorCode(reason), "cause", diagnostics.Cause(reason))
 		}
 		// At most one finisher per reserved session. Its capacity slot is retained

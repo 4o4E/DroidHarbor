@@ -84,7 +84,8 @@ export function usePlatformEvents() {
           setSnapshotsReady(true)
           setStatus('connected')
           setError('')
-          refresh()
+          if (change.entityType === 'device-runtime') void client.invalidateQueries({ queryKey: ['devices'] })
+          else refresh()
         } catch (failure) {
           stream.close()
           setSnapshotsReady(false)

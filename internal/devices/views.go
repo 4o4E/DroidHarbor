@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"droidharbor/internal/adb"
+	"droidharbor/internal/leases"
 )
 
 type LinkView struct {
@@ -27,8 +30,10 @@ type View struct {
 	AllocationState      string       `json:"allocationState"`
 	Version              string       `json:"version,omitempty"`
 	MaintenanceRequested *bool        `json:"maintenanceRequested,omitempty"`
+	LeaseGeneration      *int64       `json:"leaseGeneration,omitempty"`
 	Links                []LinkView   `json:"links,omitempty"`
 	DisplayInfo          *DisplayInfo `json:"displayInfo,omitempty"`
+	Runtime              *RuntimeInfo `json:"runtime,omitempty"`
 }
 
 type Discovered struct {
@@ -39,7 +44,7 @@ type Discovered struct {
 	Product     string `json:"product,omitempty"`
 }
 
-func (r *Registry) Discover(ctx context.Context) ([]Discovered, error) {
+func (r *Registry) registeredEndpoints(ctx context.Context) (map[string]bool, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT endpoint,coalesce(observed_serial,'') FROM device_links`)
 	if err != nil {
 		return nil, err
@@ -58,6 +63,40 @@ func (r *Registry) Discover(ctx context.Context) ([]Discovered, error) {
 	}
 	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, err
+	}
+	return registered, nil
+}
+
+func (r *Registry) Discover(ctx context.Context) ([]Discovered, error) {
+	registered, err := r.registeredEndpoints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	needsMDNS := false
+	if len(registered) > 0 {
+		for serial := range r.discovered {
+			normalized := strings.TrimSuffix(serial, ".")
+			if !registered[serial] && (strings.HasSuffix(normalized, "."+adb.MDNSConnect) || strings.HasSuffix(normalized, "."+adb.MDNSLegacy)) {
+				needsMDNS = true
+				break
+			}
+		}
+	}
+	r.mu.RUnlock()
+	if needsMDNS {
+		services, err := r.wirelessServices(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// These are aliases of an already registered endpoint, not new
+		// hardware associations. Keep unregistered ports on the same IP.
+		for _, service := range services {
+			if service.Type != adb.MDNSPairing && registered[service.Endpoint] {
+				serial := service.Name + "." + service.Type
+				registered[serial], registered[serial+"."] = true, true
+			}
+		}
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -83,7 +122,7 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,display_name,allocation_state,maintenance_requested,CASE WHEN ? THEN display_info END FROM devices ORDER BY id`, admin)
+	rows, err := tx.QueryContext(ctx, `SELECT id,display_name,allocation_state,maintenance_requested,CASE WHEN ? THEN display_info END,generation FROM devices ORDER BY id`, admin)
 	if err != nil {
 		return nil, false, err
 	}
@@ -92,8 +131,9 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 	for rows.Next() {
 		var view View
 		var maintenance bool
+		var generation int64
 		var display sql.NullString
-		if err = rows.Scan(&view.ID, &view.DisplayName, &view.AllocationState, &maintenance, &display); err != nil {
+		if err = rows.Scan(&view.ID, &view.DisplayName, &view.AllocationState, &maintenance, &display, &generation); err != nil {
 			rows.Close()
 			return nil, false, err
 		}
@@ -108,6 +148,7 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 		view.ConnectionState = "offline"
 		if admin {
 			view.MaintenanceRequested = &maintenance
+			view.LeaseGeneration = &generation
 			view.Links = []LinkView{}
 		}
 		indices[view.ID] = len(result)
@@ -188,6 +229,11 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 		}
 	}
 	r.mu.RUnlock()
+	if admin && r.runtimeView != nil {
+		for index := range result {
+			result[index].Runtime = r.runtimeView(result[index].ID)
+		}
+	}
 	return result, ready, nil
 }
 
@@ -196,10 +242,11 @@ func (r *Registry) configVersionLocked(deviceID string) string {
 }
 
 type Patch struct {
-	Version              string    `json:"version"`
-	DisplayName          *string   `json:"displayName,omitempty"`
-	Tags                 *[]string `json:"tags,omitempty"`
-	MaintenanceRequested *bool     `json:"maintenanceRequested,omitempty"`
+	Version                  string    `json:"version"`
+	DisplayName              *string   `json:"displayName,omitempty"`
+	Tags                     *[]string `json:"tags,omitempty"`
+	MaintenanceRequested     *bool     `json:"maintenanceRequested,omitempty"`
+	ConfirmedLeaseGeneration *int64    `json:"confirmedLeaseGeneration,omitempty"`
 }
 
 func (r *Registry) Patch(ctx context.Context, actorID, deviceID string, patch Patch) error {
@@ -208,6 +255,9 @@ func (r *Registry) Patch(ctx context.Context, actorID, deviceID string, patch Pa
 	// separate action, never a falsely atomic batch with name/tag changes.
 	if (patch.MaintenanceRequested != nil && metadata) || (patch.MaintenanceRequested == nil && !metadata) {
 		return &Error{Code: "INVALID_REQUEST", Message: "请分别提交设备信息修改与分配启停", Status: 422}
+	}
+	if patch.ConfirmedLeaseGeneration != nil && (patch.MaintenanceRequested == nil || !*patch.MaintenanceRequested) {
+		return &Error{Code: "INVALID_REQUEST", Message: "任务确认仅用于关闭分配", Status: 422}
 	}
 	if patch.DisplayName != nil {
 		*patch.DisplayName = strings.TrimSpace(*patch.DisplayName)
@@ -246,7 +296,10 @@ func (r *Registry) Patch(ctx context.Context, actorID, deviceID string, patch Pa
 		return &Error{Code: "VERSION_CONFLICT", Message: "设备配置已变化，请刷新后重试", Status: 409}
 	}
 	if patch.MaintenanceRequested != nil {
-		err := r.manager.SetMaintenance(ctx, deviceID, *patch.MaintenanceRequested, actorID)
+		err := r.manager.SetMaintenance(ctx, deviceID, *patch.MaintenanceRequested, actorID, patch.ConfirmedLeaseGeneration)
+		if errors.Is(err, leases.ErrAllocationConfirmation) {
+			return err
+		}
 		// The intent may be durable even when cleanup fails; all clients must
 		// refresh before another allocation action rather than reuse the revision.
 		r.changed(deviceID)

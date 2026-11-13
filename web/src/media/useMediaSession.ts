@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, errorMessage } from '@/lib/api'
+import { api, ApiError, errorMessage } from '@/lib/api'
 import type { SessionMode } from '@/lib/types'
 import type { ControlReply, MediaSession } from './types'
 
@@ -10,6 +10,7 @@ const MAX_PENDING_COMMANDS = 64
 const MAX_DATA_CHANNEL_CHUNK = 16 << 10
 const INCOMPLETE_FRAME_TIMEOUT_MS = 5_000
 const COMMAND_TIMEOUT_MS = 30_000
+const RECOVERABLE_MEDIA_CODES: Record<string, true | undefined> = { NETWORK_UNAVAILABLE: true, RESULT_UNKNOWN: true, CAPTURE_START_INTERRUPTED: true, ADB_UNAVAILABLE: true, DEVICE_UNAVAILABLE: true, DEVICE_DISCONNECTED: true }
 
 type SessionSnapshot = {
   sessionId: string
@@ -69,7 +70,10 @@ type MediaRuntime = {
   pending: Map<number, PendingCommand>
   inbound: InboundControlFrame
   teardownPromise: Promise<void> | null
-  close: (status: 'closed' | 'failed', failure?: string) => Promise<void>
+  cleanupFailed: boolean
+  recoveryAttempt: number
+  recoveryLogged: boolean
+  close: (status: 'closed' | 'failed', failure?: string, recoverable?: boolean) => Promise<void>
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,6 +111,49 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
   const [framesPerSecond, setFramesPerSecond] = useState(0)
   const [remoteState, setRemoteState] = useState<RemoteStreamState | null>(null)
+  const [recoveryAllowed, setRecoveryAllowed] = useState(false)
+  const [recoveryGeneration, setRecoveryGeneration] = useState(0)
+  const recoveryAttempts = useRef(0)
+  const failedRuntime = useRef<MediaRuntime | null>(null)
+  const intent = useRef({ deviceId, mode, enabled, foreground })
+  intent.current = { deviceId, mode, enabled, foreground }
+
+  useEffect(() => {
+    recoveryAttempts.current = 0
+  }, [deviceId, mode, enabled])
+
+  useEffect(() => {
+    const previous = failedRuntime.current
+    if (!enabled || !foreground || status !== 'failed' || !recoveryAllowed || !previous) return
+    let cancelled = false
+    const attempt = ++recoveryAttempts.current
+    const delay = Math.min(15_000, 1000 * 2 ** Math.min(attempt - 1, 4))
+    console.info('media_recovery_scheduled', { deviceId, mode, attempt, delayMs: delay })
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        await previous.teardownPromise
+        const current = intent.current
+        if (cancelled || failedRuntime.current !== previous || current.deviceId !== deviceId || current.mode !== mode || !current.enabled || !current.foreground) return
+        if (previous.cleanupFailed) {
+          setRecoveryAllowed(false)
+          return
+        }
+        setRecoveryGeneration(value => value + 1)
+      })()
+    }, delay)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [deviceId, mode, enabled, foreground, status, recoveryAllowed])
+
+  useEffect(() => {
+    if (!ready || status !== 'connected' || !currentRuntime) return
+    const timer = window.setTimeout(() => {
+      if (runtimeRef.current !== currentRuntime || !currentRuntime.active) return
+      recoveryAttempts.current = 0
+      setSessionError('')
+      setRecoveryAllowed(false)
+    }, 10_000)
+    return () => window.clearTimeout(timer)
+  }, [ready, status, currentRuntime])
 
   const command = useCallback((type: string, payload?: Record<string, unknown>): Promise<ControlReply> => {
     const text = typeof payload?.text === 'string' ? payload.text : ''
@@ -139,7 +186,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     const framedByteLength = encoded.byteLength + 4
     if (runtime.pending.size >= MAX_PENDING_COMMANDS || channel.bufferedAmount + framedByteLength > CONTROL_BUFFER_LIMIT) {
       const failure = new Error('WebRTC 控制通道已达到有界发送上限，会话已关闭')
-      void runtime.close('failed', failure.message).catch(cause => {
+      void runtime.close('failed', failure.message, true).catch(cause => {
         setCleanupError(`控制通道过载后的会话清理失败：${errorMessage(cause)}`)
       })
       return Promise.reject(failure)
@@ -149,7 +196,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         runtime.pending.delete(sequence)
         const failure = new Error('控制命令响应超时，会话已关闭')
         reject(failure)
-        void runtime.close('failed', failure.message).catch(cause => {
+        void runtime.close('failed', failure.message, true).catch(cause => {
           setCleanupError(`控制命令超时后的会话清理失败：${errorMessage(cause)}`)
         })
       }, COMMAND_TIMEOUT_MS)
@@ -177,7 +224,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         }
       } catch (cause) {
         const failure = `WebRTC 控制消息发送失败：${errorMessage(cause)}`
-        void runtime.close('failed', failure).catch(cleanupCause => {
+        void runtime.close('failed', failure, true).catch(cleanupCause => {
           setCleanupError(`控制发送失败后的会话清理失败：${errorMessage(cleanupCause)}`)
         })
       }
@@ -221,7 +268,9 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
 
   useEffect(() => {
     stateScope.current = { deviceId, mode }
-    if (!enabled || !deviceId || (mode !== 'readonly' && mode !== 'control')) {
+    if (!enabled || !deviceId || !intent.current.foreground || (mode !== 'readonly' && mode !== 'control')) {
+      setRecoveryAllowed(false)
+      setSessionError('')
       setHasFrame(false)
       setHasDecodedVideo(false)
       setCurrentRuntime(null)
@@ -255,13 +304,17 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       pending: new Map(),
       inbound: { header: new Uint8Array(4), headerLength: 0, payload: null, payloadLength: 0, payloadRead: 0, timeout: null },
       teardownPromise: null,
-      close: (nextStatus, failure) => teardown(nextStatus, failure),
+      cleanupFailed: false,
+      recoveryAttempt: recoveryAttempts.current,
+      recoveryLogged: false,
+      close: (nextStatus, failure, recoverable) => teardown(nextStatus, failure, recoverable),
     }
     runtimeRef.current = runtime
     setCurrentRuntime(runtime)
     const isCurrent = () => runtimeRef.current === runtime && runtime.active
     setStatus('connecting')
-    setSessionError('')
+    if (runtime.recoveryAttempt === 0) setSessionError('')
+    setRecoveryAllowed(false)
     setReady(false)
     setHasFrame(false)
     setHasDecodedVideo(false)
@@ -280,7 +333,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         body: candidate,
         signal: abortController.signal,
       }).catch(cause => {
-        if (isCurrent()) void teardown('failed', `ICE 候选提交失败：${errorMessage(cause)}`)
+        if (isCurrent()) void teardown('failed', `ICE 候选提交失败：${errorMessage(cause)}`, cause instanceof ApiError && RECOVERABLE_MEDIA_CODES[cause.code] === true)
       })
     }
 
@@ -293,7 +346,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       }
     }
 
-    const teardown = (nextStatus: 'closed' | 'failed', failure = ''): Promise<void> => {
+    const teardown = (nextStatus: 'closed' | 'failed', failure = '', recoverable = false): Promise<void> => {
       if (runtime.teardownPromise) return runtime.teardownPromise
       const wasCurrent = runtimeRef.current === runtime
       runtime.active = false
@@ -304,6 +357,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       runtime.inbound.payloadLength = 0
       runtime.inbound.payloadRead = 0
       if (wasCurrent) {
+        failedRuntime.current = runtime
+        setRecoveryAllowed(nextStatus === 'failed' && recoverable)
         setCurrentRuntime(null)
         setStatus(nextStatus)
         setReady(false)
@@ -312,7 +367,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         setPresent(false)
         setSessionId(null)
         setRemoteState(null)
-        if (failure) setSessionError(failure)
+        if (failure) setSessionError(previous => recoverable && runtime.recoveryAttempt > 0 && previous ? previous : failure)
       }
       failPending(new Error(failure || '媒体会话已关闭'))
       const currentSession = runtime.sessionId
@@ -355,6 +410,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         ? api<void>(`/sessions/${encodeURIComponent(currentSession)}`, { method: 'DELETE', keepalive: true })
         : Promise.resolve()
       const cleanup = closeRequest.catch(cause => {
+        runtime.cleanupFailed = true
         console.error('media_session_cleanup_failed', { sessionId: currentSession, errorType: cause instanceof Error ? cause.name : typeof cause })
         const message = `结束媒体会话失败：${errorMessage(cause)}`
         if (wasCurrent) setCleanupError(message)
@@ -368,7 +424,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     const updateConnection = () => {
       if (!isCurrent() || !runtime.peer || !runtime.channel) return
       if (runtime.peer.connectionState === 'failed' || runtime.peer.connectionState === 'disconnected') {
-        void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? 'WebRTC 连接已断开' : '')
+        void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? 'WebRTC 连接已断开' : '', true)
         return
       }
       if (runtime.peer.connectionState === 'connected' && runtime.channel.readyState === 'open') setStatus('connected')
@@ -511,10 +567,10 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         runtime.channel = channel
         channel.onopen = updateConnection
         channel.onclose = () => {
-          if (isCurrent()) void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? 'WebRTC 控制通道已关闭' : '')
+          if (isCurrent()) void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? 'WebRTC 控制通道已关闭' : '', true)
         }
         channel.onerror = () => {
-          if (isCurrent()) void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? 'WebRTC 控制通道发生错误' : '')
+          if (isCurrent()) void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? 'WebRTC 控制通道发生错误' : '', true)
         }
         channel.onmessage = event => consumeControlChunk(event.data)
         peer.onconnectionstatechange = updateConnection
@@ -536,7 +592,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
           runtime.stream = stream
           setRemoteState({ runtime, stream })
           event.track.onended = () => {
-            if (isCurrent()) void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? '设备视频轨道已结束' : '')
+            if (isCurrent()) void teardown(runtime.foreground ? 'failed' : 'closed', runtime.foreground ? '设备视频轨道已结束' : '', true)
           }
         }
 
@@ -550,7 +606,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         if (!isCurrent()) return
         const snapshot = await api<SessionSnapshot>(`/devices/${encodeURIComponent(deviceId)}/sessions`, {
           method: 'POST',
-          body: { mode, offer: sdp },
+          body: { mode, offer: sdp, recoveryAttempt: runtime.recoveryAttempt },
           signal: abortController.signal,
         })
         runtime.sessionId = snapshot.sessionId
@@ -571,7 +627,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
       } catch (cause) {
         if (isCurrent()) {
           const message = cause instanceof DOMException && cause.name === 'AbortError' ? '媒体会话协商已取消' : errorMessage(cause)
-          void teardown('failed', message)
+          void teardown('failed', message, cause instanceof ApiError && RECOVERABLE_MEDIA_CODES[cause.code] === true)
         }
       }
     }
@@ -589,7 +645,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         setCleanupError(`媒体会话卸载清理失败：${errorMessage(cause)}`)
       })
     }
-  }, [deviceId, enabled, mode])
+  }, [deviceId, enabled, mode, recoveryGeneration])
 
   useEffect(() => {
     const video = videoRef.current
@@ -650,6 +706,10 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
             if (reply.status !== 'succeeded') throw new Error(reply.message || '服务端拒绝当前视频帧确认')
             runtime.acknowledgedBoundary = boundaryKey
             setReady(true)
+            if (runtime.recoveryAttempt > 0 && !runtime.recoveryLogged) {
+              runtime.recoveryLogged = true
+              console.info('media_recovery_frame_presented', { deviceId, sessionId, mode, attempt: runtime.recoveryAttempt, epoch })
+            }
           }).catch(cause => {
             if (runtimeRef.current === runtime && runtime.active && runtime.sessionId === sessionId && runtime.epoch === epoch && runtime.boundary === boundary) setSessionError(errorMessage(cause))
           }).finally(() => {
@@ -688,11 +748,12 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     })
   }, [command, mode, ready, runtimeForRender])
 
+  const reportedStatus = enabled && foreground && ((status === 'failed' && recoveryAllowed) || (status === 'connecting' && recoveryAttempts.current > 0)) ? 'recovering' : status
   const close = useCallback(() => currentRuntime?.close('closed') ?? Promise.resolve(), [currentRuntime])
 
   return useMemo(() => ({
     sessionId: sameScope && enabled ? sessionId : null,
-    status: sameScope ? status : enabled ? 'connecting' : 'closed',
+    status: sameScope ? reportedStatus : enabled ? 'connecting' : 'closed',
     error: [sameScope ? sessionError : '', cleanupError].filter(Boolean).join('；'),
     ready: sameScope && enabled && foreground && present && ready,
     hasFrame: sameScope && enabled && hasFrame,
@@ -706,5 +767,5 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     release,
     suspend,
     close,
-  }), [sameScope, enabled, foreground, present, sessionId, status, sessionError, cleanupError, ready, hasFrame, hasDecodedVideo, epoch, dimensions, framesPerSecond, command, release, suspend, close])
+  }), [sameScope, enabled, foreground, present, sessionId, reportedStatus, sessionError, cleanupError, ready, hasFrame, hasDecodedVideo, epoch, dimensions, framesPerSecond, command, release, suspend, close])
 }

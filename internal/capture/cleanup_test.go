@@ -154,7 +154,7 @@ func TestRecoveryWaitsForOwnedCleanupHelper(t *testing.T) {
 				t.Fatal(err)
 			}
 			link := leases.Link{DeviceID: "device", LinkID: "link", TransportID: 7, Generation: 3}
-			manager := &Manager{db: db, adb: client, source: &testSource{link: link, available: true}, recovering: make(map[string]bool), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			manager := &Manager{db: db, adb: client, source: &testSource{link: link, available: true}, recovering: make(map[string]*recoveryFlight), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			complete, recoveryErr := manager.Recover(ctx, "device")
 			var state string
 			if err := db.QueryRow(`SELECT state FROM owned_resources WHERE id='capture'`).Scan(&state); err != nil {

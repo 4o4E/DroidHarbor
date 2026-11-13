@@ -11,7 +11,7 @@ export type ControlReply = {
 
 export type MediaSession = {
   sessionId: string | null
-  status: 'connecting' | 'connected' | 'closed' | 'failed'
+  status: 'connecting' | 'recovering' | 'connected' | 'closed' | 'failed'
   error: string
   ready: boolean
   hasFrame: boolean

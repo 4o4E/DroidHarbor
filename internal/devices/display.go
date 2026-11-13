@@ -87,18 +87,39 @@ func parseDisplayGeometry(information []byte) (ScreenGeometry, error) {
 	return ScreenGeometry{Width: width, Height: height, Rotation: int(rotation[1][0] - '0'), ObservedAt: time.Now().UTC()}, nil
 }
 
-func (r *Registry) readDisplay(ctx context.Context, transportID uint64) (ScreenGeometry, error) {
+func (r *Registry) readDisplay(ctx context.Context, hardwareSerial string, transportID uint64) (ScreenGeometry, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
+	// Some phones reject overlapping display dumps, including across USB/Wi-Fi.
+	// Serialize by hardware identity, not transport, while other phones proceed.
+	r.displayMu.Lock()
+	if r.displayReads == nil {
+		r.displayReads = make(map[string]chan struct{})
+	}
+	gate := r.displayReads[hardwareSerial]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		r.displayReads[hardwareSerial] = gate
+	}
+	r.displayMu.Unlock()
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-probeCtx.Done():
+		return ScreenGeometry{}, &Error{Code: "DISPLAY_INFO_UNAVAILABLE", Message: "设备显示信息读取未完成", Status: 503, Cause: probeCtx.Err()}
+	}
 	stream, err := r.client.Open(probeCtx, transportID, "exec:dumpsys display", probeCtx.Err)
 	if err == nil {
 		geometry, readErr := parseScreenGeometry(io.LimitReader(stream, 256<<10))
-		err = errors.Join(readErr, stream.Close())
+		// Read to EOF before releasing the phone's dump slot; parsing the
+		// primary display alone leaves Android's service still writing.
+		_, drainErr := io.Copy(io.Discard, stream)
+		err = errors.Join(readErr, drainErr, stream.Close())
 		if err == nil {
 			return geometry, nil
 		}
 	}
-	return ScreenGeometry{}, &Error{Code: "DISPLAY_INFO_UNAVAILABLE", Message: "无法读取设备显示尺寸，请同步设备状态后重试", Status: 503, Cause: err}
+	return ScreenGeometry{}, &Error{Code: "DISPLAY_INFO_UNAVAILABLE", Message: "无法读取设备显示尺寸，请刷新设备状态后重试", Status: 503, Cause: err}
 }
 
 type displayWriter interface {

@@ -3,8 +3,10 @@ package media
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"math/rand/v2"
+	"net"
 	"time"
 
 	"droidharbor/internal/capture"
@@ -63,8 +65,9 @@ func (h *hub) ensureSource(ctx context.Context, authorize func() error) error {
 	h.manager.notifyDevice(h.deviceID)
 	source, err := h.manager.deps.Captures.Start(ctx, h.deviceID, requested.capture(revision), authorize)
 	if err != nil {
-		h.fail(err)
-		return &Error{Status: 503, Code: "CAPTURE_START_FAILED", Message: "无法启动设备采集", Cause: err}
+		failure := captureStartFailure(ctx, err)
+		h.fail(failure)
+		return failure
 	}
 	h.mu.Lock()
 	h.source = source
@@ -77,6 +80,20 @@ func (h *hub) ensureSource(ctx context.Context, authorize func() error) error {
 	h.mu.Unlock()
 	go h.pump(source)
 	return h.activateDisplay(ctx, source, authorize)
+}
+
+// Only interrupted transport/startup is retriable; caller cancellation and
+// invalid encoder/protocol configuration keep their distinct semantics.
+func captureStartFailure(ctx context.Context, cause error) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx.Err()
+	}
+	var networkError net.Error
+	code := "CAPTURE_START_FAILED"
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) || errors.Is(cause, io.EOF) || errors.Is(cause, io.ErrUnexpectedEOF) || errors.As(cause, &networkError) {
+		code = "CAPTURE_START_INTERRUPTED"
+	}
+	return &Error{Status: 503, Code: code, Message: "无法启动设备采集", Cause: cause}
 }
 
 // Display activation belongs to viewing, not input ownership. WAKEUP is
@@ -187,7 +204,9 @@ func (h *hub) failSource(source *capture.Stream, err error) {
 		members = append(members, s)
 	}
 	h.mu.Unlock()
-	if err != nil {
+	if errors.Is(err, context.Canceled) {
+		h.manager.deps.Logger.Info("media_source_canceled", "deviceId", h.deviceID, "code", errorCode(err))
+	} else if err != nil {
 		h.manager.deps.Logger.Error("media_source_failed", "deviceId", h.deviceID, "code", errorCode(err), "cause", diagnostics.Cause(err))
 	}
 	h.cancelAllClipboard()

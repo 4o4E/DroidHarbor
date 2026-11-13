@@ -21,6 +21,7 @@ func (s *Stream) Link() leases.Link                     { return s.link }
 func (s *Stream) Frames() <-chan scrcpy.Packet          { return s.frames }
 func (s *Stream) Messages() <-chan scrcpy.DeviceMessage { return s.messages }
 func (s *Stream) Done() <-chan struct{}                 { return s.done }
+func (s *Stream) DisplayPowerChanges() <-chan bool      { return s.displayPower }
 func (s *Stream) Err() error                            { s.mu.Lock(); defer s.mu.Unlock(); return s.err }
 func (s *Stream) cleanupError() error                   { s.mu.Lock(); defer s.mu.Unlock(); return s.cleanupErr }
 
@@ -253,7 +254,11 @@ func (s *Stream) finish(ctx context.Context) error {
 			s.mu.Unlock()
 		}
 		s.manager.remove(s)
-		close(s.frames)
+		if s.manager.controlOnly {
+			close(s.displayPower)
+		} else {
+			close(s.frames)
+		}
 		close(s.messages)
 		close(s.done)
 		s.finishMu.Lock()
@@ -311,6 +316,18 @@ func (s *Stream) readMessages() {
 func (s *Stream) drainShell() {
 	defer s.workers.Done()
 	serverLogs := serverDiagnostics{logger: s.manager.logger, deviceID: s.deviceID, captureID: s.id}
+	if s.manager.controlOnly {
+		serverLogs.powerChanged = func(on bool) {
+			select {
+			case s.displayPower <- on:
+			default:
+			}
+		}
+		serverLogs.keepActiveFailed = func() {
+			s.requestStop(diagnostics.New("scrcpy keep-active worker failed"))
+			go s.finishAsync()
+		}
+	}
 	defer serverLogs.flush()
 	var scratch []byte
 	for {

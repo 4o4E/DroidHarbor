@@ -21,6 +21,7 @@ import (
 	"droidharbor/internal/bundle"
 	"droidharbor/internal/capture"
 	"droidharbor/internal/connections"
+	"droidharbor/internal/deviceruntime"
 	"droidharbor/internal/devices"
 	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
@@ -194,6 +195,8 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	var registry *devices.Registry
 	var tunnels *connections.Manager
 	var captureManager *capture.Manager
+	var powerCaptureManager *capture.Manager
+	var runtimeManager *deviceruntime.Manager
 	var manager *leases.Manager
 	var stateEvents *events.Bus
 	var previewManager *previews.Manager
@@ -210,11 +213,17 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		if mediaManager != nil {
 			failures = append(failures, mediaManager.Close(cleanupCtx))
 		}
+		if runtimeManager != nil {
+			failures = append(failures, runtimeManager.Close())
+		}
 		if manager != nil {
 			failures = append(failures, manager.Close())
 		}
 		if captureManager != nil {
 			failures = append(failures, captureManager.Close(cleanupCtx))
+		}
+		if powerCaptureManager != nil {
+			failures = append(failures, powerCaptureManager.Close(cleanupCtx))
 		}
 		if rtcEndpoint != nil {
 			failures = append(failures, rtcEndpoint.Close())
@@ -243,11 +252,12 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if err != nil {
 		return errors.Join(err, closeRuntime())
 	}
+	powerCaptureManager = captureManager.NewPowerManager()
 	registry.SetTaskCleanup(func(recoveryCtx context.Context, deviceID string) (bool, error) {
 		if err := tunnels.Recover(recoveryCtx, deviceID); err != nil {
 			return false, err
 		}
-		return captureManager.Recover(recoveryCtx, deviceID)
+		return powerCaptureManager.Recover(recoveryCtx, deviceID)
 	})
 	stage = "initialize_leases"
 	manager, err = leases.New(runtimeCtx, db, registry, logger)
@@ -256,6 +266,10 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	}
 	captureManager.SetBootID(manager.BootID())
 	if err := captureManager.SetResourceFailure(manager.ResourceFailure); err != nil {
+		return errors.Join(err, closeRuntime())
+	}
+	powerCaptureManager.SetBootID(manager.BootID())
+	if err := powerCaptureManager.SetResourceFailure(manager.ResourceFailure); err != nil {
 		return errors.Join(err, closeRuntime())
 	}
 	transferConfig.BootID = manager.BootID()
@@ -278,6 +292,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		return errors.Join(err, closeRuntime())
 	}
 	previewManager = previews.New(runtimeCtx, registry, adbClient)
+	runtimeManager = deviceruntime.New(runtimeCtx, registry, powerCaptureManager, previewManager, adbClient, logger)
 	registry.Start(manager)
 	app := &platform.Server{
 		DB: db, Admin: credential, SessionTTL: options.sessionTTL, Logger: logger,

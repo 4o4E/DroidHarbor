@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"droidharbor/internal/adb"
 	"droidharbor/internal/identity"
 )
 
@@ -38,15 +39,15 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 	if !usable {
 		return DiscoveredRegistration{}, &Error{Code: "DEVICE_DISCONNECTED", Message: "待添加设备已离开当前发现清单，请重新读取", Status: 503}
 	}
-	kind := "usb"
-	if _, _, err := net.SplitHostPort(endpoint); err == nil {
-		kind = "wifi"
+	request, err := r.discoveredLink(ctx, observed)
+	if err != nil {
+		return DiscoveredRegistration{}, err
 	}
-	if err := validateLink(LinkRequest{Kind: kind, Endpoint: endpoint}); err != nil {
+	if err := validateLink(request); err != nil {
 		return DiscoveredRegistration{}, err
 	}
 	var result DiscoveredRegistration
-	err := r.db.QueryRowContext(ctx, `SELECT device_id,id,enabled FROM device_links WHERE endpoint=? OR observed_serial=? LIMIT 1`, endpoint, endpoint).Scan(&result.DeviceID, &result.LinkID, &result.Verified)
+	err = r.db.QueryRowContext(ctx, `SELECT device_id,id,enabled FROM device_links WHERE endpoint=? OR observed_serial=? LIMIT 1`, request.Endpoint, endpoint).Scan(&result.DeviceID, &result.LinkID, &result.Verified)
 	if err == nil {
 		result.Existing = true
 		return result, nil
@@ -61,7 +62,7 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 		stop := context.AfterFunc(epoch, cancel)
 		value, err := r.probe(probeCtx, observed.TransportID)
 		if err == nil {
-			screen, err = r.readDisplay(probeCtx, observed.TransportID)
+			screen, err = r.readDisplay(probeCtx, value.Serial, observed.TransportID)
 		}
 		stop()
 		cancel()
@@ -134,7 +135,7 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 			return result, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO device_links(id,device_id,kind,endpoint,observed_serial,identity_evidence,enabled,last_seen_at) VALUES(?,?,?,?,?,?,?,?)`, result.LinkID, result.DeviceID, kind, endpoint, observed.Serial, encoded, result.Verified, time.Now().UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO device_links(id,device_id,kind,endpoint,observed_serial,identity_evidence,enabled,last_seen_at) VALUES(?,?,?,?,?,?,?,?)`, result.LinkID, result.DeviceID, request.Kind, request.Endpoint, observed.Serial, encoded, result.Verified, time.Now().UnixMilli()); err != nil {
 		return result, err
 	}
 	if err := record(ctx, tx, actorID, result.DeviceID, result.LinkID, "device.discovered.register"); err != nil {
@@ -151,4 +152,27 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 	}
 	r.changed(result.DeviceID)
 	return result, nil
+}
+
+// Native ADB auto-connects with a service-name serial. Persist its current
+// routable endpoint and retain that observed serial; identity still comes from
+// the authorized transport probe, never from the advertisement's name.
+func (r *Registry) discoveredLink(ctx context.Context, observed adb.Device) (LinkRequest, error) {
+	serial := strings.TrimSuffix(observed.Serial, ".")
+	if strings.HasSuffix(serial, "."+adb.MDNSConnect) || strings.HasSuffix(serial, "."+adb.MDNSLegacy) {
+		services, err := r.wirelessServices(ctx)
+		if err != nil {
+			return LinkRequest{}, err
+		}
+		for _, service := range services {
+			if service.Type != adb.MDNSPairing && service.Name+"."+service.Type == serial {
+				return LinkRequest{Kind: "wifi", Endpoint: service.Endpoint}, nil
+			}
+		}
+		return LinkRequest{}, &Error{Code: "WIRELESS_SERVICE_CHANGED", Message: "无线服务地址已变化，请重新扫描并连接", Status: 409}
+	}
+	if _, _, err := net.SplitHostPort(observed.Serial); err == nil {
+		return LinkRequest{Kind: "wifi", Endpoint: observed.Serial}, nil
+	}
+	return LinkRequest{Kind: "usb", Endpoint: observed.Serial}, nil
 }

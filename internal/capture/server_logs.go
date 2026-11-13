@@ -12,6 +12,8 @@ type serverDiagnostics struct {
 	deviceID, captureID string
 	pending             [2][]byte
 	dropping            [2]bool
+	powerChanged        func(bool)
+	keepActiveFailed    func()
 }
 
 // Shell output can contain device/user text. Record severity and known exception
@@ -63,10 +65,18 @@ func (s *serverDiagnostics) observe(line []byte) {
 	line = bytes.TrimSpace(line)
 	if bytes.Equal(line, []byte("[server] INFO: Device display turned off")) || bytes.Equal(line, []byte("[server] INFO: Device display turned on")) {
 		s.logger.Info("scrcpy_display_power_changed", "deviceId", s.deviceID, "captureId", s.captureID, "physicalDisplayOn", bytes.HasSuffix(line, []byte(" on")))
+		if s.powerChanged != nil {
+			s.powerChanged(bytes.HasSuffix(line, []byte(" on")))
+		}
 		return
 	}
 	if bytes.Equal(line, []byte("[server] INFO: Device rotation requested: portrait")) || bytes.Equal(line, []byte("[server] INFO: Device rotation requested: landscape")) {
 		s.logger.Info("scrcpy_device_rotation_requested", "deviceId", s.deviceID, "captureId", s.captureID, "landscape", bytes.HasSuffix(line, []byte("landscape")))
+		return
+	}
+	if bytes.Equal(line, []byte("[server] ERROR: Keep active error")) && s.keepActiveFailed != nil {
+		s.logger.Error("scrcpy_keep_active_failed", "deviceId", s.deviceID, "captureId", s.captureID)
+		s.keepActiveFailed()
 		return
 	}
 	if bytes.HasPrefix(line, []byte("[server] ERROR:")) {

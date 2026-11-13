@@ -88,7 +88,8 @@ export function DevicePreview({ device, compact = false, videoRef, videoReady = 
             device={device}
             compact={compact}
             linkSignature={linkSignature}
-            enabled={poll && active && !videoRef}
+            enabled={active && !videoReady && device.runtime?.powerState === 'active' && (poll || device.runtime?.coverState === 'ready')}
+            poll={poll}
             onPreviewFrame={handlePreviewFrame}
           />
         ) : (
@@ -170,14 +171,15 @@ function BrowserVideoPreview({ videoRef, ready, active, visible, device, onFrame
   </>
 }
 
-function LivePreview({ device, compact, linkSignature, enabled, onPreviewFrame }: {
+function LivePreview({ device, compact, linkSignature, enabled, poll, onPreviewFrame }: {
   device: Device
   compact: boolean
   linkSignature: string
   enabled: boolean
+  poll: boolean
   onPreviewFrame: (frame: DevicePreviewFrame | null) => void
 }) {
-  const query = useDevicePreview(device.deviceId, linkSignature, enabled)
+  const query = useDevicePreview(device.deviceId, linkSignature, enabled, poll)
   const frame = query.data
   const [image, setImage] = useState<{ frame: DevicePreviewFrame; url: string }>()
   const [decodeError, setDecodeError] = useState('')

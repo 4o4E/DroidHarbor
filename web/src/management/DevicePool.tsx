@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Cable, CircleDot, LayoutGrid, MonitorSmartphone, Plus, RefreshCw, Search, Unplug, Wifi } from 'lucide-react'
+import { CircleDot, LayoutGrid, MonitorSmartphone, Plus, RefreshCw, Search, Unplug } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,6 +7,7 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Input } from '@/components/ui/input'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { DevicePreview } from '@/devices/DevicePreview'
+import { DeviceMetrics } from '@/devices/DeviceMetrics'
 import { deviceName, deviceNeedsVerification, deviceStatus, type Device } from '@/lib/types'
 
 type Filter = 'all' | 'available' | 'leased' | 'offline' | 'attention'
@@ -24,7 +25,7 @@ function isOffline(device: Device) {
   return device.connectionState !== 'online' && !deviceNeedsVerification(device)
 }
 function needsAttention(device: Device) {
-  return device.connectionState !== 'online' || device.allocationState === 'reclaiming' || device.allocationState === 'quarantined'
+  return device.connectionState !== 'online' || device.allocationState === 'reclaiming' || device.allocationState === 'quarantined' || device.links.some(link => Boolean(link.lastError)) || Boolean(device.runtime?.issues.length)
 }
 function badgeVariant(device: Device): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (isOffline(device) || device.allocationState === 'quarantined') return 'destructive'
@@ -84,25 +85,23 @@ export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDe
       </div>
 
       {visible.length > 0 ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {visible.map(device => <Card key={device.deviceId} className="relative">
-          <Button variant="link" className="absolute inset-0 h-full w-full cursor-pointer rounded-xl" aria-label={`打开${deviceName(device)}的工作台`} onClick={() => onOpen(device)} />
-          <CardHeader>
-            <CardTitle>{deviceName(device)}</CardTitle>
-            <CardDescription>{device.tags.length ? device.tags.join(' · ') : '未设置标签'}</CardDescription>
-            <CardAction><Badge variant={badgeVariant(device)}>{deviceStatus(device)}</Badge></CardAction>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-5">
-            <DevicePreview device={device} />
-            <div className="flex items-center justify-between gap-2 text-sm">
-              <span className="text-muted-foreground">接入链路</span>
-              <span className="flex items-center gap-1.5">{device.links.length === 0 ? '尚未登记' : device.links.map(link => <span key={link.linkId} className="inline-flex items-center gap-1"><LinkIcon kind={link.kind} />{link.kind.toUpperCase()}</span>)}</span>
-            </div>
-            <div className="flex min-h-5 flex-wrap gap-1.5">{device.tags.map(tag => <Badge key={tag} variant="outline">{tag}</Badge>)}</div>
-          </CardContent>
-          <CardFooter className="gap-2">
-            {device.connectionState !== 'online' && device.links.some(link => link.connectionState === 'online' || link.connectionState === 'unauthorized') && <Button className="relative" variant="outline" size="sm" aria-label={`同步${deviceName(device)}状态`} disabled={syncingDeviceId !== null} onClick={() => onSync(device)}><RefreshCw data-icon="inline-start" className={syncingDeviceId === device.deviceId ? 'animate-spin' : undefined} />{syncingDeviceId === device.deviceId ? '同步中…' : '同步状态'}</Button>}
-            <Button className="relative" variant="ghost" size="sm" aria-label={`管理${deviceName(device)}`} onClick={() => onManage(device)}>管理</Button>
-          </CardFooter>
+        {visible.map(device => <Card key={device.deviceId} size="sm" className="flex-row gap-0 py-0">
+          <Button variant="ghost" className="h-auto w-40 self-stretch overflow-hidden rounded-none p-0" aria-label={`预览${deviceName(device)}的画面`} onClick={() => onOpen(device)}>
+            <DevicePreview device={device} compact />
+          </Button>
+          <div className="flex min-w-0 flex-1 flex-col gap-4 pt-4">
+            <CardHeader>
+              <CardTitle className="break-words">{deviceName(device)}</CardTitle>
+              {device.tags.length > 0 && <CardDescription>{device.tags.join(' · ')}</CardDescription>}
+              <CardAction><Badge variant={badgeVariant(device)}>{deviceStatus(device)}</Badge></CardAction>
+            </CardHeader>
+            <CardContent><DeviceMetrics device={device} /></CardContent>
+            <CardFooter className="mt-auto flex-wrap gap-2">
+              <Button size="sm" aria-label={`预览${deviceName(device)}`} onClick={() => onOpen(device)}>预览</Button>
+              <Button variant="outline" size="sm" aria-label={`管理${deviceName(device)}`} onClick={() => onManage(device)}>管理</Button>
+              {needsAttention(device) && <Button variant="outline" size="sm" aria-label={`刷新${deviceName(device)}状态`} disabled={syncingDeviceId !== null} onClick={() => onSync(device)}><RefreshCw data-icon="inline-start" className={syncingDeviceId === device.deviceId ? 'animate-spin' : undefined} />{syncingDeviceId === device.deviceId ? '刷新中…' : '刷新'}</Button>}
+            </CardFooter>
+          </div>
         </Card>)}
       </div> : <Empty className="border">
         <EmptyHeader><EmptyMedia variant="icon"><Search /></EmptyMedia><EmptyTitle>{devices.length ? '没有匹配的设备' : '尚无已登记设备'}</EmptyTitle><EmptyDescription>{devices.length ? '试试其他名称、链接地址、标签或状态。' : '通过明确登记添加经授权的设备链路。'}</EmptyDescription></EmptyHeader>
@@ -114,8 +113,4 @@ export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDe
 
 function Stat({ label, value, icon: Icon }: { label: string; value: number; icon: typeof CircleDot }) {
   return <Card size="sm"><CardHeader><CardDescription>{label}</CardDescription><CardAction><Icon className="size-4 text-muted-foreground" /></CardAction><CardTitle><span className="text-2xl tabular-nums">{value}</span></CardTitle></CardHeader></Card>
-}
-
-function LinkIcon({ kind }: { kind: Device['links'][number]['kind'] }) {
-  return kind === 'usb' ? <Cable className="size-4" /> : <Wifi className="size-4" />
 }

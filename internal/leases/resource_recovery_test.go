@@ -63,7 +63,7 @@ func TestOfflineDeviceCanEnterMaintenanceAfterCleanup(t *testing.T) {
 	// Recover reports resource-cleanup completion, not online health; this
 	// offline fixture has no unclean owned resources.
 	source.setRecovery(func(context.Context, string) (bool, error) { return true, nil })
-	if err := manager.SetMaintenance(context.Background(), "a", true, "admin-session"); err != nil {
+	if err := manager.SetMaintenance(context.Background(), "a", true, "admin-session", nil); err != nil {
 		t.Fatal(err)
 	}
 	var state string
