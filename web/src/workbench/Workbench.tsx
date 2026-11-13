@@ -97,7 +97,7 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
   const sortedDevices = [...devices].sort((a, b) => Number(a.connectionState !== 'online') - Number(b.connectionState !== 'online'))
   return <div className="workbench-layout">
     <ResizablePanelGroup orientation="horizontal" defaultLayout={layout} onLayoutChanged={(next, meta) => { if (meta.isUserInteraction) setLayout(meta.requestedLayout ?? next) }}>
-      <ResizablePanel id="devices" defaultSize="224px" minSize="180px" maxSize="440px" className="h-full">
+      <ResizablePanel id="devices" defaultSize="320px" minSize="280px" maxSize="440px" className="h-full">
         <aside className="device-sidebar" aria-label="设备预览列表">
           <div className="device-sidebar-header"><ToggleGroup spacing={0} variant="outline" value={[mode]} onValueChange={values => { if (values[0] === 'readonly' || values[0] === 'control') onModeChange(values[0]) }} aria-label="会话模式"><ToggleGroupItem value="readonly">只读</ToggleGroupItem><ToggleGroupItem value="control">控制</ToggleGroupItem></ToggleGroup><Button variant="ghost" size="icon-sm" aria-label="独立小窗" title="独立小窗" disabled={!displaySize} onClick={openCompact}><ExternalLink /></Button></div>
           <ToggleGroup orientation="vertical" variant="outline" className="device-list" value={[device.deviceId]} onValueChange={values => { const next = devices.find(item => item.deviceId === values[0]); if (next) selectDevice(next) }} aria-label="切换设备">
@@ -106,17 +106,21 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
               const size = selected ? displaySize : deviceDisplaySize(item)
               return <ToggleGroupItem key={item.deviceId} value={item.deviceId} aria-label={`切换到${deviceName(item)}`} className={`device-list-item ${item.connectionState !== 'online' ? 'device-unavailable' : ''}`}>
               <span className="device-list-heading"><span className="device-list-name">{deviceName(item)}</span><span className="device-occupancy" role="img" aria-label={item.allocationState === 'leased' ? '已分配' : '未分配'} title={item.allocationState === 'leased' ? '已分配给 AI 任务' : '未分配给 AI 任务'}>{item.allocationState === 'leased' ? <CircleDot /> : <Circle />}</span></span>
-              <DevicePreview device={item} compact poll={false} videoRef={selected ? session?.videoRef : undefined} videoReady={selected && !!session?.ready} captureRef={selected ? previewCapture : undefined} />
               <span className="device-list-info">
+                <DevicePreview device={item} compact poll={false} videoRef={selected ? session?.videoRef : undefined} videoReady={selected && !!session?.ready} captureRef={selected ? previewCapture : undefined} />
+                <DeviceMetrics device={item} compact />
+              </span>
+              <span className={`device-video-state ${selected && session?.status === 'failed' ? 'text-destructive' : ''}`}>
+                <span className="device-resolution">{size ? `${size.width} × ${size.height}` : '— × —'}</span>
+                <span className="device-fps">{selected && session?.ready ? `${session.framesPerSecond.toFixed(1)} fps` : '— fps'}</span>
+                <span className="device-session-state" title={selected ? `当前页面：${stateLabel}` : undefined}>{selected ? <><Video />{stateLabel}</> : '—'}</span>
                 <span className="device-exceptions">
                   {deviceNeedsVerification(item) ? <ShieldAlert aria-label="待核验"><title>待核验</title></ShieldAlert> : item.connectionState !== 'online' ? <Unplug aria-label="设备不可用"><title>{deviceStatus(item)}</title></Unplug> : null}
                   {item.allocationState === 'maintenance' && <Wrench aria-label="维护中"><title>维护中</title></Wrench>}
                   {item.allocationState === 'quarantined' && <ShieldAlert aria-label="已隔离"><title>已隔离</title></ShieldAlert>}
                   {item.allocationState === 'reclaiming' && <LoaderCircle aria-label="回收中"><title>回收中</title></LoaderCircle>}
                 </span>
-                <span className={`device-video-state ${selected && session?.status === 'failed' ? 'text-destructive' : ''}`}>{selected && <span className="flex items-center gap-1" title={`当前页面：${stateLabel}`}><Video />{stateLabel}</span>}{size && <span>{size.width} × {size.height}{selected && session?.ready && <><br />{session.framesPerSecond.toFixed(1)} fps</>}</span>}</span>
               </span>
-              <DeviceMetrics device={item} compact />
             </ToggleGroupItem>})}
           </ToggleGroup>
         </aside>

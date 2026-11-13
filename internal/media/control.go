@@ -98,7 +98,7 @@ func (s *session) onPeerReady() {
 		s.peerReadyClosed = true
 		freshStartup := !s.awaitingKey && len(s.frames) != 0 && !s.startupKeyAt.IsZero() && time.Since(s.startupKeyAt) <= initialFrameMaxAge
 		if !freshStartup {
-			s.discardStartupFramesLocked()
+			s.discardQueuedFramesLocked()
 			s.awaitingKey = true
 			s.waitingSince = time.Now()
 			requested = true
@@ -111,15 +111,15 @@ func (s *session) onPeerReady() {
 	}
 }
 
-// Discard an incomplete or stale startup GOP as a unit, never from a P frame.
-func (s *session) discardStartupFramesLocked() {
+// Discard the GOP, including a dequeued frame still awaiting its accounting lock.
+func (s *session) discardQueuedFramesLocked() {
 	s.frameGeneration++
 	s.startupKeyAt = time.Time{}
+	clear(s.frameGenerations)
+	s.queuedFrameBytes = 0
 	for {
 		select {
-		case frame := <-s.frames:
-			s.queuedFrameBytes -= frame.size
-			delete(s.frameGenerations, frame)
+		case <-s.frames:
 		default:
 			return
 		}
@@ -415,80 +415,68 @@ func (s *session) offerFrame(frame *videoFrame) error {
 	if s.ctx.Err() != nil {
 		return nil
 	}
+	if frame.size > maxFrameQueueBytes {
+		s.logBackpressureLocked(frame, "frame_too_large")
+		return problem(503, "SLOW_VIEWER", "单帧视频超过观看队列字节上限")
+	}
 	if !s.peerReadyClosed && frame.key {
-		s.discardStartupFramesLocked()
+		s.discardQueuedFramesLocked()
 		s.awaitingKey = true
 	}
-	if !s.peerReadyClosed && (len(s.frames) == cap(s.frames) || s.queuedFrameBytes+frame.size > maxFrameQueueBytes) {
-		s.discardStartupFramesLocked()
-		s.awaitingKey = true
+	if len(s.frames) == cap(s.frames) || s.queuedFrameBytes+frame.size > maxFrameQueueBytes {
+		if s.peerReadyClosed {
+			s.recoverBackpressureLocked(frame)
+		} else {
+			s.discardQueuedFramesLocked()
+			s.awaitingKey = true
+		}
 	}
 	if s.awaitingKey && !frame.key {
 		return nil
 	}
-	if len(s.frames) == cap(s.frames) || s.queuedFrameBytes+frame.size > maxFrameQueueBytes {
-		return problem(503, "SLOW_VIEWER", "观看者无法及时接收视频帧")
+	s.frames <- frame // Only this producer writes; the bounded queue has room.
+	s.queuedFrameBytes += frame.size
+	if s.frameGenerations == nil {
+		s.frameGenerations = make(map[*videoFrame]uint64)
 	}
-	select {
-	case s.frames <- frame:
-		s.queuedFrameBytes += frame.size
-		if s.frameGenerations == nil {
-			s.frameGenerations = make(map[*videoFrame]uint64)
+	s.frameGenerations[frame] = s.frameGeneration
+	if frame.key {
+		s.awaitingKey = false
+		if !s.peerReadyClosed {
+			s.startupKeyAt = frame.observedAt
 		}
-		s.frameGenerations[frame] = s.frameGeneration
-		if frame.key {
-			s.awaitingKey = false
-			if !s.peerReadyClosed {
-				s.startupKeyAt = frame.observedAt
-			}
-			s.waitingSince = time.Time{}
-		}
-		return nil
-	default:
-		return problem(503, "SLOW_VIEWER", "观看者无法及时接收视频帧")
 	}
+	return nil
 }
 
 func (s *session) invalidateFrame() {
 	s.mu.Lock()
 	s.awaitingKey = true
-	s.startupKeyAt = time.Time{}
 	s.ready, s.readyEpoch, s.boundaryTimestamp = false, 0, 0
 	s.frameTimestampCount, s.frameTimestampNext = 0, 0
 	s.keyNoticeSent = false
-	s.frameGeneration++
-	for {
-		select {
-		case frame := <-s.frames:
-			s.queuedFrameBytes -= frame.size
-			delete(s.frameGenerations, frame)
-		default:
-			s.mu.Unlock()
-			return
-		}
-	}
+	s.discardQueuedFramesLocked()
+	s.mu.Unlock()
 }
 
 func (s *session) requestKeyFrame() {
 	s.mu.Lock()
 	if s.ctx.Err() == nil {
-		s.frameGeneration++
+		// One outstanding encoder reset is enough; repeated PLI/FIR must not
+		// continually discard the requested GOP or restart all viewers.
+		if !s.backpressureSince.IsZero() || !s.waitingSince.IsZero() {
+			s.mu.Unlock()
+			return
+		}
+		s.waitingSince = time.Now()
+		s.discardQueuedFramesLocked()
 		s.ready, s.readyEpoch, s.boundaryTimestamp = false, 0, 0
 		s.awaitingKey = true
-		s.startupKeyAt = time.Time{}
 		s.frameTimestampCount, s.frameTimestampNext = 0, 0
 		s.keyNoticeSent = false
-		for {
-			select {
-			case frame := <-s.frames:
-				s.queuedFrameBytes -= frame.size
-				delete(s.frameGenerations, frame)
-			default:
-				s.mu.Unlock()
-				go s.resetDeviceVideo()
-				return
-			}
-		}
+		s.mu.Unlock()
+		go s.resetDeviceVideo()
+		return
 	}
 	s.mu.Unlock()
 }
@@ -534,7 +522,12 @@ func (s *session) markFrameSent(frame *videoFrame, generation uint64) (bool, boo
 	}
 	notify := false
 	if frame.key && !s.keyNoticeSent {
+		s.waitingSince = time.Time{}
 		s.frameTimestampCount, s.frameTimestampNext = 0, 0
+		if !s.backpressureSince.IsZero() {
+			s.manager.deps.Logger.Info("media_viewer_backpressure_recovered", "sessionId", s.id, "deviceId", h.deviceID, "recoveryMs", time.Since(s.backpressureSince).Milliseconds())
+			s.backpressureSince = time.Time{}
+		}
 		s.keyNoticeSent = true
 		notify = true
 	}
@@ -572,9 +565,12 @@ func (s *session) runVideo() {
 				continue
 			}
 			s.mu.Lock()
-			s.queuedFrameBytes -= frame.size
 			generation, queued := s.frameGenerations[frame]
-			delete(s.frameGenerations, frame)
+			if queued {
+				s.queuedFrameBytes -= frame.size
+				delete(s.frameGenerations, frame)
+				s.sendingFrameAt = time.Now()
+			}
 			s.mu.Unlock()
 			if !queued {
 				continue
@@ -590,6 +586,10 @@ func (s *session) runVideo() {
 					return
 				}
 			}
+			s.mu.Lock()
+			s.lastFrameSendDuration = time.Since(s.sendingFrameAt)
+			s.sendingFrameAt = time.Time{}
+			s.mu.Unlock()
 			sent, notify := false, false
 			if complete {
 				sent, notify = s.markFrameSent(frame, generation)

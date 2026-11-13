@@ -487,6 +487,7 @@ paths:
         cached=true 仅读取当前链路最近封面，不发起 ADB 截图；保留真实采集时间。
         JPEG 最长边不超过 480 像素，保留比例；不是原始 PNG 截图接口。
         Capture 时间属于实际采集，不是本次 HTTP 响应时间。
+        客户端取消只结束本次等待，不中断其他调用方共享的截图任务；记录取消，不报采集失败。
       security: [{adminSession: []}]
       parameters:
         - in: query
@@ -512,6 +513,7 @@ paths:
         '400': {$ref: '#/components/responses/Error'}
         '401': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
+        '499': {description: 客户端取消请求，无响应正文；实际采集故障及超时仍明确报告}
         '503': {$ref: '#/components/responses/Error'}
   /api/v1/devices/{id}/links:
     parameters:

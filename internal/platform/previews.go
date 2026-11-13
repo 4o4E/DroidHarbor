@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -60,6 +61,11 @@ func (s *Server) devicePreview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) previewError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, context.Canceled) && errors.Is(r.Context().Err(), context.Canceled) {
+		s.Logger.Info("preview_request_canceled", "requestId", r.Context().Value(requestKey{}), "deviceId", r.PathValue("id"))
+		w.WriteHeader(499) // The client ended this request; shared capture continues.
+		return
+	}
 	var deviceErr *devices.Error
 	if errors.As(err, &deviceErr) {
 		s.domainError(w, r, deviceErr)

@@ -74,13 +74,14 @@ export function DevicePreview({ device, compact = false, videoRef, videoReady = 
   return (
     <div
       ref={rootRef}
-      className={cn('overflow-hidden border', compact && 'device-list-preview')}
+      className={cn('device-preview overflow-hidden', compact && 'device-list-preview')}
       aria-label={`${device.displayName}的画面预览`}
+      style={compact && displaySize ? { width: `min(100%, ${180 * displaySize.width / displaySize.height}px)` } : undefined}
       title={compact ? device.displayName : currentFrame
         ? `${device.displayName} · 拍摄于 ${new Date(currentFrame.capturedAt).toLocaleString('zh-CN')}`
         : `${device.displayName} · ${online ? '暂无最新预览' : '设备不可用'}`}
     >
-      <div className={cn('flex w-full items-center justify-center bg-background text-foreground', !compact && 'h-56')} style={compact && displaySize ? { aspectRatio: `${displaySize.width} / ${displaySize.height}` } : undefined}>
+      <div className={cn('device-preview-surface flex w-full items-center justify-center text-foreground', !compact && 'h-56')} style={compact && displaySize ? { aspectRatio: `${displaySize.width} / ${displaySize.height}` } : undefined}>
         <BrowserVideoPreview key={linkIdentity} videoRef={videoRef} ready={videoReady} active={online && active} visible={online} device={device} onFrame={handleVideoFrame} captureRef={captureRef} />
         {!hasVideoFrame && (online ? (
           <LivePreview

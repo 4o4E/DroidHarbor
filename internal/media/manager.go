@@ -450,14 +450,13 @@ func (m *Manager) watch() {
 			}
 			m.mu.Unlock()
 			for _, s := range sessions {
-				s.mu.Lock()
-				waitingForKey := s.peerReadyClosed && s.awaitingKey && !s.waitingSince.IsZero() && now.Sub(s.waitingSince) > keyFrameTimeout
-				connectionExpired := s.peer != nil && !s.peerReadyClosed && !s.peerStarted.IsZero() && now.Sub(s.peerStarted) > peerConnectionTimeout
-				s.mu.Unlock()
-				if waitingForKey {
-					s.beginEnd(problem(503, "KEY_FRAME_TIMEOUT", "设备未能及时提供可解码关键帧"))
+				if err := s.frameWaitError(now); err != nil {
+					s.beginEnd(err)
 					continue
 				}
+				s.mu.Lock()
+				connectionExpired := s.peer != nil && !s.peerReadyClosed && !s.peerStarted.IsZero() && now.Sub(s.peerStarted) > peerConnectionTimeout
+				s.mu.Unlock()
 				if connectionExpired {
 					s.beginEnd(problem(503, "MEDIA_CONNECTION_TIMEOUT", "WebRTC 媒体连接超时"))
 					continue

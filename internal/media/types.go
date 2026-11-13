@@ -143,6 +143,9 @@ type session struct {
 	awaitingKey                                             bool
 	waitingSince                                            time.Time
 	startupKeyAt                                            time.Time
+	backpressureSince                                       time.Time
+	sendingFrameAt                                          time.Time
+	lastFrameSendDuration                                   time.Duration
 	frameGenerations                                        map[*videoFrame]uint64
 	ready                                                   bool
 	queuedFrameBytes, queuedControlBytes, queuedOutputBytes int
