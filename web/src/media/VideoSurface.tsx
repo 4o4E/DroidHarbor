@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type CompositionEvent, type KeyboardEvent, type MouseEvent, type PointerEvent, type WheelEvent } from 'react'
 import { useErrorNotification } from '@/lib/notifications'
 import type { ControlReply, MediaSession, SessionMode } from './types'
+import { androidMetaState } from './keyModifiers'
 
 type VideoSurfaceProps = {
   session: MediaSession
@@ -68,10 +69,6 @@ function androidKeyCode(code: string): number | undefined {
   if (/^Numpad[0-9]$/.test(code)) return 144 + Number(code[6])
   if (/^F([1-9]|1[0-2])$/.test(code)) return 131 + Number(code.slice(1)) - 1
   return undefined
-}
-
-function metaState(event: KeyboardEvent): number {
-  return (event.shiftKey ? 1 : 0) | (event.altKey ? 2 : 0) | (event.ctrlKey ? 0x1000 : 0) | (event.metaKey ? 0x10000 : 0)
 }
 
 function describeReply(reply: ControlReply): string {
@@ -351,7 +348,7 @@ export function VideoSurface({ session, mode, rotation = 0, mirrored = false, pa
     if (keyCode === undefined) return
     event.preventDefault()
     keysRef.current.set(event.code, keyCode)
-    send('key', { keyCode, action: 0, repeat: event.repeat ? 1 : 0, metaState: metaState(event) })
+    send('key', { keyCode, action: 0, repeat: event.repeat ? 1 : 0, metaState: androidMetaState(event) })
   }
 
   const onKeyUp = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -364,7 +361,7 @@ export function VideoSurface({ session, mode, rotation = 0, mirrored = false, pa
     keysRef.current.delete(event.code)
     if (!canControl) return
     event.preventDefault()
-    send('key', { keyCode, action: 1, repeat: 0, metaState: metaState(event) })
+    send('key', { keyCode, action: 1, repeat: 0, metaState: androidMetaState(event) })
   }
 
   const onPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {

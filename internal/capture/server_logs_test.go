@@ -39,3 +39,27 @@ func TestServerDiagnosticsPreserveErrorsAcrossPacketsWithoutRawContent(t *testin
 		t.Fatal("fragmented, interleaved, or truncated diagnostics lost their severity")
 	}
 }
+
+func TestOnlyExplicitEncoderConfigurationRejectionAllowsFallback(t *testing.T) {
+	for _, test := range []struct {
+		line     string
+		rejected bool
+	}{
+		{"[server] ERROR: Capture/encoding error: java.lang.IllegalArgumentException: unsupported bitrate", true},
+		{"[server] ERROR: Capture/encoding error: android.media.MediaCodec$CodecException: unsupported", true},
+		{"[server] ERROR: Capture/encoding error: java.io.IOException: socket closed", false},
+		{"[server] ERROR: Capture/encoding error: java.lang.SecurityException: permission denied", false},
+		{"[server] ERROR: Capture/encoding error: java.lang.IllegalStateException: stopped", false},
+		{"[server] ERROR: java.lang.IllegalArgumentException: unrelated", false},
+	} {
+		t.Run(test.line, func(t *testing.T) {
+			rejected := false
+			observer := serverDiagnostics{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), encodingFailed: func() { rejected = true }}
+			observer.write(1, []byte(test.line[:12]))
+			observer.write(1, []byte(test.line[12:]+"\n"))
+			if rejected != test.rejected {
+				t.Fatalf("fallback classification=%v; want %v", rejected, test.rejected)
+			}
+		})
+	}
+}

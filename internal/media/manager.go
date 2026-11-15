@@ -22,6 +22,7 @@ func New(ctx context.Context, deps Dependencies) *Manager {
 		cancel:          cancel,
 		sessions:        make(map[string]*session),
 		hubs:            make(map[string]*hub),
+		closingDevices:  make(map[string]bool),
 		screenshotSlots: make(chan struct{}, 2),
 	}
 	m.watcher.Add(1)
@@ -101,11 +102,22 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 		commands: make(chan []byte, 64), output: make(chan []byte, 64), done: make(chan struct{}),
 	}
 	m.mu.Lock()
-	if m.closed || len(m.sessions) >= maxSessions {
+	if m.closed || m.closingDevices[deviceID] || len(m.sessions) >= maxSessions {
 		m.mu.Unlock()
 		cancel()
 		cancelInteraction()
 		return SessionSnapshot{}, problem(503, "MEDIA_CAPACITY", "媒体会话暂不可用")
+	}
+	var registered bool
+	err = m.deps.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE id=? AND removed_at IS NULL)`, deviceID).Scan(&registered)
+	if err != nil || !registered {
+		m.mu.Unlock()
+		cancel()
+		cancelInteraction()
+		if err != nil {
+			return SessionSnapshot{}, err
+		}
+		return SessionSnapshot{}, problem(404, "DEVICE_NOT_FOUND", "设备不存在")
 	}
 	m.sessions[s.id] = s
 	m.mu.Unlock()
@@ -141,6 +153,7 @@ func (m *Manager) Join(ctx context.Context, owner, deviceID, mode, offer string)
 	go s.runVideo()
 	go s.runCommands()
 	go s.runOutput()
+	go h.initializeAudio(s)
 	if err := m.record(ctx, s, "human-session-open", "succeeded", ""); err != nil {
 		s.beginEnd(err)
 		return SessionSnapshot{}, &Error{Status: 503, Code: "STORAGE_UNAVAILABLE", Message: "无法记录人工会话", Cause: err}
@@ -298,6 +311,7 @@ func (s *session) finish(reason error) {
 	}
 	if last {
 		h.cancelAllClipboard()
+		cleanupErr = errors.Join(cleanupErr, h.stopAudio(ctx))
 	}
 	cleanupErr = errors.Join(cleanupErr, stopErr)
 	if inputErr != nil && stopErr == nil {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"math"
-	"math/rand/v2"
 	"net"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/scrcpy"
 	"github.com/pion/rtp"
-	"github.com/pion/rtp/codecs"
 )
 
 // Caller holds changeMu; a viewer joining never starts a second encoder.
@@ -58,28 +56,8 @@ func (h *hub) ensureSource(ctx context.Context, authorize func() error) error {
 		}
 		return h.activateDisplay(ctx, current, authorize)
 	}
-	h.status, h.errorCode, h.effective = "starting", "", nil
-	h.sourceReady, h.sourceReadyClosed = make(chan struct{}), false
-	requested, revision := h.requested, h.revision
 	h.mu.Unlock()
-	h.manager.notifyDevice(h.deviceID)
-	source, err := h.manager.deps.Captures.Start(ctx, h.deviceID, requested.capture(revision), authorize)
-	if err != nil {
-		failure := captureStartFailure(ctx, err)
-		h.fail(failure)
-		return failure
-	}
-	h.mu.Lock()
-	h.source = source
-	h.captureRevision = revision
-	h.waitingSession = true
-	if h.packetizer == nil {
-		h.packetizer = rtp.NewPacketizer(1200, 102, 0, &codecs.H264Payloader{}, rtp.NewRandomSequencer(), 90000)
-		h.lastTimestamp = rand.Uint32()
-	}
-	h.mu.Unlock()
-	go h.pump(source)
-	return h.activateDisplay(ctx, source, authorize)
+	return h.startSource(ctx, authorize)
 }
 
 // Only interrupted transport/startup is retriable; caller cancellation and
@@ -232,7 +210,7 @@ func (h *hub) pump(source *capture.Stream) {
 				err = h.publishFrame(source, packet)
 			}
 			if err != nil {
-				h.failSource(source, err)
+				h.captureError(source, err)
 				return
 			}
 		case message, ok := <-messages:
@@ -253,7 +231,7 @@ func (h *hub) sourceEnded(source *capture.Stream) {
 	if err == nil {
 		err = problem(503, "CAPTURE_ENDED", "设备采集已结束")
 	}
-	h.failSource(source, err)
+	h.captureError(source, err)
 }
 
 func (h *hub) beginEpoch(source *capture.Stream, packet scrcpy.Packet) error {
@@ -370,12 +348,13 @@ func (h *hub) publishFrame(source *capture.Stream, packet scrcpy.Packet) error {
 	}
 	becameEffective := h.effective == nil && packet.KeyFrame
 	if becameEffective {
-		h.effective = &EffectiveVideo{Width: h.width, Height: h.height, Revision: h.captureRevision}
+		h.effective = &EffectiveVideo{Width: h.width, Height: h.height, Revision: h.captureRevision, Parameters: h.requested, GlobalRevision: h.globalRevision}
 		h.status, h.errorCode = "running", ""
-		if !h.sourceReadyClosed {
-			close(h.sourceReady)
-			h.sourceReadyClosed = true
-		}
+	}
+	recordProfile := becameEffective && !h.profileRecorded
+	var profile videoProfile
+	if recordProfile {
+		profile = videoProfile{TargetRevision: h.globalRevision, Target: h.targetQuality, Applied: h.requested}
 	}
 	h.statisticsFrames++
 	h.statisticsBytes += int64(len(packet.Data))
@@ -394,6 +373,23 @@ func (h *hub) publishFrame(source *capture.Stream, packet scrcpy.Packet) error {
 	}
 	h.mu.Unlock()
 	if becameEffective {
+		if recordProfile {
+			ctx, cancel := context.WithTimeout(h.manager.ctx, controlTimeout)
+			err := h.manager.saveVideoProfile(ctx, h.deviceID, profile)
+			cancel()
+			if err != nil {
+				return &Error{Status: 503, Code: "STORAGE_UNAVAILABLE", Message: "无法保存实际成功的画质档位", Cause: err}
+			}
+		}
+		h.mu.Lock()
+		if h.source == source {
+			h.profileRecorded = true
+			if !h.sourceReadyClosed {
+				close(h.sourceReady)
+				h.sourceReadyClosed = true
+			}
+		}
+		h.mu.Unlock()
 		h.manager.notifyDevice(h.deviceID)
 	}
 	return nil

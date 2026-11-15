@@ -2,7 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errorMessage } from './api'
 import { useAuth } from './auth'
-import type { AdminSession, Caller, Device, VideoSnapshot } from './types'
+import type { AdminSession, Caller, Device, GlobalVideoSnapshot, SystemPreferences } from './types'
 
 let snapshotsReady = false
 const readinessListeners = new Set<() => void>()
@@ -36,16 +36,22 @@ export function useCallers() {
   const ready = useSnapshotsReady()
   return useQuery({ queryKey: ['callers'], enabled: !!session && ready, queryFn: async ({ signal }) => (await api<{ callers: Caller[] }>('/callers', { signal })).callers })
 }
-export function useVideoSettings(deviceId: string) {
+export function useGlobalVideoSettings() {
   const { session } = useAuth()
   const ready = useSnapshotsReady()
   return useQuery({
-    queryKey: ['video-settings', deviceId],
-    enabled: !!session && ready && !!deviceId,
-    queryFn: ({ signal }) => api<VideoSnapshot>('/devices/' + encodeURIComponent(deviceId) + '/video-settings', { signal }),
+    queryKey: ['global-video-settings'],
+    enabled: !!session && ready,
+    queryFn: ({ signal }) => api<GlobalVideoSnapshot>('/video-settings', { signal }),
     refetchInterval: 2000,
     refetchIntervalInBackground: false,
   })
+}
+
+export function useSystemPreferences() {
+  const { session } = useAuth()
+  const ready = useSnapshotsReady()
+  return useQuery({ queryKey: ['system-preferences'], enabled: !!session && ready, queryFn: ({ signal }) => api<SystemPreferences>('/system-preferences', { signal }) })
 }
 
 // Events invalidate snapshots only. Reopening this read-only stream never replays a device action.
@@ -67,7 +73,8 @@ export function usePlatformEvents() {
     const refresh = () => {
       void client.invalidateQueries({ queryKey: ['devices'] })
       void client.invalidateQueries({ queryKey: ['callers'] })
-      void client.invalidateQueries({ queryKey: ['video-settings'] })
+      void client.invalidateQueries({ queryKey: ['global-video-settings'] })
+      void client.invalidateQueries({ queryKey: ['system-preferences'] })
     }
     const connect = () => {
       source?.close()

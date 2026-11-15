@@ -1,4 +1,6 @@
 export type SessionMode = 'readonly' | 'control'
+export type AudioRoute = 'muted' | 'device' | 'browser'
+export interface SystemPreferences { audioDefault: AudioRoute; windowScales: number[]; audioGainMax: number; revision: number }
 export type ConnectionState = 'online' | 'offline' | 'unauthorized'
 export type AllocationState = 'available' | 'leased' | 'reclaiming' | 'quarantined' | 'maintenance'
 export type DiscoveredDevice = { serial: string; state: string; transportId: number; model?: string; product?: string }
@@ -60,14 +62,19 @@ export interface AdminSession {
   csrfToken: string
   expiresAt?: string
 }
-export interface VideoParameters { maxSize: number; maxFps: number; bitRate: number }
-export interface VideoSnapshot {
-  requested: VideoParameters
-  effective: { width: number; height: number; framesPerSecond: number; encodedBitsPerSecond: number; revision: number } | null
-  status: 'idle' | 'pending' | 'starting' | 'running' | 'reconfiguring' | 'stopping' | 'failed'
+export interface VideoQuality { maxFps: number; bitRate: number }
+export interface VideoFallback {
+  deviceId: string
   revision: number
-  captureEpoch: number
-  errorCode?: string
+  target: VideoQuality
+  applied: VideoQuality
+  status: 'trying' | 'applied' | 'failed'
+  reason: string
+}
+export interface GlobalVideoSnapshot {
+  requested: VideoQuality
+  revision: number
+  fallbacks: VideoFallback[]
 }
 export const deviceName = (device: Device) => device.displayName
 

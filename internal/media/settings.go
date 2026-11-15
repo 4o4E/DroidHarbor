@@ -23,7 +23,7 @@ func (m *Manager) getHub(ctx context.Context, deviceID string) (*hub, error) {
 	}
 	var requested VideoParameters
 	var revision int64
-	err := m.deps.DB.QueryRowContext(ctx, `SELECT video_max_size,video_max_fps,video_bit_rate,video_revision FROM devices WHERE id=?`, deviceID).Scan(&requested.MaxSize, &requested.MaxFPS, &requested.BitRate, &revision)
+	err := m.deps.DB.QueryRowContext(ctx, `SELECT d.video_max_size,g.max_fps,g.bit_rate,d.video_revision FROM devices d CROSS JOIN global_video_settings g WHERE d.id=? AND g.id=1`, deviceID).Scan(&requested.MaxSize, &requested.MaxFPS, &requested.BitRate, &revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, problem(404, "DEVICE_NOT_FOUND", "设备不存在")
 	}
@@ -65,7 +65,16 @@ func (m *Manager) Video(ctx context.Context, owner, deviceID string) (VideoSnaps
 	if err != nil {
 		return VideoSnapshot{}, err
 	}
-	return h.snapshot(), nil
+	target, deviceRevision, globalRevision, _, err := m.captureConfiguration(ctx, deviceID)
+	if err != nil {
+		return VideoSnapshot{}, err
+	}
+	snapshot := h.snapshot()
+	snapshot.Requested, snapshot.Revision, snapshot.GlobalRevision = target, deviceRevision, globalRevision
+	if snapshot.Effective != nil {
+		snapshot.Pending = snapshot.Effective.GlobalRevision != globalRevision || snapshot.Effective.Revision != deviceRevision
+	}
+	return snapshot, nil
 }
 
 func (m *Manager) PatchVideo(ctx context.Context, owner, deviceID string, patch VideoPatch) (VideoSnapshot, error) {
@@ -84,7 +93,7 @@ func (m *Manager) PatchVideo(ctx context.Context, owner, deviceID string, patch 
 		}
 		ctx, authorize = scope.Context, scope.Check
 	}
-	if patch.Revision < 1 || (patch.MaxSize == nil && patch.MaxFPS == nil && patch.BitRate == nil) {
+	if patch.Revision < 1 || patch.MaxSize == nil {
 		return VideoSnapshot{}, problem(422, "INVALID_VIDEO_SETTINGS", "必须提供当前 revision 和要修改的参数")
 	}
 	h, err := m.getHub(ctx, deviceID)
@@ -105,12 +114,6 @@ func (m *Manager) PatchVideo(ctx context.Context, owner, deviceID string, patch 
 	if patch.MaxSize != nil {
 		requested.MaxSize = *patch.MaxSize
 	}
-	if patch.MaxFPS != nil {
-		requested.MaxFPS = *patch.MaxFPS
-	}
-	if patch.BitRate != nil {
-		requested.BitRate = *patch.BitRate
-	}
 	if requested.MaxSize <= 0 || requested.MaxSize > math.MaxUint16 || requested.MaxFPS <= 0 || requested.MaxFPS > math.MaxInt32 || requested.BitRate <= 0 || requested.BitRate > math.MaxInt32 {
 		return VideoSnapshot{}, problem(422, "INVALID_VIDEO_SETTINGS", "画质参数超出设备协议的数值范围")
 	}
@@ -118,7 +121,7 @@ func (m *Manager) PatchVideo(ctx context.Context, owner, deviceID string, patch 
 	unchanged := requested == h.requested
 	h.mu.Unlock()
 	if unchanged {
-		return h.snapshot(), nil
+		return m.Video(ctx, owner, deviceID)
 	}
 	if revision == math.MaxInt64 {
 		return VideoSnapshot{}, problem(409, "VIDEO_REVISION_EXHAUSTED", "画质配置版本已达到上限")
@@ -128,7 +131,7 @@ func (m *Manager) PatchVideo(ctx context.Context, owner, deviceID string, patch 
 		return VideoSnapshot{}, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE devices SET video_max_size=?,video_max_fps=?,video_bit_rate=?,video_revision=video_revision+1 WHERE id=? AND video_revision=?`, requested.MaxSize, requested.MaxFPS, requested.BitRate, deviceID, revision)
+	result, err := tx.ExecContext(ctx, `UPDATE devices SET video_max_size=?,video_revision=video_revision+1 WHERE id=? AND video_revision=?`, requested.MaxSize, deviceID, revision)
 	if err != nil {
 		return VideoSnapshot{}, err
 	}
@@ -163,5 +166,5 @@ func (m *Manager) PatchVideo(ctx context.Context, owner, deviceID string, patch 
 			return h.snapshot(), err
 		}
 	}
-	return h.snapshot(), nil
+	return m.Video(ctx, owner, deviceID)
 }

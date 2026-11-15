@@ -19,11 +19,13 @@ var (
 )
 
 type Peer struct {
-	endpoint  *Endpoint
-	pc        *webrtc.PeerConnection
-	track     *webrtc.TrackLocalStaticRTP
-	sender    *webrtc.RTPSender
-	callbacks Callbacks
+	endpoint    *Endpoint
+	pc          *webrtc.PeerConnection
+	track       *webrtc.TrackLocalStaticRTP
+	sender      *webrtc.RTPSender
+	audioTrack  *webrtc.TrackLocalStaticRTP
+	audioSender *webrtc.RTPSender
+	callbacks   Callbacks
 
 	mu              sync.Mutex
 	closed          bool
@@ -82,6 +84,9 @@ func (p *Peer) installHandlers() {
 	})
 	p.pc.OnDataChannel(p.acceptDataChannel)
 	go p.drainRTCP()
+	if p.audioSender != nil {
+		go p.drainAudioRTCP()
+	}
 }
 
 func (p *Peer) acceptDataChannel(channel *webrtc.DataChannel) {

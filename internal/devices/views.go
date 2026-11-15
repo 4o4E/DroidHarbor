@@ -45,7 +45,7 @@ type Discovered struct {
 }
 
 func (r *Registry) registeredEndpoints(ctx context.Context) (map[string]bool, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT endpoint,coalesce(observed_serial,'') FROM device_links`)
+	rows, err := r.db.QueryContext(ctx, `SELECT endpoint,coalesce(observed_serial,'') FROM device_links WHERE device_id IN (SELECT id FROM devices WHERE removed_at IS NULL)`)
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id,display_name,allocation_state,maintenance_requested,CASE WHEN ? THEN display_info END,generation FROM devices ORDER BY id`, admin)
+	rows, err := tx.QueryContext(ctx, `SELECT id,display_name,allocation_state,maintenance_requested,CASE WHEN ? THEN display_info END,generation FROM devices WHERE removed_at IS NULL ORDER BY id`, admin)
 	if err != nil {
 		return nil, false, err
 	}
@@ -157,7 +157,7 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, false, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT device_id,tag FROM device_tags ORDER BY device_id,tag`)
+	rows, err = tx.QueryContext(ctx, `SELECT device_id,tag FROM device_tags WHERE device_id IN (SELECT id FROM devices WHERE removed_at IS NULL) ORDER BY device_id,tag`)
 	if err != nil {
 		return nil, false, err
 	}
@@ -173,7 +173,7 @@ func (r *Registry) List(ctx context.Context, admin bool) ([]View, bool, error) {
 	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
 		return nil, false, err
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT device_id,id,kind,endpoint,coalesce(observed_serial,endpoint),enabled FROM device_links ORDER BY id`)
+	rows, err = tx.QueryContext(ctx, `SELECT device_id,id,kind,endpoint,coalesce(observed_serial,endpoint),enabled FROM device_links WHERE device_id IN (SELECT id FROM devices WHERE removed_at IS NULL) ORDER BY id`)
 	if err != nil {
 		return nil, false, err
 	}
@@ -283,7 +283,7 @@ func (r *Registry) Patch(ctx context.Context, actorID, deviceID string, patch Pa
 	r.mutations.Lock()
 	defer r.mutations.Unlock()
 	var exists bool
-	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE id=?)`, deviceID).Scan(&exists); err != nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE id=? AND removed_at IS NULL)`, deviceID).Scan(&exists); err != nil {
 		return err
 	}
 	if !exists {

@@ -68,7 +68,7 @@ func New(bootID string) *Bus {
 }
 
 func (b *Bus) Publish(change Change) (Event, error) {
-	if change.EntityType != "device" && change.EntityType != "device-runtime" && change.EntityType != "lease" && change.EntityType != "caller" {
+	if change.EntityType != "device" && change.EntityType != "device-runtime" && change.EntityType != "video-settings" && change.EntityType != "system-preferences" && change.EntityType != "lease" && change.EntityType != "caller" {
 		return Event{}, fmt.Errorf("invalid entity type")
 	}
 	if change.EntityID == "" {

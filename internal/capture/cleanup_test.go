@@ -22,11 +22,15 @@ import (
 
 func TestRecoveryWaitsForOwnedCleanupHelper(t *testing.T) {
 	for _, test := range []struct {
-		name            string
-		unknownIdentity bool
+		name             string
+		unknownIdentity  bool
+		survivingProcess bool
+		refuseStop       bool
 	}{
 		{name: "helper finishes after parent"},
 		{name: "unconfirmed helper keeps resource pending", unknownIdentity: true},
+		{name: "owned survivor exits after termination", survivingProcess: true},
+		{name: "termination failure keeps resource pending", survivingProcess: true, refuseStop: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -49,6 +53,8 @@ func TestRecoveryWaitsForOwnedCleanupHelper(t *testing.T) {
 			var workers sync.WaitGroup
 			var helperProbes atomic.Int32
 			var helperAbsent, artifactRemoved atomic.Bool
+			var processAlive atomic.Bool
+			processAlive.Store(test.survivingProcess)
 			workers.Add(1)
 			go func() {
 				defer workers.Done()
@@ -102,8 +108,23 @@ func TestRecoveryWaitsForOwnedCleanupHelper(t *testing.T) {
 						output := ""
 						switch command {
 						case processProbeCommand(loc):
-							output = "GONE"
+							if processAlive.Load() {
+								output = "MATCH"
+							} else {
+								output = "GONE"
+							}
+						case processStopCommand(loc):
+							if test.refuseStop {
+								output = "ERROR"
+							} else {
+								processAlive.Store(false)
+								output = "SIGNALED"
+							}
 						case helperProbeCommand(loc.Jar):
+							if processAlive.Load() {
+								t.Error("helper cleanup began before capture exit")
+								return
+							}
 							if test.unknownIdentity {
 								output = "ERROR"
 							} else if helperProbes.Add(1) == 1 {
@@ -160,11 +181,11 @@ func TestRecoveryWaitsForOwnedCleanupHelper(t *testing.T) {
 			if err := db.QueryRow(`SELECT state FROM owned_resources WHERE id='capture'`).Scan(&state); err != nil {
 				t.Fatal(err)
 			}
-			if test.unknownIdentity {
+			if test.unknownIdentity || test.refuseStop {
 				if complete || recoveryErr == nil || artifactRemoved.Load() || state == "cleaned" {
 					t.Fatalf("unconfirmed helper was released: complete=%v err=%v removed=%v state=%s", complete, recoveryErr, artifactRemoved.Load(), state)
 				}
-			} else if !complete || recoveryErr != nil || !artifactRemoved.Load() || state != "cleaned" {
+			} else if !complete || recoveryErr != nil || processAlive.Load() || !artifactRemoved.Load() || state != "cleaned" {
 				t.Fatal(fmt.Sprintf("normal asynchronous helper failed recovery: complete=%v err=%v removed=%v state=%s", complete, recoveryErr, artifactRemoved.Load(), state))
 			}
 		})

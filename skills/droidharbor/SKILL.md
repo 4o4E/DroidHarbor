@@ -29,11 +29,14 @@ Set these values in the harness's live environment/configuration (not as secrets
 ```text
 <cli> version
 <cli> capabilities --server <server-address> --credential-file <caller-JSON>
+<cli> devices --server <server-address> --credential-file <caller-JSON>
 <cli> claim --server <server-address> --credential-file <caller-JSON> --task-dir <private-task-dir> --task-id <task-id> --tag <required-tag> [--tag <another-required-tag>]
 <cli> status --task-dir <private-task-dir>
 ```
 
-Confirm API major 1 and `remoteAdb` capability before connecting. Each supplied `--tag` is required; selection is not an any-tag match. A claim gets a 900-second lease. Save the task directory and original claim inputs. If claim returns result-unknown (exit 6), preserve the directory, caller credential, task ID, tags, and request ID. `status` cannot query the lease until a lease ID is saved; if it reports that the initial claim result is unknown, explicitly rerun the identical `claim` with the same directory, server, credential, task ID, and tags. The CLI reuses the saved task secret and idempotency key and the server returns the original lease/terminal result; never change the parameters, create another task directory, or use a new key.
+Confirm API major 1 and `remoteAdb` capability before connecting. `devices` returns enrolled device IDs, exact display names, tags, connection/allocation states, and discovery readiness without management endpoints or task identities. When the user specifies a phone, use `claim ... --device-name <exact-name>` or `claim ... --device-id <complete-device-id>` (mutually exclusive). A duplicate name returns `DEVICE_NAME_AMBIGUOUS` with candidate IDs; list devices and choose the intended complete ID. A missing, offline, occupied, disabled, or tag-mismatched selected phone fails explicitly; never silently claim another phone. Each supplied `--tag` is required, including with a device selector.
+
+A claim gets a 900-second lease. Save the task directory and original claim inputs. If claim returns result-unknown (exit 6), preserve the directory, caller credential, task ID, tags, device selector, and request ID. `status` cannot query the lease until a lease ID is saved; if it reports that the initial claim result is unknown, explicitly rerun the identical `claim` with the same directory, server, credential, task ID, tags, and device selector. The CLI reuses the saved task secret and idempotency key and the server returns the original lease/terminal result; never change the parameters, create another task directory, or use a new key.
 
 ## Connect and operate
 

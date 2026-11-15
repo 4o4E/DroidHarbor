@@ -25,7 +25,7 @@ func runADBService(args []string) error {
 	flags := flag.NewFlagSet("adb-serve", flag.ContinueOnError)
 	adbPath := flags.String("adb", "", "绝对路径的官方 adb 可执行文件（必填）")
 	listen := flags.String("listen", "", "仅回环地址的显式 ADB 监听 host:port（必填）")
-	logPath := flags.String("log-file", "", "追加写入的 JSON 服务日志（必填）")
+	logPath := flags.String("log-file", "", "文本服务日志基名（必填，统一使用 .log 扩展名）")
 	authSeedDir := flags.String("auth-seed-dir", "", "首次启动时导入的 ADB 授权材料目录（可选，不覆盖已有内容）")
 	startupTimeout := flags.Duration("startup-timeout", 10*time.Second, "ADB 服务启动和协议就绪时限")
 	if err := flags.Parse(args); err != nil {

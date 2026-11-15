@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, errorMessage } from '@/lib/api'
 import type { SessionMode } from '@/lib/types'
 import type { ControlReply, MediaSession } from './types'
+import { stereoAudioOffer } from './audioOffer'
 
 const CONTROL_LABEL = 'droidharbor.control.v1'
 const CONTROL_MESSAGE_LIMIT = 2 << 20
@@ -111,6 +112,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 })
   const [framesPerSecond, setFramesPerSecond] = useState(0)
   const [remoteState, setRemoteState] = useState<RemoteStreamState | null>(null)
+  const [audioState, setAudioState] = useState<{ runtime: MediaRuntime; stream: MediaStream } | null>(null)
   const [recoveryAllowed, setRecoveryAllowed] = useState(false)
   const [recoveryGeneration, setRecoveryGeneration] = useState(0)
   const recoveryAttempts = useRef(0)
@@ -562,6 +564,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         if (h264.length === 0) throw new Error('当前浏览器没有可用的 H.264 解码能力')
         const transceiver = peer.addTransceiver('video', { direction: 'recvonly' })
         transceiver.setCodecPreferences(h264)
+        const opus = RTCRtpReceiver.getCapabilities('audio')?.codecs.filter(codec => codec.mimeType.toLowerCase() === 'audio/opus') ?? []
+        if (opus.length) peer.addTransceiver('audio', { direction: 'recvonly' }).setCodecPreferences(opus)
         const channel = peer.createDataChannel(CONTROL_LABEL, { ordered: true })
         channel.binaryType = 'arraybuffer'
         runtime.channel = channel
@@ -584,6 +588,11 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         }
         peer.ontrack = event => {
           if (!isCurrent()) return
+          if (event.track.kind === 'audio') {
+            setAudioState({ runtime, stream: new MediaStream([event.track]) })
+            event.track.onended = () => { if (isCurrent()) { setAudioState(null); console.error('media_audio_track_ended', { deviceId, sessionId: runtime.sessionId }) } }
+            return
+          }
           if (event.track.kind !== 'video') {
             void teardown('failed', '服务端发送了不支持的媒体轨道')
             return
@@ -598,7 +607,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
 
         const offer = await peer.createOffer()
         if (!isCurrent()) return
-        await peer.setLocalDescription(offer)
+        if (!offer.sdp) throw new Error('浏览器未生成 WebRTC offer')
+        await peer.setLocalDescription({ type: offer.type, sdp: stereoAudioOffer(offer.sdp) })
         if (!isCurrent()) return
         const sdp = peer.localDescription?.sdp
         if (!sdp) throw new Error('浏览器未生成 WebRTC offer')
@@ -675,7 +685,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     }
     let callbackId = 0
     let active = true
-    let fpsStartedAt = 0
+    let fpsStartedAt: number | null = null
     let fpsFrames = 0
     const frame = (_now: number, metadata: RTPVideoFrameMetadata) => {
       if (!active || runtimeRef.current !== runtime || !runtime.active) return
@@ -718,13 +728,15 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         }
       }
       const time = metadata.expectedDisplayTime ?? performance.now()
-      if (fpsStartedAt === 0) fpsStartedAt = time
-      fpsFrames++
-      const elapsed = time - fpsStartedAt
-      if (elapsed >= 1000) {
-        setFramesPerSecond(Math.round(fpsFrames * 1000 / elapsed))
+      // Callbacks may skip already presented frames when the main thread is
+      // busy. Count the compositor's cumulative frames, not callback visits.
+      if (fpsStartedAt === null) {
         fpsStartedAt = time
-        fpsFrames = 0
+        fpsFrames = metadata.presentedFrames
+      } else if (time - fpsStartedAt >= 1000) {
+        setFramesPerSecond(Math.round((metadata.presentedFrames - fpsFrames) * 1000 / (time - fpsStartedAt)))
+        fpsStartedAt = time
+        fpsFrames = metadata.presentedFrames
       }
       callbackId = video.requestVideoFrameCallback!(frame)
     }
@@ -763,9 +775,10 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     height: sameScope ? dimensions.height : 0,
     framesPerSecond: sameScope ? framesPerSecond : 0,
     videoRef,
+    audioStream: sameScope && currentRuntime === audioState?.runtime && currentRuntime?.active ? audioState.stream : null,
     command,
     release,
     suspend,
     close,
-  }), [sameScope, enabled, foreground, present, sessionId, reportedStatus, sessionError, cleanupError, ready, hasFrame, hasDecodedVideo, epoch, dimensions, framesPerSecond, command, release, suspend, close])
+  }), [sameScope, enabled, foreground, present, sessionId, reportedStatus, sessionError, cleanupError, ready, hasFrame, hasDecodedVideo, epoch, dimensions, framesPerSecond, command, release, suspend, close, currentRuntime, audioState])
 }

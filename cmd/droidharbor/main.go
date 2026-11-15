@@ -196,6 +196,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	var tunnels *connections.Manager
 	var captureManager *capture.Manager
 	var powerCaptureManager *capture.Manager
+	var audioCaptureManager *capture.Manager
 	var runtimeManager *deviceruntime.Manager
 	var manager *leases.Manager
 	var stateEvents *events.Bus
@@ -225,6 +226,9 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		if powerCaptureManager != nil {
 			failures = append(failures, powerCaptureManager.Close(cleanupCtx))
 		}
+		if audioCaptureManager != nil {
+			failures = append(failures, audioCaptureManager.Close(cleanupCtx))
+		}
 		if rtcEndpoint != nil {
 			failures = append(failures, rtcEndpoint.Close())
 		}
@@ -253,9 +257,14 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 		return errors.Join(err, closeRuntime())
 	}
 	powerCaptureManager = captureManager.NewPowerManager()
+	audioCaptureManager = captureManager.NewAudioManager()
 	registry.SetTaskCleanup(func(recoveryCtx context.Context, deviceID string) (bool, error) {
 		if err := tunnels.Recover(recoveryCtx, deviceID); err != nil {
 			return false, err
+		}
+		complete, err := audioCaptureManager.Recover(recoveryCtx, deviceID)
+		if err != nil || !complete {
+			return complete, err
 		}
 		return powerCaptureManager.Recover(recoveryCtx, deviceID)
 	})
@@ -272,6 +281,10 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if err := powerCaptureManager.SetResourceFailure(manager.ResourceFailure); err != nil {
 		return errors.Join(err, closeRuntime())
 	}
+	audioCaptureManager.SetBootID(manager.BootID())
+	if err := audioCaptureManager.SetResourceFailure(manager.ResourceFailure); err != nil {
+		return errors.Join(err, closeRuntime())
+	}
 	transferConfig.BootID = manager.BootID()
 	stateEvents = events.New(manager.BootID())
 	manager.SetEvents(stateEvents)
@@ -283,7 +296,8 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	}
 	mediaManager = media.New(runtimeCtx, media.Dependencies{
 		DB: db, ADB: adbClient, Source: registry, Captures: captureManager, Transport: rtcEndpoint,
-		Events: stateEvents, TaskOwner: manager.EventTask, AdminVersion: credential.Version,
+		AudioCaptures: audioCaptureManager,
+		Events:        stateEvents, TaskOwner: manager.EventTask, AdminVersion: credential.Version,
 		Logger: logger,
 	})
 	stage = "initialize_transfers"
@@ -293,6 +307,18 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	}
 	previewManager = previews.New(runtimeCtx, registry, adbClient)
 	runtimeManager = deviceruntime.New(runtimeCtx, registry, powerCaptureManager, previewManager, adbClient, logger)
+	registry.SetRemovalCleanup(func(ctx context.Context, id string) (func(), error) {
+		releaseMedia, err := mediaManager.BlockDevice(ctx, id)
+		if err != nil {
+			return releaseMedia, err
+		}
+		releasePower, err := runtimeManager.PauseDevice(ctx, id)
+		release := func() { releasePower(); releaseMedia() }
+		if err != nil {
+			return release, err
+		}
+		return release, errors.Join(captureManager.StopDevice(ctx, id), powerCaptureManager.StopDevice(ctx, id), audioCaptureManager.StopDevice(ctx, id), tunnels.Recover(ctx, id))
+	})
 	registry.Start(manager)
 	app := &platform.Server{
 		DB: db, Admin: credential, SessionTTL: options.sessionTTL, Logger: logger,

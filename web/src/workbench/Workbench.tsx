@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Layout } from 'react-resizable-panels'
-import { Circle, CircleDot, ExternalLink, LoaderCircle, ShieldAlert, Unplug, Video, Wrench } from 'lucide-react'
+import { CircleDot, ExternalLink, LoaderCircle, ShieldAlert, Unplug, Wrench } from 'lucide-react'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
@@ -9,15 +9,19 @@ import { DevicePreview } from '@/devices/DevicePreview'
 import type { MediaSession } from '@/media/types'
 import { deviceDisplaySize, deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { WorkbenchTools } from './WorkbenchTools'
-import { WorkbenchSession, mediaStateLabel, workbenchViewKey, type WorkbenchView } from './WorkbenchSession'
+import { WorkbenchSession, workbenchViewKey, type WorkbenchView } from './WorkbenchSession'
 import { DeviceMetrics } from '@/devices/DeviceMetrics'
 import { errorMessage } from '@/lib/api'
-import { compactWindowSize } from './compactWindowSize'
+import { openCompact } from './openCompact'
+import { useSystemPreferences } from '@/lib/queries'
+import { useErrorNotification } from '@/lib/notifications'
 
 type Props = { device: Device; devices: readonly Device[]; onDeviceChange: (device: Device) => void; mode: SessionMode; onModeChange: (mode: SessionMode) => void }
 
 export function Workbench({ device, devices, onDeviceChange, mode, onModeChange }: Props) {
   const [layout, setLayout] = useState<Layout>()
+  const preferences = useSystemPreferences()
+  useErrorNotification('无法读取小窗设置', preferences.error)
   const selectedKey = workbenchViewKey(device.deviceId, mode)
   const [views, setViews] = useState<{ selected: string; items: WorkbenchView[] }>({ selected: selectedKey, items: [{ key: selectedKey, deviceId: device.deviceId, mode, instance: 0, until: 0 }] })
   const [sessions, setSessions] = useState<Record<string, MediaSession>>({})
@@ -80,48 +84,34 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
   }
   const savedSize = deviceDisplaySize(device)
   const displaySize = session?.width && session.height ? { width: session.width, height: session.height } : savedSize
-  const openCompact = () => {
-    if (!displaySize) return
-    const url = new URL(window.location.href)
-    url.search = new URLSearchParams({ view: 'compact', device: device.deviceId, mode }).toString()
-    const size = compactWindowSize(displaySize.width / displaySize.height, 0.8)
-    const popup = window.open('about:blank', '_blank', `popup,width=${size.innerWidth},height=${size.innerHeight}`)
-    if (!popup) {
-      toast.add({ title: '浏览器阻止了小窗', description: '允许此网站打开弹窗后，再点击“独立小窗”。', type: 'error', timeout: 0, actionProps: { children: '重新打开', onClick: openCompact } })
-      return
-    }
-    popup.opener = null
-    popup.location.replace(url)
-  }
-  const stateLabel = mediaStateLabel(device, session)
   const sortedDevices = [...devices].sort((a, b) => Number(a.connectionState !== 'online') - Number(b.connectionState !== 'online'))
   return <div className="workbench-layout">
     <ResizablePanelGroup orientation="horizontal" defaultLayout={layout} onLayoutChanged={(next, meta) => { if (meta.isUserInteraction) setLayout(meta.requestedLayout ?? next) }}>
       <ResizablePanel id="devices" defaultSize="320px" minSize="280px" maxSize="440px" className="h-full">
         <aside className="device-sidebar" aria-label="设备预览列表">
-          <div className="device-sidebar-header"><ToggleGroup spacing={0} variant="outline" value={[mode]} onValueChange={values => { if (values[0] === 'readonly' || values[0] === 'control') onModeChange(values[0]) }} aria-label="会话模式"><ToggleGroupItem value="readonly">只读</ToggleGroupItem><ToggleGroupItem value="control">控制</ToggleGroupItem></ToggleGroup><Button variant="ghost" size="icon-sm" aria-label="独立小窗" title="独立小窗" disabled={!displaySize} onClick={openCompact}><ExternalLink /></Button></div>
+          <div className="device-sidebar-header"><ToggleGroup spacing={0} variant="outline" value={[mode]} onValueChange={values => { if (values[0] === 'readonly' || values[0] === 'control') onModeChange(values[0]) }} aria-label="会话模式"><ToggleGroupItem value="readonly">只读</ToggleGroupItem><ToggleGroupItem value="control">控制</ToggleGroupItem></ToggleGroup></div>
           <ToggleGroup orientation="vertical" variant="outline" className="device-list" value={[device.deviceId]} onValueChange={values => { const next = devices.find(item => item.deviceId === values[0]); if (next) selectDevice(next) }} aria-label="切换设备">
             {sortedDevices.map(item => {
               const selected = item.deviceId === device.deviceId
               const size = selected ? displaySize : deviceDisplaySize(item)
-              return <ToggleGroupItem key={item.deviceId} value={item.deviceId} aria-label={`切换到${deviceName(item)}`} className={`device-list-item ${item.connectionState !== 'online' ? 'device-unavailable' : ''}`}>
-              <span className="device-list-heading"><span className="device-list-name">{deviceName(item)}</span><span className="device-occupancy" role="img" aria-label={item.allocationState === 'leased' ? '已分配' : '未分配'} title={item.allocationState === 'leased' ? '已分配给 AI 任务' : '未分配给 AI 任务'}>{item.allocationState === 'leased' ? <CircleDot /> : <Circle />}</span></span>
-              <span className="device-list-info">
-                <DevicePreview device={item} compact poll={false} videoRef={selected ? session?.videoRef : undefined} videoReady={selected && !!session?.ready} captureRef={selected ? previewCapture : undefined} />
-                <DeviceMetrics device={item} compact />
-              </span>
-              <span className={`device-video-state ${selected && session?.status === 'failed' ? 'text-destructive' : ''}`}>
-                <span className="device-resolution">{size ? `${size.width} × ${size.height}` : '— × —'}</span>
-                <span className="device-fps">{selected && session?.ready ? `${session.framesPerSecond.toFixed(1)} fps` : '— fps'}</span>
-                <span className="device-session-state" title={selected ? `当前页面：${stateLabel}` : undefined}>{selected ? <><Video />{stateLabel}</> : '—'}</span>
-                <span className="device-exceptions">
-                  {deviceNeedsVerification(item) ? <ShieldAlert aria-label="待核验"><title>待核验</title></ShieldAlert> : item.connectionState !== 'online' ? <Unplug aria-label="设备不可用"><title>{deviceStatus(item)}</title></Unplug> : null}
-                  {item.allocationState === 'maintenance' && <Wrench aria-label="维护中"><title>维护中</title></Wrench>}
-                  {item.allocationState === 'quarantined' && <ShieldAlert aria-label="已隔离"><title>已隔离</title></ShieldAlert>}
-                  {item.allocationState === 'reclaiming' && <LoaderCircle aria-label="回收中"><title>回收中</title></LoaderCircle>}
-                </span>
-              </span>
-            </ToggleGroupItem>})}
+              return <div key={item.deviceId} className={`device-list-item ${item.connectionState !== 'online' ? 'device-unavailable' : ''}`} data-selected={selected}>
+                <ToggleGroupItem value={item.deviceId} aria-label={`切换到${deviceName(item)}`} className="device-select-card"><span className="sr-only">{deviceName(item)}</span></ToggleGroupItem>
+                <div className="device-list-preview">
+                  <DevicePreview device={item} compact poll={false} videoRef={selected ? session?.videoRef : undefined} videoReady={selected && !!session?.ready} captureRef={selected ? previewCapture : undefined} />
+                </div>
+                <div className="device-list-details">
+                  <div className="device-list-heading"><span className="device-list-name">{deviceName(item)}</span><span className="device-exceptions">
+                    {item.allocationState === 'leased' && <CircleDot aria-label="已分配"><title>已分配给 AI</title></CircleDot>}
+                    {deviceNeedsVerification(item) ? <ShieldAlert aria-label="待核验"><title>待核验</title></ShieldAlert> : item.connectionState !== 'online' ? <Unplug aria-label="设备不可用"><title>{deviceStatus(item)}</title></Unplug> : null}
+                    {item.allocationState === 'maintenance' && <Wrench aria-label="不可分配"><title>不可分配</title></Wrench>}
+                    {item.allocationState === 'quarantined' && <ShieldAlert aria-label="已隔离"><title>已隔离</title></ShieldAlert>}
+                    {item.allocationState === 'reclaiming' && <LoaderCircle aria-label="回收中"><title>回收中</title></LoaderCircle>}
+                  </span></div>
+                  <DeviceMetrics device={item} compact />
+                  <div className="device-video-state"><span className="device-resolution">{size ? `${size.width} × ${size.height}` : '— × —'}</span><span className="device-fps">{selected && session?.ready ? `${session.framesPerSecond.toFixed(1)} fps` : '— fps'}</span></div>
+                </div>
+                <Button size="icon-sm" variant="ghost" className="device-window-button" disabled={!preferences.data || !deviceDisplaySize(item)} aria-label={`打开${deviceName(item)}独立小窗`} title="独立小窗" onClick={() => { if (preferences.data) openCompact(item, mode, preferences.data) }}><ExternalLink /></Button>
+              </div>})}
           </ToggleGroup>
         </aside>
       </ResizablePanel>
@@ -133,6 +123,6 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
         })}</section>
       </ResizablePanel>
     </ResizablePanelGroup>
-    {session && <WorkbenchTools key={device.deviceId} device={device} mode={mode} session={session} />}
+    <WorkbenchTools device={device} mode={mode} session={session} />
   </div>
 }

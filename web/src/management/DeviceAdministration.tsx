@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Cable, RefreshCw, Wifi } from 'lucide-react'
+import { Cable, RefreshCw, Trash2, Wifi } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -27,12 +27,14 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
   const [tagsText, setTagsText] = useState('')
   const [busy, setBusy] = useState('')
   const [maintenanceConfirmation, setMaintenanceConfirmation] = useState<{ generation: number } | null>(null)
+  const [deletion, setDeletion] = useState<{ version: string; generation: number; occupied: boolean } | null>(null)
 
   useEffect(() => {
     if (!open || !device) return
     setDisplayName(device.displayName)
     setTagsText(device.tags.join(', '))
     setMaintenanceConfirmation(null)
+    setDeletion(null)
   }, [open, device?.deviceId, device?.version])
 
   async function perform(action: string, request: () => Promise<void>, success: string) {
@@ -116,6 +118,22 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
     }
   }
 
+  async function removeDevice() {
+    if (!device || !deletion || busy) return
+    setBusy('delete')
+    try {
+      await api<void>('/devices/' + encodeURIComponent(device.deviceId), { method: 'DELETE', body: { version: deletion.version, confirmedLeaseGeneration: deletion.occupied ? deletion.generation : undefined } })
+      setDeletion(null)
+      onOpenChange(false)
+      await onChanged()
+      toast.add({ title: '设备已删除', type: 'success' })
+    } catch (error) {
+      setDeletion(null)
+      toast.add({ title: '设备未删除', description: errorMessage(error), type: 'error', timeout: 0, actionProps: { children: '重新读取', onClick: () => void refreshAfterConflict() } })
+      await refreshAfterConflict()
+    } finally { setBusy('') }
+  }
+
   return <>
     <CreateDeviceDialog open={addDeviceOpen} onOpenChange={onAddDeviceOpenChange} onCreated={onChanged} />
     <Dialog open={open && !!device} onOpenChange={next => { if (!busy) onOpenChange(next) }}>
@@ -143,6 +161,7 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
               </Field>
             </CardContent>
           </Card>
+          <Button variant="destructive" className="self-start" disabled={Boolean(busy)} onClick={() => setDeletion({ version: device.version, generation: device.leaseGeneration, occupied: device.allocationState === 'leased' })}><Trash2 />删除设备</Button>
         </div>}
         <DialogFooter><Button variant="outline" disabled={Boolean(busy)} onClick={() => onOpenChange(false)}>关闭</Button></DialogFooter>
       </DialogContent>
@@ -157,6 +176,12 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
           <Button variant="outline" disabled={Boolean(busy)} onClick={() => setMaintenanceConfirmation(null)}>取消</Button>
           <Button variant="destructive" disabled={Boolean(busy)} onClick={() => { if (maintenanceConfirmation) void requestMaintenance(true, maintenanceConfirmation.generation) }}>{busy === 'maintenance' ? '正在关闭…' : '结束任务并关闭分配'}</Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={open && deletion !== null} onOpenChange={next => { if (!next && !busy) setDeletion(null) }}>
+      <DialogContent showCloseButton={!busy}>
+        <DialogHeader><DialogTitle>删除{device?.displayName}？</DialogTitle><DialogDescription>{deletion?.occupied ? '将结束当前 AI 任务及所有平台预览。' : '将关闭该设备的平台预览。'}移除设备登记并回收平台资源，保留手机应用、账号和文件。重新使用需再次添加。</DialogDescription></DialogHeader>
+        <DialogFooter><Button variant="outline" disabled={Boolean(busy)} onClick={() => setDeletion(null)}>取消</Button><Button variant="destructive" disabled={Boolean(busy)} onClick={() => void removeDevice()}>{busy === 'delete' ? '正在删除…' : '删除设备'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>

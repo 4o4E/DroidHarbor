@@ -213,9 +213,9 @@ OpenAPI 3.1 文档由实现与合同共同维护，未实现接口不能宣称�
 
 #### 8.2 画质修改与坐标
 
-新登记设备的业务默认值为 maxSize=1920、maxFps=60、bitRate=12000000；不改变既有 schema 或额外改写旧设备。网页只提供帧率与码率下拉，分别为 30/60/90/120 fps、4/8/12/20/40 Mbps，保留现有后台 maxSize 合同。PATCH 仍独立修改字段并校验 revision，手机编码器不支持时明确失败，不降档。
+帧率与码率使用唯一全局配置，默认 maxFps=60、bitRate=12000000；网页提供 30/60/90/120 fps、4/8/12/20/40 Mbps 下拉，切换设备保持相同全局目标。设备长边策略保持原值，默认 1920。全局 PATCH 独立修改字段并校验全局 revision，不接受设备级帧率/码率设置。
 
-无观看者时只保存配置，状态为待下次采集应用；有观看者时明确广播切换状态，释放未完成输入并重建所需采集。取得可解码画面后才标记 effective；失败报告错误，不自动降档或宣称成功，用户可明确修改参数恢复。
+保存只更新配置，不重建或打断任何现有共享采集，包括十五秒保留流。同设备新窗口继续共享原流，直到原采集结束；下一次新建采集读取最新目标。明确原生编码配置失败时，按下述已批准规则回退，不把目标值当作实际参数；ADB、网络、权限及资源归属错误保留原故障。
 
 分辨率按手机当前画面比例及编码器 alignment 计算；不能 CSS 拉伸、裁切或伪报标准 1080p。对齐产生的实际像素尺寸透明返回，显示保持比例，输入映射以实际帧尺寸为准。页面留黑边不算裁切；旋转/翻转的逆变换与设备旋转分别处理。
 
@@ -271,7 +271,8 @@ OpenAPI 3.1 文档由实现与合同共同维护，未实现接口不能宣称�
 | --- | --- | --- |
 | `caller_credentials` | id、name、secret_hash、created_at、revoked_at | secret_hash 唯一；撤销后禁止新任务并终止现有授权；名字不是身份 |
 | `admin_sessions` | id、secret_hash、admin_credential_version、created_at、expires_at、revoked_at | Cookie 只持有随机会话秘密；轮换管理员令牌使旧版本会话失效 |
-| `devices` | id、display_name、allocation_state、generation、maintenance_requested、video_max_size、video_max_fps、video_bit_rate、video_revision、last_error、display_info | generation 非负递增；display_info 为可空、有效 JSON 对象，仅保存屏幕/最近视频几何信息及观测时间；旧记录通过 schema 2 迁移保留并补采 |
+| `devices` | id、display_name、allocation_state、generation、maintenance_requested、video_max_size、video_revision、video_last_good、last_error、display_info | generation 非负递增；显示 JSON 保留几何与观测时间；video_last_good 只保存真实有效帧确认的目标版本/参数和成功档位，不是独立可编辑配置；schema 3 移除设备级帧率与码率字段，保留其余资料 |
+| `global_video_settings` | id、max_fps、bit_rate、revision | 仅 id=1 一条配置；参数和版本为正整数，默认 60/12000000/1；配置及操作记录同事务保存，不在事务中执行手机 I/O |
 | `device_links` | id、device_id、kind、endpoint、observed_serial、identity_evidence、enabled、last_seen_at | device_id 外键；kind 为 USB/Wi-Fi；当前 endpoint 唯一但不是永久设备身份，换地址须验证归属 |
 | `device_tags` | device_id、tag | 联合主键，无重复标签；不存账号密码；标签修改不改变已有租约 |
 | `tasks` | id、caller_id、external_task_id、task_secret_hash、created_at | `(caller_id, external_task_id)` 唯一；秘密摘要唯一，caller 外键；任务授权不可仅凭可猜 taskId 恢复 |
@@ -396,3 +397,18 @@ ADB 容器单独重启视为底层连接中断，关闭旧子流，状态置离�
 - `dumpsys battery` 提供电池温度、电量、电源连接及实际充电状态；十分之一摄氏度按协议换算。接电不等于充电中，已充满/未充电分别呈现。缺失、非数值或读取失败保持该项不可用，记录阶段及安全原因，不用其他传感器冒充。
 - 最新指标和封面只在运行时缓存，不保存历史或新增数据库 schema；网页读取共享结果不按页面重复采样。运行态数据及 `device-runtime` 通知仅管理员可见；通知只使设备快照失效，不改变配置 version、不重置编辑草稿或视频连接。后台读取不创建/续期任务、不发送业务输入，离线或移除取消，失败去重通知且可追溯，恢复记录真实观测时间。
 - 正式卡片复用现有 shadcn/ui Nova、Lucide 及主题，label/value 同行；设备池保留左图右信息与独立预览/管理按钮，工作台保留大图、可拖侧栏、占用图标及高亮。尺寸附属信息失败仍保留已核验在线状态，显示错误并允许显式刷新重新获取，不替换健康链路代次或中断视频。
+
+### 按天文本日志与故障恢复补充（2026-11-14 用户确认）
+
+- 控制台与文件使用固定 pattern：UTC+8 的 `yyyy-MM-dd HH:mm:ss.SSS LEVEL [短设备ID] msg | 诊断值`；短设备 ID 为前八位，仅日志展示，无设备时用占位，不输出字段 label=value。保留完整请求/会话关联值、安全原因及分组层次；日志基名统一 .log，不混写旧 JSON。复用 lumberjack 与有界历史，跨日判断跟随 UTC+8，写入及轮转失败保持 stderr 可见。
+- 恢复旧账本且无活跃采集拥有者时，按当前核验链路、账本归属及设备 boot UUID/PID/start ticks 重新确认进程身份，再在同一手机命令内定向发送 TERM；等待实际退出及辅助进程结束后移除自身资源。身份已失效或进程已退出不发信号；不按进程名、UID 或端口批量终止，不操作外部 scrcpy、手机应用或密码设置。正常停止仍先关闭自身连接并等待自然退出。
+- 网页 FPS 使用视频累计呈现帧的时间差计算，不把主线程视频回调次数当作帧数。配置为采集上限，静态画面及低帧率内容不保证持续输出上限；瓶颈判断需要实际源、传输与呈现证据，不靠补帧、降档或固定显示值掩盖问题。
+
+
+## 全局画质、透明回退与指定设备（2026-11-14 用户确认）
+
+- schema 3 在 EXE 启动时事务迁移：新增全局目标，移除独立设备帧率/码率，新增可空成功档位缓存；旧登记、标签、链路、分配意图、长边及屏幕资料保持。旧请求参数不能冒充已验证成功档位；升级前备份，旧 EXE 使用旧版匹配备份。
+- 仅原生明确的编码配置错误触发有限回退；优先最近成功且不超过目标的帧率/码率，无合适记录使用 30 fps/4 Mbps，重复档位去重。所有候选均失败则返回明确错误，不继续无界重试，不降分辨率或掩盖 ADB/网络/权限故障。
+- 成功档位只在真实参数集和有效关键帧后记录；同一目标版本可复用已成功回退结果，避免重复启动失败，修改全局配置后重新尝试目标。目标、当前实际参数及回退阶段分开，配置保存不等于采集成功；全局通知必须显示设备名、目标值、实际值与原因，成功和全部失败分别反馈。
+- AI CLI 增加设备列表及完整 ID/精确名称选择，复用鉴权后的最小设备摘要；指定不可用时不换机，名称歧义需明确 ID，标签仍为 AND 条件。请求摘要、落盘任务参数及幂等重发均包含选择条件，领用在服务端事务内核验，Skill 使用名称或列表 ID，不猜测物理身份。
+

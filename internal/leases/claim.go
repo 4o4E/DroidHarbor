@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -27,6 +28,15 @@ func (m *Manager) Claim(ctx context.Context, bearer string, request ClaimRequest
 		return empty, err
 	}
 	request.RequiredTags = tags
+	if !utf8.ValidString(request.DeviceID) || !utf8.ValidString(request.DeviceName) ||
+		(request.DeviceID != "" && strings.TrimSpace(request.DeviceID) == "") ||
+		(request.DeviceName != "" && strings.TrimSpace(request.DeviceName) == "") {
+		return empty, ErrInvalidRequest
+	}
+	request.DeviceID, request.DeviceName = strings.TrimSpace(request.DeviceID), strings.TrimSpace(request.DeviceName)
+	if request.DeviceID != "" && request.DeviceName != "" {
+		return empty, ErrInvalidRequest
+	}
 	if !utf8.ValidString(request.TaskID) || !utf8.ValidString(request.IdempotencyKey) {
 		return empty, ErrInvalidRequest
 	}
@@ -52,7 +62,7 @@ func (m *Manager) Claim(ctx context.Context, bearer string, request ClaimRequest
 		return empty, ErrUnauthenticated
 	}
 	secretHash := identity.Digest(request.TaskSecret)
-	requestHash, err := claimRequestHash(request.TaskID, secretHash, tags)
+	requestHash, err := claimRequestHash(request.TaskID, secretHash, tags, request.DeviceID, request.DeviceName)
 	if err != nil {
 		return empty, domain(ErrInvalidRequest, err)
 	}
@@ -122,6 +132,31 @@ func (m *Manager) Claim(ctx context.Context, bearer string, request ClaimRequest
 		}
 	}
 
+	selectedID := request.DeviceID
+	if request.DeviceName != "" {
+		names, queryErr := tx.QueryContext(ctx, `SELECT id FROM devices WHERE display_name=? AND removed_at IS NULL ORDER BY id LIMIT 2`, request.DeviceName)
+		if queryErr != nil {
+			return empty, domain(ErrStorage, queryErr)
+		}
+		var ids []string
+		for names.Next() {
+			var id string
+			if queryErr = names.Scan(&id); queryErr != nil {
+				return empty, domain(ErrStorage, errors.Join(queryErr, names.Close()))
+			}
+			ids = append(ids, id)
+		}
+		if queryErr = errors.Join(names.Err(), names.Close()); queryErr != nil {
+			return empty, domain(ErrStorage, queryErr)
+		}
+		if len(ids) == 0 {
+			return empty, &Error{Code: "DEVICE_NOT_FOUND", Message: "指定名称的设备不存在", HTTPStatus: 409}
+		}
+		if len(ids) > 1 {
+			return empty, &Error{Code: "DEVICE_NAME_AMBIGUOUS", Message: fmt.Sprintf("设备名称不唯一，请从设备列表选择完整 deviceId；候选：%s", strings.Join(ids, "、")), HTTPStatus: 409}
+		}
+		selectedID = ids[0]
+	}
 	links := append([]Link(nil), m.source.OnlineLinks()...)
 	sort.Slice(links, func(i, j int) bool { return lessLink(links[i], links[j]) })
 	linksByDevice := make(map[string][]Link, len(links))
@@ -130,7 +165,7 @@ func (m *Manager) Claim(ctx context.Context, bearer string, request ClaimRequest
 			linksByDevice[link.DeviceID] = append(linksByDevice[link.DeviceID], link)
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.generation FROM devices d WHERE d.allocation_state='available' AND d.maintenance_requested=0 AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.device_id=d.id AND l.status='active') ORDER BY d.id`)
+	rows, err := tx.QueryContext(ctx, `SELECT d.id,d.generation FROM devices d WHERE d.removed_at IS NULL AND d.allocation_state='available' AND d.maintenance_requested=0 AND (?='' OR d.id=?) AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.device_id=d.id AND l.status='active') ORDER BY d.id`, selectedID, selectedID)
 	if err != nil {
 		return empty, domain(ErrStorage, err)
 	}
@@ -180,6 +215,9 @@ func (m *Manager) Claim(ctx context.Context, bearer string, request ClaimRequest
 		break
 	}
 	if !found {
+		if selectedID != "" {
+			return empty, &Error{Code: "DEVICE_UNAVAILABLE", Message: "指定设备当前不可领用，请检查在线、分配、占用状态及所需标签；未改领其他设备", HTTPStatus: 409}
+		}
 		return empty, ErrUnavailable
 	}
 
@@ -248,12 +286,14 @@ func canonicalTags(values []string) ([]string, error) {
 	return tags, nil
 }
 
-func claimRequestHash(taskID string, secretHash []byte, tags []string) ([32]byte, error) {
+func claimRequestHash(taskID string, secretHash []byte, tags []string, deviceID, deviceName string) ([32]byte, error) {
 	payload := struct {
 		TaskID       string   `json:"taskId"`
 		SecretDigest string   `json:"secretDigest"`
 		Tags         []string `json:"tags"`
-	}{TaskID: taskID, SecretDigest: hex.EncodeToString(secretHash), Tags: tags}
+		DeviceID     string   `json:"deviceId,omitempty"`
+		DeviceName   string   `json:"deviceName,omitempty"`
+	}{TaskID: taskID, SecretDigest: hex.EncodeToString(secretHash), Tags: tags, DeviceID: deviceID, DeviceName: deviceName}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return [32]byte{}, err

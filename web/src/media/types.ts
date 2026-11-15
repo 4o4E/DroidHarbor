@@ -21,6 +21,7 @@ export type MediaSession = {
   height: number
   framesPerSecond: number
   videoRef: RefObject<HTMLVideoElement | null>
+  audioStream: MediaStream | null
   command(type: string, payload?: Record<string, unknown>): Promise<ControlReply>
   release(): void
   suspend(): Promise<void>

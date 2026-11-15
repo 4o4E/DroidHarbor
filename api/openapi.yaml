@@ -357,7 +357,7 @@ paths:
     post:
       operationId: registerDiscoveredDevice
       summary: 显式接入已发现设备，核验硬件并关联同机 USB/Wi-Fi 链路
-      description: 仅处理本次发现清单中的入口，不连接或配对其他手机。已授权链路核验身份及主屏尺寸后启用，未授权链路保留待核验。硬件身份冲突不创建记录；既有物理设备保留原名称和维护状态。新设备使用手机型号或指定名称，默认 60 fps、12 Mbps。
+      description: 仅处理本次发现清单中的入口，不连接或配对其他手机。已授权链路核验身份及主屏尺寸后启用，未授权链路保留待核验。硬件身份冲突不创建记录；既有物理设备保留原名称和维护状态。新设备使用手机型号或指定名称，采集使用全局帧率/码率目标。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -447,6 +447,32 @@ paths:
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: removeDevice
+      summary: 确认当前版本及占用代次后删除设备登记
+      description: 结束平台任务和人工访问，严格回收平台资源后软移除；保留手机数据、历史及 generation。失败保留可管理记录，明确重新添加才恢复。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [version]
+              properties:
+                version: {type: string, minLength: 1}
+                confirmedLeaseGeneration: {type: integer, format: int64, minimum: 0}
+      responses:
+        '204': {description: 平台资源已确认回收并移除登记}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
   /api/v1/devices/{id}/refresh:
     parameters:
@@ -680,7 +706,7 @@ paths:
     post:
       operationId: claimLease
       summary: 调用凭证原子绑定任务秘密并认领全部标签匹配的设备
-      description: 不要求浏览器 Origin。每次初始租约 900 秒，无 ttl 参数。taskId 按调用方隔离；秘密首次绑定后不能替换或由调用凭证找回。相同幂等键与参数返回原租约，包括已结束的结果；不得自动换机重试。
+      description: 不要求浏览器 Origin。每次初始租约 900 秒，无 ttl 参数。taskId 按调用方隔离；秘密首次绑定后不能替换或由调用凭证找回。deviceName 精确匹配，或使用完整 deviceId，二者互斥；重名返回 DEVICE_NAME_AMBIGUOUS 和候选 ID，指定设备不可用返回 DEVICE_UNAVAILABLE，不换领其他设备。所有 requiredTags 仍须满足。幂等身份包含选择条件；相同幂等键与参数返回原租约，包括已结束结果，重发不重新解析名称。
       security: [{callerOrTask: []}]
       parameters:
         - name: Idempotency-Key
@@ -699,6 +725,8 @@ paths:
                 taskId: {type: string, minLength: 1}
                 taskSecret: {type: string, pattern: '^[0-9a-fA-F]{64}$', writeOnly: true}
                 requiredTags: {type: array, items: {type: string}}
+                deviceId: {type: string, minLength: 1, description: 完整设备 ID，与 deviceName 互斥}
+                deviceName: {type: string, minLength: 1, description: 精确显示名称，与 deviceId 互斥}
       responses:
         '200': {$ref: '#/components/responses/Lease'}
         '401': {$ref: '#/components/responses/Error'}
@@ -867,7 +895,7 @@ paths:
       summary: 创建独立人工观看或控制会话，共享设备采集
       description: |
         仅管理员 Cookie；不接受 bearer。请求不创建、续期或暂停 AI 租约。
-        offer 必须包含 recvonly H.264 视频和可靠有序的 droidharbor.control.v1 DataChannel，不含音频。
+        offer 必须包含 recvonly H.264 视频和可靠有序的 droidharbor.control.v1 DataChannel，可包含一条 recvonly Opus/48000/2 音频轨道。
         answer 包含完整本地 ICE 候选；默认自动收集本机 IPv4，支持可选显式地址覆盖，无 STUN/TURN 或协议降级。
         浏览器可在候选收集完成前提交 offer；新收集的候选在取得 sessionId 后通过 candidates 接口提交。
         201 表示会话与信令已建立，不代表浏览器已解码呈现画面。
@@ -969,6 +997,53 @@ paths:
         '410': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /api/v1/video-settings:
+    get:
+      operationId: getGlobalVideoSettings
+      summary: 读取全局帧率码率目标及设备回退状态
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 全局目标与当前回退通知，不代表在途视频已切换参数
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GlobalVideoSnapshot'}
+        '401': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: patchGlobalVideoSettings
+      summary: 保存下次新建采集使用的全局目标
+      description: 保存不重建或中断在途及短保留采集；新观看者附着旧流仍用旧参数。提交 sessionId 时仅接受本人控制会话。原生明确拒绝编码配置时按最近成功且不高于目标的档位、30fps/4Mbps 兼容档回退，分辨率不变；取得有效关键帧后记录成功并统一通知，网络或权限失败不触发降档。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [revision]
+              properties:
+                sessionId: {type: string}
+                revision: {type: integer, minimum: 1}
+                maxFps: {type: integer, minimum: 1, maximum: 2147483647}
+                bitRate: {type: integer, minimum: 1, maximum: 2147483647}
+      responses:
+        '200':
+          description: 已保存；至少提交 maxFps 或 bitRate
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GlobalVideoSnapshot'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /api/v1/devices/{id}/video-settings:
     parameters:
       - $ref: '#/components/parameters/ID'
@@ -988,12 +1063,12 @@ paths:
         '503': {$ref: '#/components/responses/Error'}
     patch:
       operationId: patchVideoSettings
-      summary: 按预期 revision 修改共享采集参数
+      summary: 按设备 revision 修改后端长边策略
       description: |
         提交 sessionId 时核验所属控制会话，只读会话拒绝；不提交时是管理员配置操作。
         readonly 是人工会话模式，不是管理员账号的全局降权。
-        仅修改提交字段；影响该设备全部观看者，无观看者时保存为下次采集配置。
-        参数已持久化但重建采集失败可能返回 503；应读取快照，不重放输入或自动降档。
+        仅修改 maxSize；影响该设备全部观看者，无观看者时保存为下次采集配置。
+        参数已持久化但重建采集失败可能返回 503；应读取快照，不重放输入。帧率/码率使用全局 video-settings。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -1010,8 +1085,6 @@ paths:
                 sessionId: {type: string}
                 revision: {type: integer, minimum: 1}
                 maxSize: {type: integer, minimum: 1, maximum: 65535}
-                maxFps: {type: integer, minimum: 1, maximum: 2147483647}
-                bitRate: {type: integer, minimum: 1, maximum: 2147483647}
       responses:
         '200':
           description: 最新请求配置与生效状态；不承诺手机支持任意合法整数
@@ -1167,6 +1240,139 @@ paths:
         '409': {$ref: '#/components/responses/Error'}
         '410': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /api/v1/system-preferences:
+    get:
+      operationId: getSystemPreferences
+      summary: 读取音频默认值、增强上限和有序小窗倍率
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 系统偏好及独立 revision
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SystemPreferences'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: saveSystemPreferences
+      summary: 保存默认值，不修改在途视频或临时路由
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SystemPreferences'}
+      responses:
+        '200':
+          description: 已持久化并递增 revision，不改变画质版本
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SystemPreferences'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/volume:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getDeviceMediaVolume
+      summary: 读取设备播放模式下的真实媒体音量及范围
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 原设备链路读取的 STREAM_MUSIC 音量
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceVolume'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: setDeviceMediaVolume
+      summary: 前台控制会话设置设备媒体音量，不改变路由或重建视频
+      description: 仅设备播放模式可用，只读、挂起、链路改变或系统未应用目标均明确失败。通过手机音量键策略调整并核对真实媒体读数，非普通模式拒绝；连续两次按键不改变媒体读数时停止并通知，不假报达到目标。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [level]
+              properties:
+                level: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: 设置后实际读取的音量
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DeviceVolume'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/audio:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: getSessionAudio
+      summary: 读取当前会话所属设备的共享临时音频状态
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 路由、当前播音窗口和明确错误，初始化时路由字段可为空
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AudioSnapshot'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: routeSessionAudio
+      summary: 前台控制会话切换媒体声音播放位置，不重建视频
+      description: 只读或挂起会话拒绝修改。选择 browser 时仅此会话取得网页播音归属；最后视频成员结束后重置。铃声、闹钟和通知保持手机设置，不更改系统音量。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [route, revision]
+              properties:
+                route: {type: string, enum: [muted, device, browser]}
+                revision: {type: integer, minimum: 0}
+      responses:
+        '200':
+          description: 音频路由切换完成或原生流正在初始化
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AudioSnapshot'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     adminSession:
@@ -1239,6 +1445,36 @@ components:
               message: {type: string}
               requestId: {type: string}
   schemas:
+    SystemPreferences:
+      type: object
+      additionalProperties: false
+      required: [audioDefault, windowScales, audioGainMax, revision]
+      properties:
+        audioDefault: {type: string, enum: [muted, device, browser]}
+        audioGainMax: {type: number, minimum: 1, default: 3}
+        windowScales:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: number, exclusiveMinimum: 0}
+        revision: {type: integer, format: int64, minimum: 1}
+    DeviceVolume:
+      type: object
+      required: [current, min, max]
+      properties:
+        current: {type: integer, minimum: 0}
+        min: {type: integer, minimum: 0}
+        max: {type: integer, minimum: 1}
+    AudioSnapshot:
+      type: object
+      required: [route, target, status, revision]
+      properties:
+        route: {type: string, enum: [muted, device, browser, unknown, '']}
+        target: {type: string, enum: [muted, device, browser, '']}
+        status: {type: string, enum: [starting, ready, failed, '']}
+        ownerSessionId: {type: string}
+        error: {type: string}
+        revision: {type: integer, minimum: 0}
     DiscoveredDevice:
       type: object
       required: [serial, state, transportId]
@@ -1293,6 +1529,29 @@ components:
             back 为第四键 Recent，forward 为第五键通知面板。
             text、clipboard.set 和 clipboard.paste 包含 text；displayPower 必须包含布尔 on。
             release 只释放当前会话持有的输入；不替其他会话释放。
+    VideoQuality:
+      type: object
+      required: [maxFps, bitRate]
+      properties:
+        maxFps: {type: integer, minimum: 1}
+        bitRate: {type: integer, minimum: 1}
+    VideoFallback:
+      type: object
+      required: [deviceId, revision, target, applied, status, reason]
+      properties:
+        deviceId: {type: string}
+        revision: {type: integer, minimum: 1}
+        target: {$ref: '#/components/schemas/VideoQuality'}
+        applied: {$ref: '#/components/schemas/VideoQuality'}
+        status: {type: string, enum: [trying, applied, failed]}
+        reason: {type: string}
+    GlobalVideoSnapshot:
+      type: object
+      required: [requested, revision, fallbacks]
+      properties:
+        requested: {$ref: '#/components/schemas/VideoQuality'}
+        revision: {type: integer, minimum: 1}
+        fallbacks: {type: array, items: {$ref: '#/components/schemas/VideoFallback'}}
     VideoParameters:
       type: object
       required: [maxSize, maxFps, bitRate]
@@ -1302,20 +1561,24 @@ components:
         bitRate: {type: integer, minimum: 1}
     VideoSnapshot:
       type: object
-      required: [requested, effective, status, revision, captureEpoch]
+      required: [requested, effective, status, revision, globalRevision, pending, captureEpoch]
       properties:
         requested: {$ref: '#/components/schemas/VideoParameters'}
         effective:
           type: [object, 'null']
-          required: [width, height, framesPerSecond, encodedBitsPerSecond, revision]
+          required: [width, height, framesPerSecond, encodedBitsPerSecond, revision, globalRevision, parameters]
           properties:
             width: {type: integer, minimum: 1}
             height: {type: integer, minimum: 1}
             framesPerSecond: {type: number, minimum: 0}
             encodedBitsPerSecond: {type: integer, minimum: 0}
             revision: {type: integer, minimum: 1}
+            globalRevision: {type: integer, minimum: 1}
+            parameters: {$ref: '#/components/schemas/VideoParameters'}
         status: {type: string, enum: [idle, pending, starting, running, reconfiguring, stopping, failed]}
         revision: {type: integer, minimum: 1}
+        globalRevision: {type: integer, minimum: 1}
+        pending: {type: boolean, description: 当前实际采集尚未使用最新全局目标或设备长边版本}
         captureEpoch: {type: integer, minimum: 0}
         errorCode: {type: string}
     Transfer:

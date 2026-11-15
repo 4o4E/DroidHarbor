@@ -103,7 +103,7 @@ func (m *Manager) cleanup(ctx context.Context, s *Stream) (cleanupErr error) {
 	if n != 1 {
 		return diagnostics.New("capture ownership changed before cleanup")
 	}
-	if err := m.cleanupLocator(ctx, s.link, s.id, m.bootID, s.resource); err != nil {
+	if err := m.cleanupLocator(ctx, s.link, s.id, m.bootID, s.resource, false); err != nil {
 		if !m.source.HasLink(s.link) {
 			m.recordCleanupFailure(s.id, "LINK_UNAVAILABLE")
 			return errors.Join(ErrCleanupDeferred, err)
@@ -130,7 +130,7 @@ func (m *Manager) setCleanupFailure(ctx context.Context, id, code string) error 
 	return err
 }
 
-func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, bootID string, loc locator) (cleanupErr error) {
+func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, bootID string, loc locator, stopSurvivor bool) (cleanupErr error) {
 	stage := "validate"
 	defer func() {
 		if cleanupErr != nil {
@@ -203,6 +203,23 @@ func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, boot
 		if status != "MATCH" {
 			return diagnostics.New("capture process identity could not be verified")
 		}
+		if stopSurvivor {
+			// Recovery has no live stream owner. Recheck the recorded birth
+			// identity in the signal command; never kill by name or stale PID.
+			result, err := m.adb.RunShell(deadline, link.TransportID, processStopCommand(loc), 32, func() error { return m.authorizeCleanup(deadline, link, id, bootID, loc) })
+			if err != nil {
+				return errors.Join(diagnostics.New("owned capture process termination failed"), err)
+			}
+			status := strings.TrimSpace(string(result.Stdout))
+			if result.ExitCode != 0 || (status != "SIGNALED" && status != "GONE") {
+				return diagnostics.New("owned capture process termination could not be verified")
+			}
+			if status == "GONE" {
+				break
+			}
+			m.logger.Info("capture_owned_process_stop_requested", "deviceId", link.DeviceID, "captureId", id, "pid", loc.PID, "signal", "TERM")
+			stopSurvivor = false
+		}
 		if err := waitForExit(); err != nil {
 			return errors.Join(diagnostics.New("capture process remained alive through cleanup deadline"), err)
 		}
@@ -247,10 +264,18 @@ func (m *Manager) cleanupLocator(ctx context.Context, link leases.Link, id, boot
 	return nil
 }
 
-func processProbeCommand(loc locator) string {
+func processIdentityCommand(loc locator) string {
 	pid := strconv.Itoa(loc.PID)
 	ticks := strconv.FormatUint(loc.StartTicks, 10)
-	return "boot=$(cat /proc/sys/kernel/random/boot_id) || { printf ERROR; exit; }; [ \"$boot\" = '" + loc.BootUUID + "' ] || { printf GONE; exit; }; p=/proc/" + pid + "/stat; [ -e \"$p\" ] || { printf GONE; exit; }; stat=$(cat \"$p\") || { printf ERROR; exit; }; rest=${stat##*) }; set -- $rest; [ \"${20}\" = '" + ticks + "' ] && printf MATCH || printf GONE"
+	return "boot=$(cat /proc/sys/kernel/random/boot_id) || { printf ERROR; exit; }; [ \"$boot\" = '" + loc.BootUUID + "' ] || { printf GONE; exit; }; p=/proc/" + pid + "/stat; [ -e \"$p\" ] || { printf GONE; exit; }; stat=$(cat \"$p\") || { printf ERROR; exit; }; rest=${stat##*) }; set -- $rest; [ \"${20}\" = '" + ticks + "' ] || { printf GONE; exit; }; case \"$1\" in Z|X|x) printf GONE; exit;; esac; "
+}
+
+func processProbeCommand(loc locator) string {
+	return processIdentityCommand(loc) + "printf MATCH"
+}
+
+func processStopCommand(loc locator) string {
+	return processIdentityCommand(loc) + "kill -TERM " + strconv.Itoa(loc.PID) + " || { printf ERROR; exit; }; printf SIGNALED"
 }
 
 func helperProbeCommand(jar string) string {
@@ -383,7 +408,7 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (complete bool, 
 		if n != 1 {
 			return false, diagnostics.New("capture resource journal changed before recovery")
 		}
-		if err = m.cleanupLocator(ctx, link, x.id, x.boot, loc); err != nil {
+		if err = m.cleanupLocator(ctx, link, x.id, x.boot, loc, true); err != nil {
 			if !m.source.HasLink(link) {
 				err = errors.Join(ErrCleanupDeferred, err)
 			}

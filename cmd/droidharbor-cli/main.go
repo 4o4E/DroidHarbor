@@ -10,7 +10,7 @@ func main() {
 	var failure *commandFailure
 	foreground := false
 	if len(os.Args) < 2 {
-		failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: "支持命令：version、capabilities、claim、status、renew、release、connect、env、disconnect", exitCode: 2}
+		failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: "支持命令：version、capabilities、devices、claim、status、renew、release、connect、env、disconnect", exitCode: 2}
 	} else {
 		switch os.Args[1] {
 		case "version":
@@ -21,6 +21,8 @@ func main() {
 			}
 		case "capabilities":
 			result, failure = capabilities(os.Args[2:])
+		case "devices":
+			result, failure = listDevices(os.Args[2:])
 		case "claim":
 			result, failure = claim(os.Args[2:])
 		case "status":
@@ -37,7 +39,7 @@ func main() {
 		case "disconnect":
 			result, failure = disconnectCommand(os.Args[2:])
 		default:
-			failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: "支持命令：version、capabilities、claim、status、renew、release、connect、env、disconnect", exitCode: 2}
+			failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: "支持命令：version、capabilities、devices、claim、status、renew、release、connect、env、disconnect", exitCode: 2}
 		}
 	}
 	if failure == nil && !foreground {

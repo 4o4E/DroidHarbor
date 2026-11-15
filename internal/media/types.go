@@ -51,15 +51,16 @@ type Source interface {
 	LinkContext(leases.Link) (context.Context, error)
 }
 type Dependencies struct {
-	DB           *sql.DB
-	ADB          *adb.Client
-	Source       Source
-	Captures     *capture.Manager
-	Transport    *rtc.Endpoint
-	Events       *events.Bus
-	TaskOwner    func(string) string
-	AdminVersion string
-	Logger       *slog.Logger
+	DB            *sql.DB
+	ADB           *adb.Client
+	Source        Source
+	Captures      *capture.Manager
+	Transport     *rtc.Endpoint
+	AudioCaptures *capture.Manager
+	Events        *events.Bus
+	TaskOwner     func(string) string
+	AdminVersion  string
+	Logger        *slog.Logger
 }
 
 type VideoParameters struct {
@@ -73,28 +74,57 @@ func (p VideoParameters) capture(revision int64) capture.Settings {
 }
 
 type EffectiveVideo struct {
-	Width                uint16  `json:"width"`
-	Height               uint16  `json:"height"`
-	FramesPerSecond      float64 `json:"framesPerSecond"`
-	EncodedBitsPerSecond int64   `json:"encodedBitsPerSecond"`
-	Revision             int64   `json:"revision"`
+	Width                uint16          `json:"width"`
+	Height               uint16          `json:"height"`
+	FramesPerSecond      float64         `json:"framesPerSecond"`
+	EncodedBitsPerSecond int64           `json:"encodedBitsPerSecond"`
+	Revision             int64           `json:"revision"`
+	Parameters           VideoParameters `json:"parameters"`
+	GlobalRevision       int64           `json:"globalRevision"`
 }
 
 type VideoSnapshot struct {
-	Requested    VideoParameters `json:"requested"`
-	Effective    *EffectiveVideo `json:"effective"`
-	Status       string          `json:"status"`
-	Revision     int64           `json:"revision"`
-	CaptureEpoch uint64          `json:"captureEpoch"`
-	ErrorCode    string          `json:"errorCode,omitempty"`
+	Requested      VideoParameters `json:"requested"`
+	Effective      *EffectiveVideo `json:"effective"`
+	Status         string          `json:"status"`
+	Revision       int64           `json:"revision"`
+	CaptureEpoch   uint64          `json:"captureEpoch"`
+	GlobalRevision int64           `json:"globalRevision"`
+	Pending        bool            `json:"pending"`
+	ErrorCode      string          `json:"errorCode,omitempty"`
+}
+
+type VideoQuality struct {
+	MaxFPS  int `json:"maxFps"`
+	BitRate int `json:"bitRate"`
+}
+
+type VideoFallback struct {
+	DeviceID string       `json:"deviceId"`
+	Revision int64        `json:"revision"`
+	Target   VideoQuality `json:"target"`
+	Applied  VideoQuality `json:"applied"`
+	Status   string       `json:"status"`
+	Reason   string       `json:"reason"`
+}
+
+type GlobalVideoSnapshot struct {
+	Requested VideoQuality    `json:"requested"`
+	Revision  int64           `json:"revision"`
+	Fallbacks []VideoFallback `json:"fallbacks"`
+}
+
+type GlobalVideoPatch struct {
+	SessionID string `json:"sessionId,omitempty"`
+	Revision  int64  `json:"revision"`
+	MaxFPS    *int   `json:"maxFps,omitempty"`
+	BitRate   *int   `json:"bitRate,omitempty"`
 }
 
 type VideoPatch struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Revision  int64  `json:"revision"`
 	MaxSize   *int   `json:"maxSize,omitempty"`
-	MaxFPS    *int   `json:"maxFps,omitempty"`
-	BitRate   *int   `json:"bitRate,omitempty"`
 }
 
 type SessionSnapshot struct {
@@ -113,6 +143,7 @@ type Manager struct {
 	closed          bool
 	sessions        map[string]*session
 	hubs            map[string]*hub
+	closingDevices  map[string]bool
 	watcher         sync.WaitGroup
 	screenshotSlots chan struct{}
 }
@@ -177,11 +208,21 @@ type hub struct {
 	changeMu                          sync.Mutex
 	inputMu                           sync.Mutex
 	mu                                sync.Mutex
+	audioMu                           sync.Mutex
+	audio                             deviceAudio
+	audioCancel                       context.CancelFunc
 	members                           map[string]*session
 	source                            *capture.Stream
 	cleanupSource                     *capture.Stream
 	requested                         VideoParameters
 	revision                          int64
+	globalRevision                    int64
+	targetQuality                     VideoQuality
+	fallback                          *VideoFallback
+	profileRecorded                   bool
+	starting                          bool
+	sourceFailed                      chan struct{}
+	startFailure                      error
 	captureRevision                   int64
 	cleanupPending                    bool
 	epoch                             uint64

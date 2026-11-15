@@ -122,6 +122,36 @@ func (s *Server) patchVideoSettings(w http.ResponseWriter, r *http.Request) {
 	s.json(w, http.StatusOK, snapshot)
 }
 
+func (s *Server) globalVideoSettings(w http.ResponseWriter, r *http.Request) {
+	owner, ok := s.mediaAdmin(w, r, false)
+	if !ok {
+		return
+	}
+	snapshot, err := s.Media.GlobalVideo(r.Context(), owner)
+	if err != nil {
+		s.domainError(w, r, err)
+		return
+	}
+	s.json(w, http.StatusOK, snapshot)
+}
+
+func (s *Server) patchGlobalVideoSettings(w http.ResponseWriter, r *http.Request) {
+	owner, ok := s.mediaAdmin(w, r, true)
+	if !ok {
+		return
+	}
+	var body media.GlobalVideoPatch
+	if !s.decode(w, r, &body, false) {
+		return
+	}
+	snapshot, err := s.Media.PatchGlobalVideo(r.Context(), owner, body)
+	if err != nil {
+		s.domainError(w, r, err)
+		return
+	}
+	s.json(w, http.StatusOK, snapshot)
+}
+
 func (s *Server) originalScreenshot(w http.ResponseWriter, r *http.Request) {
 	owner, ok := s.mediaAdmin(w, r, false)
 	if !ok {

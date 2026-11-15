@@ -7,7 +7,7 @@
 ## ADDED Requirements
 
 ### Requirement: 随产品交付完整调用流程
-平台 SHALL 随版本交付一个包含产品 Skill 及 Windows/Linux amd64 CLI 的客户端 Skill ZIP，覆盖能力检查、按标签认领、建立连接、观察设备状态、原生 adb 操作、显式续租、查询和释放；产品 Skill MUST 与项目开发 skills 区分。
+平台 SHALL 随版本交付含产品 Skill 及 Windows/Linux amd64 CLI 的客户端 Skill ZIP，覆盖能力检查、最小设备列表、按标签或精确名称/ID 认领、连接、原生操作、显式续租、查询和释放；产品 Skill MUST 与项目开发 skills 区分。
 
 #### Scenario: 新调用方完整使用
 - **WHEN** 调用方按发布的 Skill 配置平台地址和凭证
@@ -20,6 +20,11 @@
 #### Scenario: 领用保留应用状态的手机
 - **WHEN** 新任务成功认领上一任务释放的手机
 - **THEN** Skill 指导先观察当前画面/设备状态，不假定应用已关闭、页面已复位或账号重新登录
+
+#### Scenario: AI 按用户指定的手机工作
+- **WHEN** 用户指定设备名称，AI 使用 devices 列表确认设备并 claim --device-name 或 --device-id
+- **THEN** 列表只包含名称、完整 ID、标签及连接/分配状态；指定手机不可用不换机，重名明确要求 ID，结果未知时用原目录、标签及选择条件重试
+
 
 ### Requirement: Windows/Linux 且不限制 harness
 CLI SHALL 在发布矩阵中的 Windows/Linux 提供相同语义的命令、退出码和机器可读结果；MUST NOT 要求特定 harness 插件、父进程名称、内部 session 协议或结束钩子。

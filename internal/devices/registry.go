@@ -63,19 +63,20 @@ type registeredLink struct {
 }
 
 type Registry struct {
-	db            *sql.DB
-	client        *adb.Client
-	logger        *slog.Logger
-	timeout       time.Duration
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
-	updates       chan inventoryUpdate
-	manager       *leases.Manager
-	taskCleanup   func(context.Context, string) (bool, error)
-	events        *events.Bus
-	runtimeView   func(string) *RuntimeInfo
-	runtimeNotify func()
+	db             *sql.DB
+	client         *adb.Client
+	logger         *slog.Logger
+	timeout        time.Duration
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	updates        chan inventoryUpdate
+	manager        *leases.Manager
+	taskCleanup    func(context.Context, string) (bool, error)
+	removalCleanup func(context.Context, string) (func(), error)
+	events         *events.Bus
+	runtimeView    func(string) *RuntimeInfo
+	runtimeNotify  func()
 
 	mutations            sync.Mutex
 	displayMu            sync.Mutex
@@ -364,7 +365,7 @@ func (r *Registry) verifyInventory() {
 }
 
 func (r *Registry) verifySnapshot(update inventoryUpdate) error {
-	rows, err := r.db.QueryContext(update.epoch, `SELECT id,device_id,endpoint,coalesce(observed_serial,endpoint),identity_evidence,enabled FROM device_links ORDER BY id`)
+	rows, err := r.db.QueryContext(update.epoch, `SELECT id,device_id,endpoint,coalesce(observed_serial,endpoint),identity_evidence,enabled FROM device_links WHERE device_id IN (SELECT id FROM devices WHERE removed_at IS NULL) ORDER BY id`)
 	if err != nil {
 		return err
 	}

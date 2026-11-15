@@ -68,7 +68,7 @@ func TestClaimPersistsStateBeforeUnknownResponseAndReusesIt(t *testing.T) {
 		http.NotFound(w, r)
 	})
 	taskDir := filepath.Join(root, "task")
-	args = append(args, "--task-dir", taskDir, "--tag", " blue ", "--tag", "blue", "--task-id", "task-fixed")
+	args = append(args, "--task-dir", taskDir, "--tag", " blue ", "--tag", "blue", "--task-id", "task-fixed", "--device-name", "9R")
 	_, failure := claim(args)
 	if failure == nil || failure.Code != "RESULT_UNKNOWN" {
 		t.Fatalf("first claim failure=%+v", failure)
@@ -77,7 +77,7 @@ func TestClaimPersistsStateBeforeUnknownResponseAndReusesIt(t *testing.T) {
 	if failure != nil {
 		t.Fatal(failure)
 	}
-	if len(state.TaskSecret) != 64 || len(state.IdempotencyKey) != 64 || state.LeaseID != "" || len(state.RequiredTags) != 1 || state.RequiredTags[0] != "blue" {
+	if len(state.TaskSecret) != 64 || len(state.IdempotencyKey) != 64 || state.LeaseID != "" || len(state.RequiredTags) != 1 || state.RequiredTags[0] != "blue" || state.DeviceName != "9R" {
 		t.Fatal("persisted claim identity or normalized tags are incomplete")
 	}
 	contents, err := os.ReadFile(filepath.Join(taskDir, taskStateName))
@@ -86,6 +86,11 @@ func TestClaimPersistsStateBeforeUnknownResponseAndReusesIt(t *testing.T) {
 	}
 	if strings.Contains(string(contents), "caller-secret-not-to-persist") {
 		t.Fatal("caller credential persisted in task state")
+	}
+	changed := append([]string(nil), args...)
+	changed[len(changed)-1] = "另一台"
+	if _, conflict := claim(changed); conflict == nil || conflict.Code != "TASK_DIRECTORY_CONFLICT" {
+		t.Fatalf("changed selector was allowed to replace an unknown claim: %+v", conflict)
 	}
 	_, failure = claim(args)
 	if failure != nil {

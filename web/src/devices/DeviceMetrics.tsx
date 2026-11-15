@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Battery, Cpu, MemoryStick, Plug, Thermometer } from 'lucide-react'
+import { Battery, BatteryCharging, Cpu, MemoryStick, Thermometer } from 'lucide-react'
 import { cn } from 'cn'
 import type { Device } from '@/lib/types'
 import { useErrorNotification } from '@/lib/notifications'
@@ -41,6 +41,6 @@ export function DeviceMetrics({ device, compact = false }: { device: Device; com
     <div><dt><Cpu />CPU</dt><dd>{cpu}</dd></div>
     <div><dt><MemoryStick />内存</dt><dd>{memory}</dd></div>
     <div><dt><Thermometer />电池温度</dt><dd>{metrics?.batteryTemperatureC == null ? missing : `${metrics.batteryTemperatureC.toFixed(1)} °C`}</dd></div>
-    <div><dt><Battery />电量</dt><dd>{metrics?.batteryPercent == null ? missing : <>{Math.round(metrics.batteryPercent)}%<span className="device-charge-state">{metrics.powerConnected && <Plug aria-label="已接电源" />}{chargeLabels[metrics.chargingStatus ?? 'unknown']}</span></>}</dd></div>
+    <div><dt><Battery />电量</dt><dd>{metrics?.batteryPercent == null ? missing : `${Math.round(metrics.batteryPercent)}%`}<span className="device-charge-state" data-charging={metrics?.chargingStatus === 'charging'} title={chargeLabels[metrics?.chargingStatus ?? 'unknown']}>{metrics?.chargingStatus === 'charging' ? <BatteryCharging aria-label="充电中" /> : <Battery aria-label={chargeLabels[metrics?.chargingStatus ?? 'unknown']} />}</span></dd></div>
   </dl>
 }

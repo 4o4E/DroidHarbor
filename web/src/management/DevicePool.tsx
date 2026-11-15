@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { CircleDot, LayoutGrid, MonitorSmartphone, Plus, RefreshCw, Search, Unplug } from 'lucide-react'
+import { CircleDot, ExternalLink, LayoutGrid, MonitorSmartphone, Plus, RefreshCw, Search, Unplug } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -8,7 +8,10 @@ import { Input } from '@/components/ui/input'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { DevicePreview } from '@/devices/DevicePreview'
 import { DeviceMetrics } from '@/devices/DeviceMetrics'
-import { deviceName, deviceNeedsVerification, deviceStatus, type Device } from '@/lib/types'
+import { deviceDisplaySize, deviceName, deviceNeedsVerification, deviceStatus, type Device } from '@/lib/types'
+import { useSystemPreferences } from '@/lib/queries'
+import { useErrorNotification } from '@/lib/notifications'
+import { openCompact } from '@/workbench/openCompact'
 
 type Filter = 'all' | 'available' | 'leased' | 'offline' | 'attention'
 
@@ -34,6 +37,8 @@ function badgeVariant(device: Device): 'default' | 'secondary' | 'destructive' |
 }
 
 export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDeviceId }: Props) {
+  const preferences = useSystemPreferences()
+  useErrorNotification('无法读取小窗设置', preferences.error)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const counts = useMemo(() => ({
@@ -93,7 +98,7 @@ export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDe
             <CardHeader>
               <CardTitle className="break-words">{deviceName(device)}</CardTitle>
               {device.tags.length > 0 && <CardDescription>{device.tags.join(' · ')}</CardDescription>}
-              <CardAction><Badge variant={badgeVariant(device)}>{deviceStatus(device)}</Badge></CardAction>
+              <CardAction className="flex items-center gap-1"><Badge variant={badgeVariant(device)}>{deviceStatus(device)}</Badge><Button variant="ghost" size="icon-sm" aria-label={`打开${deviceName(device)}独立小窗`} title="独立小窗" disabled={!preferences.data || !deviceDisplaySize(device)} onClick={() => { if (preferences.data) openCompact(device, 'control', preferences.data) }}><ExternalLink /></Button></CardAction>
             </CardHeader>
             <CardContent><DeviceMetrics device={device} /></CardContent>
             <CardFooter className="mt-auto flex-wrap gap-2">

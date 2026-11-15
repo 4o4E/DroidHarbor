@@ -18,5 +18,8 @@ func (m *Manager) kind() string {
 	if m.controlOnly {
 		return "scrcpy-power"
 	}
+	if m.audioOnly {
+		return "scrcpy-audio"
+	}
 	return resourceKind
 }

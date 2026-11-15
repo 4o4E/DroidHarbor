@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { KeyRound, LayoutGrid, LogOut, Monitor, MonitorSmartphone, Moon, RefreshCw, Smartphone, Sun } from 'lucide-react'
+import { KeyRound, LayoutGrid, LogOut, Monitor, MonitorSmartphone, Moon, RefreshCw, Settings, Smartphone, Sun } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -9,8 +9,8 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { toast } from '@/components/ui/toast'
 import { useAuth } from '@/lib/auth'
 import { api, errorMessage } from '@/lib/api'
-import { useDevices, usePlatformEvents } from '@/lib/queries'
-import { useErrorNotification } from '@/lib/notifications'
+import { useDevices, useGlobalVideoSettings, usePlatformEvents } from '@/lib/queries'
+import { useErrorNotification, useVideoFallbackNotifications } from '@/lib/notifications'
 import type { Device, SessionMode } from '@/lib/types'
 import { AdminLogin } from './AdminLogin'
 import { CallersPanel } from './CallersPanel'
@@ -19,8 +19,9 @@ import { DevicePool } from './DevicePool'
 import { Workbench } from '@/workbench/Workbench'
 import { useTheme } from '@/lib/theme'
 import { ClipboardHistoryProvider } from '@/workbench/ClipboardHistory'
+import { SystemSettings } from './SystemSettings'
 
-type Page = 'devices' | 'workbench' | 'callers'
+type Page = 'devices' | 'workbench' | 'callers' | 'settings'
 
 export function ManagementApp() {
   const { loading, session } = useAuth()
@@ -34,6 +35,9 @@ function AuthenticatedManagement() {
   const queryClient = useQueryClient()
   const devices = useDevices()
   const events = usePlatformEvents()
+  const globalVideo = useGlobalVideoSettings()
+  useErrorNotification('无法读取全局画质', globalVideo.error)
+  useVideoFallbackNotifications(globalVideo.data?.fallbacks, devices.data)
   const [page, setPage] = useState<Page>('devices')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [mode, setMode] = useState<SessionMode>('control')
@@ -42,6 +46,10 @@ function AuthenticatedManagement() {
   const [addDeviceOpen, setAddDeviceOpen] = useState(false)
   const [syncingDeviceId, setSyncingDeviceId] = useState<string | null>(null)
   const selectedDevice = devices.data?.find(device => device.deviceId === selectedId) ?? null
+  if (page === 'workbench' && !selectedDevice) {
+    const first = devices.data?.find(device => device.connectionState === 'online') ?? devices.data?.[0]
+    if (first) setSelectedId(first.deviceId)
+  }
   const managedDevice = devices.data?.find(device => device.deviceId === managedDeviceId) ?? null
   useErrorNotification('状态通知异常', events.error)
   useErrorNotification('无法读取设备', devices.error)
@@ -90,6 +98,7 @@ function AuthenticatedManagement() {
           <ToggleGroupItem value="devices" aria-label="设备池" title="设备池"><LayoutGrid /><span>设备池</span></ToggleGroupItem>
           <ToggleGroupItem value="workbench" aria-label="工作台" title="工作台"><Smartphone /><span>工作台</span></ToggleGroupItem>
           <ToggleGroupItem value="callers" aria-label="调用凭证" title="调用凭证"><KeyRound /><span>凭证</span></ToggleGroupItem>
+          <ToggleGroupItem value="settings" aria-label="系统设置" title="系统设置"><Settings /><span>设置</span></ToggleGroupItem>
         </ToggleGroup>
         <div className="mt-auto flex flex-col items-center gap-3">
           <ToggleGroup orientation="vertical" value={[theme.mode]} onValueChange={values => { const next = values[0]; if (next === 'light' || next === 'dark' || next === 'system') theme.setMode(next) }} className="theme-group" aria-label="主题">
@@ -104,8 +113,9 @@ function AuthenticatedManagement() {
         {!devices.discoveryReady && !devices.isPending && <Alert variant="destructive" className="shrink-0"><AlertTitle>设备发现源不可用</AlertTitle><AlertDescription>设备连接状态暂不可用。</AlertDescription></Alert>}
         {devices.isError && <Button className="self-start" variant="outline" size="sm" onClick={() => void devices.refetch()}><RefreshCw data-icon="inline-start" />重新读取设备</Button>}
         {page === 'devices' && (devices.isPending ? <Card><CardHeader><CardTitle>正在读取设备池</CardTitle><CardDescription>设备加载中。</CardDescription></CardHeader></Card> : devices.data && <DevicePool devices={devices.data} onOpen={openWorkbench} onManage={device => { setManagedDeviceId(device.deviceId); setDeviceDialogOpen(true) }} onAdd={() => setAddDeviceOpen(true)} onSync={device => void syncDevice(device)} syncingDeviceId={syncingDeviceId} />)}
-        {page === 'workbench' && (selectedDevice ? <Workbench device={selectedDevice} devices={devices.data ?? []} onDeviceChange={changeWorkbenchDevice} mode={mode} onModeChange={setMode} /> : <Empty className="m-auto border"><EmptyHeader><EmptyMedia variant="icon"><Smartphone /></EmptyMedia><EmptyTitle>尚未选择设备</EmptyTitle><EmptyDescription>从设备池选择一台设备后进入工作台。</EmptyDescription></EmptyHeader><Button variant="outline" onClick={() => setPage('devices')}>返回设备池</Button></Empty>)}
+        {page === 'workbench' && (selectedDevice ? <Workbench device={selectedDevice} devices={devices.data ?? []} onDeviceChange={changeWorkbenchDevice} mode={mode} onModeChange={setMode} /> : <Empty className="m-auto border"><EmptyHeader><EmptyMedia variant="icon"><Smartphone /></EmptyMedia><EmptyTitle>{devices.isPending ? '正在读取设备' : '尚无已登记设备'}</EmptyTitle><EmptyDescription>添加设备后即可进入工作台预览。</EmptyDescription></EmptyHeader><Button variant="outline" onClick={() => setPage('devices')}>返回设备池</Button></Empty>)}
         {page === 'callers' && <CallersPanel />}
+        {page === 'settings' && <SystemSettings />}
       </main>
       <DeviceAdministration open={deviceDialogOpen} onOpenChange={setDeviceDialogOpen} device={managedDevice} onChanged={async () => { await queryClient.invalidateQueries({ queryKey: ['devices'] }) }} addDeviceOpen={addDeviceOpen} onAddDeviceOpenChange={setAddDeviceOpen} />
     </div>

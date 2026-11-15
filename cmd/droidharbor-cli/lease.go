@@ -27,6 +27,8 @@ type taskState struct {
 	TaskSecret     string   `json:"taskSecret"`
 	IdempotencyKey string   `json:"idempotencyKey"`
 	RequiredTags   []string `json:"requiredTags"`
+	DeviceID       string   `json:"deviceId,omitempty"`
+	DeviceName     string   `json:"deviceName,omitempty"`
 	LeaseID        string   `json:"leaseId,omitempty"`
 }
 
@@ -49,6 +51,8 @@ type leaseCommandOptions struct {
 	credentialFile string
 	taskID         string
 	tags           []string
+	deviceID       string
+	deviceName     string
 }
 
 type stringSliceFlag []string
@@ -97,13 +101,25 @@ func parseLeaseFlags(command string, args []string, claim bool) (leaseCommandOpt
 		flags.StringVar(&options.credentialFile, "credential-file", "", "含 token 的 JSON 文件")
 		flags.StringVar(&options.taskID, "task-id", "", "可选的外部任务 ID")
 		flags.Var(&tags, "tag", "所需标签（可重复）")
+		flags.StringVar(&options.deviceID, "device-id", "", "完整设备 ID，与 device-name 二选一")
+		flags.StringVar(&options.deviceName, "device-name", "", "精确设备名称，与 device-id 二选一")
 	}
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || options.taskDir == "" || (claim && (options.server == "" || options.credentialFile == "")) {
 		usage := "用法：droidharbor-cli " + command + " --task-dir <目录>"
 		if claim {
-			usage = "用法：droidharbor-cli claim --task-dir <目录> --server <http://host:port> --credential-file <JSON 文件> [--tag <标签>]... [--task-id <ID>]"
+			usage = "用法：droidharbor-cli claim --task-dir <目录> --server <http://host:port> --credential-file <JSON 文件> [--tag <标签>]... [--task-id <ID>] [--device-name <精确名称> | --device-id <完整 ID>]"
 		}
 		return leaseCommandOptions{}, &commandFailure{Code: "INVALID_ARGUMENT", Message: usage, exitCode: 2}
+	}
+	invalidSelector := false
+	flags.Visit(func(f *flag.Flag) {
+		if (f.Name == "device-id" || f.Name == "device-name") && strings.TrimSpace(f.Value.String()) == "" {
+			invalidSelector = true
+		}
+	})
+	options.deviceID, options.deviceName = strings.TrimSpace(options.deviceID), strings.TrimSpace(options.deviceName)
+	if invalidSelector || !utf8.ValidString(options.deviceID) || !utf8.ValidString(options.deviceName) || (options.deviceID != "" && options.deviceName != "") {
+		return leaseCommandOptions{}, &commandFailure{Code: "INVALID_ARGUMENT", Message: "设备选择条件必须非空；device-name 与 device-id 二选一", exitCode: 2}
 	}
 	options.tags = tags
 	return options, nil
@@ -372,7 +388,7 @@ func prepareTaskState(directory string, options leaseCommandOptions, claim bool)
 		if tagErr != nil {
 			return nil, "", &commandFailure{Code: "INVALID_ARGUMENT", Message: tagErr.Error(), exitCode: 2}
 		}
-		if !sameStrings(state.RequiredTags, tags) {
+		if !sameStrings(state.RequiredTags, tags) || state.DeviceID != options.deviceID || state.DeviceName != options.deviceName {
 			return nil, "", &commandFailure{Code: "TASK_DIRECTORY_CONFLICT", Message: "已保存的认领请求参数不匹配；禁止更改任务秘密或幂等键", exitCode: 2}
 		}
 		token, tokenFailure := readCredential(options.credentialFile)
@@ -410,7 +426,7 @@ func prepareTaskState(directory string, options leaseCommandOptions, claim bool)
 	if err != nil {
 		return nil, "", &commandFailure{Code: "INVALID_ARGUMENT", Message: err.Error(), exitCode: 2}
 	}
-	state := &taskState{Server: server, TaskID: taskID, TaskSecret: secret, IdempotencyKey: idempotencyKey, RequiredTags: tags}
+	state := &taskState{Server: server, TaskID: taskID, TaskSecret: secret, IdempotencyKey: idempotencyKey, RequiredTags: tags, DeviceID: options.deviceID, DeviceName: options.deviceName}
 	if failure := saveTaskState(directory, state); failure != nil {
 		return nil, "", failure
 	}
@@ -424,7 +440,9 @@ func leaseRequest(command string, state *taskState) (string, string, io.Reader) 
 			TaskID       string   `json:"taskId"`
 			TaskSecret   string   `json:"taskSecret"`
 			RequiredTags []string `json:"requiredTags"`
-		}{TaskID: state.TaskID, TaskSecret: state.TaskSecret, RequiredTags: state.RequiredTags})
+			DeviceID     string   `json:"deviceId,omitempty"`
+			DeviceName   string   `json:"deviceName,omitempty"`
+		}{TaskID: state.TaskID, TaskSecret: state.TaskSecret, RequiredTags: state.RequiredTags, DeviceID: state.DeviceID, DeviceName: state.DeviceName})
 		return http.MethodPost, "/leases", bytes.NewReader(body)
 	}
 	path := "/leases/" + url.PathEscape(state.LeaseID)

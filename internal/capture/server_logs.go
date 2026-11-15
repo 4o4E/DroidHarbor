@@ -14,6 +14,7 @@ type serverDiagnostics struct {
 	dropping            [2]bool
 	powerChanged        func(bool)
 	keepActiveFailed    func()
+	encodingFailed      func()
 }
 
 // Shell output can contain device/user text. Record severity and known exception
@@ -78,6 +79,18 @@ func (s *serverDiagnostics) observe(line []byte) {
 		s.logger.Error("scrcpy_keep_active_failed", "deviceId", s.deviceID, "captureId", s.captureID)
 		s.keepActiveFailed()
 		return
+	}
+	// Only the locked encoder's explicit argument/codec rejection is eligible
+	// for quality fallback. I/O, permission and generic server errors are not.
+	for _, kind := range [...]string{"java.lang.IllegalArgumentException", "android.media.MediaCodec$CodecException"} {
+		prefix := "[server] ERROR: Capture/encoding error: " + kind
+		if bytes.HasPrefix(line, []byte(prefix+":")) || bytes.Equal(line, []byte(prefix)) {
+			s.logger.Error("scrcpy_video_configuration_rejected", "deviceId", s.deviceID, "captureId", s.captureID, "exceptionType", kind)
+			if s.encodingFailed != nil {
+				s.encodingFailed()
+			}
+			return
+		}
 	}
 	if bytes.HasPrefix(line, []byte("[server] ERROR:")) {
 		s.logger.Error("scrcpy_server_error", "deviceId", s.deviceID, "captureId", s.captureID)

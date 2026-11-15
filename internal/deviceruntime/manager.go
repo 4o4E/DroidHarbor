@@ -33,6 +33,7 @@ type Manager struct {
 	changes     chan struct{}
 	mu          sync.RWMutex
 	workers     map[string]*worker
+	paused      map[string]bool
 	wg          sync.WaitGroup
 	closeErrors []error
 }
@@ -43,6 +44,7 @@ type worker struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	stopLink       func() bool
+	done           chan struct{}
 	state          devices.RuntimeInfo
 	snapshot       *devices.RuntimeInfo
 	issues         map[string]devices.RuntimeIssue
@@ -54,7 +56,7 @@ type worker struct {
 
 func New(ctx context.Context, registry *devices.Registry, power *capture.Manager, preview *previews.Manager, client *adb.Client, logger *slog.Logger) *Manager {
 	lifetime, cancel := context.WithCancel(ctx)
-	m := &Manager{ctx: lifetime, cancel: cancel, registry: registry, power: power, previews: preview, adb: client, logger: logger, changes: make(chan struct{}, 1), workers: make(map[string]*worker)}
+	m := &Manager{ctx: lifetime, cancel: cancel, registry: registry, power: power, previews: preview, adb: client, logger: logger, changes: make(chan struct{}, 1), workers: make(map[string]*worker), paused: make(map[string]bool)}
 	registry.BindRuntime(m.View, m.Notify)
 	m.wg.Add(1)
 	go m.loop()
@@ -107,17 +109,17 @@ func (m *Manager) syncLinks() {
 	m.mu.Lock()
 	for id, old := range m.workers {
 		current, online := selected[id]
-		if !online || current.link != old.link {
+		if !online || current.link != old.link || old.ctx.Err() != nil || m.paused[id] {
 			old.cancel()
 			delete(m.workers, id)
 		}
 	}
 	for id, current := range selected {
-		if m.workers[id] != nil || m.ctx.Err() != nil {
+		if m.workers[id] != nil || m.ctx.Err() != nil || m.paused[id] {
 			continue
 		}
 		ctx, cancel := context.WithCancel(m.ctx)
-		w := &worker{manager: m, link: current.link, ctx: ctx, cancel: cancel, issues: make(map[string]devices.RuntimeIssue), causes: make(map[string]string)}
+		w := &worker{manager: m, link: current.link, ctx: ctx, cancel: cancel, done: make(chan struct{}), issues: make(map[string]devices.RuntimeIssue), causes: make(map[string]string)}
 		w.stopLink = context.AfterFunc(current.ctx, cancel)
 		w.state = devices.RuntimeInfo{LinkID: current.link.LinkID, LinkGeneration: current.link.Generation, PowerState: "starting", CoverState: "pending", Issues: []devices.RuntimeIssue{}}
 		initial := w.state
@@ -211,6 +213,7 @@ func (w *worker) issue(stage, code, message string, cause error) {
 }
 
 func (w *worker) run() {
+	defer close(w.done)
 	defer w.manager.wg.Done()
 	defer w.cancel()
 	defer w.stopLink()

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Camera, ChevronDown, ChevronLeft, Circle, FlipHorizontal2, Monitor, Pause, Play, Power, RefreshCw, RotateCcw, RotateCw, Smartphone, Square, Unplug, Volume2 } from 'lucide-react'
+import { Camera, ChevronDown, ChevronLeft, Circle, FlipHorizontal2, Monitor, Pause, Play, Power, RefreshCw, RotateCcw, RotateCw, Smartphone, Square, Unplug } from 'lucide-react'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
@@ -9,6 +9,7 @@ import { deviceDisplaySize, deviceNeedsVerification, type Device, type SessionMo
 import { errorMessage } from '@/lib/api'
 import { PHONE_TOOLBAR_WIDTH } from './compactWindowSize'
 import { downloadScreenshot } from '@/lib/screenshots'
+import { PreviewAudio } from '@/media/PreviewAudio'
 
 type Props = { device: Device; mode: SessionMode; session: MediaSession; availableArea: { width: number; height: number }; stateLabel: string; onReconnect: () => void }
 
@@ -58,17 +59,6 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
     } catch (error) { toast.add({ title: '设备操作未完成', description: errorMessage(error), type: 'error', timeout: 0 }); return false }
     finally { setActionBusy(false) }
   }
-  const pressVolume = async (keyCode: number) => {
-    if (!canControl || actionBusy) return
-    setActionBusy(true)
-    try {
-      const down = await session.command('key', { keyCode, action: 0 })
-      if (!['succeeded', 'waiting-key-frame', 'dispatched'].includes(down.status)) throw new Error(down.message || down.code || `设备拒绝了按键（${down.status}）`)
-      const up = await session.command('key', { keyCode, action: 1 })
-      if (!['succeeded', 'waiting-key-frame', 'dispatched'].includes(up.status)) throw new Error(up.message || up.code || `设备拒绝了按键（${up.status}）`)
-    } catch (error) { session.release(); toast.add({ title: '按键操作未完成', description: errorMessage(error), type: 'error', timeout: 0 }) }
-    finally { setActionBusy(false) }
-  }
   const takeScreenshot = async () => {
     if (!session.sessionId) return
     try { await downloadScreenshot(session.sessionId) }
@@ -100,8 +90,6 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
     <div className="phone-toolbar" style={{ width: PHONE_TOOLBAR_WIDTH }} aria-label="设备快捷操作">
       <div className="phone-toolbar-actions">
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label={lastPowerCommand ? '关闭实体屏幕' : '点亮实体屏幕'} title={lastPowerCommand ? '关闭实体屏幕' : '点亮实体屏幕'} onClick={() => { const on = !lastPowerCommand; void runCommand('displayPower', { on }).then(sent => { if (sent) setLastPowerCommand(on) }) }}><Power /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="音量增加" title="音量增加" onClick={() => void pressVolume(24)}><Volume2 /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="音量降低" title="音量降低" onClick={() => void pressVolume(25)}><Volume2 className="rotate-180" /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy || rotatingPhone} aria-label="手机横竖屏切换" title="物理旋转：切换手机横竖屏（由应用和系统决定是否响应）" onClick={() => void rotatePhone()}><Smartphone /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label="网页左转" title="网页左转 90°（不改变手机方向）" onClick={() => setDisplayRotation(current => (current + 270) % 360)}><RotateCcw /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label="网页右转" title="网页右转 90°（不改变手机方向）" onClick={() => setDisplayRotation(current => (current + 90) % 360)}><RotateCw /></Button>
@@ -115,6 +103,7 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
       <Button size="icon-sm" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={onReconnect}><RotateCw /></Button>
       </div>
       <div className="phone-toolbar-navigation">
+      <PreviewAudio session={session} mode={mode} />
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>

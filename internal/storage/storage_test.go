@@ -152,13 +152,17 @@ func TestDisplayMigrationPreservesEnrolledDevice(t *testing.T) {
 		}
 	})
 	var name, allocation, tags, endpoint string
-	var generation, maintenance, maxSize, fps, bitRate, revision int
-	var display sql.NullString
-	if err = upgraded.QueryRow(`SELECT display_name,allocation_state,generation,maintenance_requested,video_max_size,video_max_fps,video_bit_rate,video_revision,display_info FROM devices WHERE id='kept'`).Scan(&name, &allocation, &generation, &maintenance, &maxSize, &fps, &bitRate, &revision, &display); err != nil {
+	var generation, maintenance, maxSize, revision int
+	var display, lastGood sql.NullString
+	if err = upgraded.QueryRow(`SELECT display_name,allocation_state,generation,maintenance_requested,video_max_size,video_revision,display_info,video_last_good FROM devices WHERE id='kept'`).Scan(&name, &allocation, &generation, &maintenance, &maxSize, &revision, &display, &lastGood); err != nil {
 		t.Fatal(err)
 	}
-	if name != "我的手机" || allocation != "maintenance" || generation != 6 || maintenance != 1 || maxSize != 960 || fps != 90 || bitRate != 20000000 || revision != 7 || display.Valid {
-		t.Fatalf("migration changed enrolled device: name=%q allocation=%q generation=%d maintenance=%d video=%d/%d/%d revision=%d display=%v", name, allocation, generation, maintenance, maxSize, fps, bitRate, revision, display)
+	if name != "我的手机" || allocation != "maintenance" || generation != 6 || maintenance != 1 || maxSize != 960 || revision != 7 || display.Valid || lastGood.Valid {
+		t.Fatalf("migration changed enrolled device: name=%q allocation=%q generation=%d maintenance=%d size=%d revision=%d display=%v profile=%v", name, allocation, generation, maintenance, maxSize, revision, display, lastGood)
+	}
+	var fps, bitRate, globalRevision int
+	if err = upgraded.QueryRow(`SELECT max_fps,bit_rate,revision FROM global_video_settings WHERE id=1`).Scan(&fps, &bitRate, &globalRevision); err != nil || fps != 60 || bitRate != 12000000 || globalRevision != 1 {
+		t.Fatalf("global target was not initialized independently of unverified device requests: %d/%d rev=%d err=%v", fps, bitRate, globalRevision, err)
 	}
 	if err = upgraded.QueryRow(`SELECT group_concat(tag,',') FROM (SELECT tag FROM device_tags WHERE device_id='kept' ORDER BY tag)`).Scan(&tags); err != nil || tags != "测试,购物" {
 		t.Fatalf("device tags changed: tags=%q err=%v", tags, err)

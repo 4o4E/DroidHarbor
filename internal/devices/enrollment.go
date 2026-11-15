@@ -66,11 +66,32 @@ func (r *Registry) Register(ctx context.Context, actorID string, request Registr
 		return Registered{}, err
 	}
 	defer tx.Rollback()
+	var restored Registered
+	restoreErr := tx.QueryRowContext(ctx, `SELECT l.device_id,l.id FROM device_links l JOIN devices d ON d.id=l.device_id WHERE l.endpoint=? AND d.removed_at IS NOT NULL`, request.Endpoint).Scan(&restored.DeviceID, &restored.LinkID)
+	if restoreErr == nil {
+		if err = restoreRegistration(ctx, tx, restored.DeviceID); err != nil {
+			return Registered{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE devices SET display_name=? WHERE id=?`, request.DisplayName, restored.DeviceID); err != nil {
+			return Registered{}, err
+		}
+		if err = record(ctx, tx, actorID, restored.DeviceID, restored.LinkID, "device.restore"); err != nil {
+			return Registered{}, err
+		}
+		if err = tx.Commit(); err != nil {
+			return Registered{}, err
+		}
+		r.changed(restored.DeviceID)
+		return restored, nil
+	}
+	if !errors.Is(restoreErr, sql.ErrNoRows) {
+		return Registered{}, restoreErr
+	}
 	if err = unusedEndpoint(ctx, tx, request.Endpoint); err != nil {
 		return Registered{}, err
 	}
 	result := Registered{DeviceID: identity.Secret(), LinkID: identity.Secret()}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO devices(id,display_name,allocation_state,video_max_fps,video_bit_rate) VALUES(?,?,'maintenance',60,12000000)`, result.DeviceID, request.DisplayName); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO devices(id,display_name,allocation_state) VALUES(?,?,'maintenance')`, result.DeviceID, request.DisplayName); err != nil {
 		return Registered{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO device_links(id,device_id,kind,endpoint) VALUES(?,?,?,?)`, result.LinkID, result.DeviceID, request.Kind, request.Endpoint); err != nil {
@@ -98,7 +119,7 @@ func (r *Registry) AddLink(ctx context.Context, actorID, deviceID string, reques
 	}
 	defer tx.Rollback()
 	var exists bool
-	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE id=?)`, deviceID).Scan(&exists); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM devices WHERE id=? AND removed_at IS NULL)`, deviceID).Scan(&exists); err != nil {
 		return Registered{}, err
 	}
 	if !exists {
@@ -357,13 +378,15 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 		return Evidence{}, err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT device_id,identity_evidence FROM device_links WHERE identity_evidence IS NOT NULL ORDER BY id`)
+	canonicalID := deviceID
+	rows, err := tx.QueryContext(ctx, `SELECT l.device_id,l.identity_evidence,d.removed_at IS NOT NULL FROM device_links l JOIN devices d ON d.id=l.device_id WHERE l.identity_evidence IS NOT NULL ORDER BY l.id`)
 	if err != nil {
 		return Evidence{}, err
 	}
 	for rows.Next() {
 		var owner, encoded string
-		if err = rows.Scan(&owner, &encoded); err != nil {
+		var removed bool
+		if err = rows.Scan(&owner, &encoded, &removed); err != nil {
 			rows.Close()
 			return Evidence{}, err
 		}
@@ -371,6 +394,14 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 		if err = json.Unmarshal([]byte(encoded), &existing); err != nil {
 			rows.Close()
 			return Evidence{}, err
+		}
+		if owner != deviceID && existing.SameHardware(evidence) && removed {
+			if canonicalID != deviceID && canonicalID != owner {
+				rows.Close()
+				return Evidence{}, &Error{Code: "IDENTITY_CONFLICT", Message: "历史设备身份不唯一", Status: 409}
+			}
+			canonicalID = owner
+			continue
 		}
 		if (owner == deviceID && !existing.SameHardware(evidence)) || (owner != deviceID && existing.Serial == evidence.Serial) {
 			rows.Close()
@@ -380,6 +411,17 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
 		return Evidence{}, err
 	}
+	if canonicalID != deviceID {
+		if err = restoreRegistration(ctx, tx, canonicalID); err != nil {
+			return Evidence{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE device_links SET device_id=? WHERE id=?`, canonicalID, linkID); err != nil {
+			return Evidence{}, err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE devices SET removed_at=?,maintenance_requested=1 WHERE id=?`, time.Now().UnixMilli(), deviceID); err != nil {
+			return Evidence{}, err
+		}
+	}
 	encoded, err := json.Marshal(evidence)
 	if err != nil {
 		return Evidence{}, err
@@ -388,11 +430,11 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 		return Evidence{}, err
 	}
 	if displayErr == nil {
-		if err = saveScreenGeometry(ctx, tx, deviceID, screen); err != nil {
+		if err = saveScreenGeometry(ctx, tx, canonicalID, screen); err != nil {
 			return Evidence{}, err
 		}
 	}
-	if err = record(ctx, tx, actorID, deviceID, linkID, "device.link.verify"); err != nil {
+	if err = record(ctx, tx, actorID, canonicalID, linkID, "device.link.verify"); err != nil {
 		return Evidence{}, err
 	}
 	r.mu.RLock()
@@ -414,6 +456,9 @@ func (r *Registry) Verify(ctx context.Context, actorID, deviceID, linkID string)
 	}
 	r.mu.Unlock()
 	r.changed(deviceID)
+	if canonicalID != deviceID {
+		r.changed(canonicalID)
+	}
 	return evidence, nil
 }
 
@@ -425,7 +470,7 @@ func (r *Registry) Refresh(ctx context.Context, actorID, deviceID string) error 
 	if err := r.refreshInventory(ctx); err != nil {
 		return err
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT l.id,l.kind,coalesce(l.observed_serial,l.endpoint) FROM devices d LEFT JOIN device_links l ON l.device_id=d.id WHERE d.id=? ORDER BY CASE WHEN l.kind='usb' THEN 0 ELSE 1 END,l.id`, deviceID)
+	rows, err := r.db.QueryContext(ctx, `SELECT l.id,l.kind,coalesce(l.observed_serial,l.endpoint) FROM devices d LEFT JOIN device_links l ON l.device_id=d.id WHERE d.id=? AND d.removed_at IS NULL ORDER BY CASE WHEN l.kind='usb' THEN 0 ELSE 1 END,l.id`, deviceID)
 	if err != nil {
 		return err
 	}

@@ -1,28 +1,36 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Camera, ChevronLeft, Circle, Expand, Monitor, RotateCw, Square, Unplug, ZoomIn, ZoomOut } from 'lucide-react'
+import { Camera, ChevronLeft, Circle, Monitor, RotateCw, Square, Unplug } from 'lucide-react'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { VideoSurface } from '@/media/VideoSurface'
 import { useMediaSession } from '@/media/useMediaSession'
 import { useAuth } from '@/lib/auth'
-import { useDevices, usePlatformEvents } from '@/lib/queries'
+import { useDevices, useGlobalVideoSettings, usePlatformEvents, useSystemPreferences } from '@/lib/queries'
 import { deviceDisplaySize, deviceName, deviceNeedsVerification, deviceStatus, type Device, type SessionMode } from '@/lib/types'
 import { errorMessage } from '@/lib/api'
 import { downloadScreenshot } from '@/lib/screenshots'
-import { useErrorNotification } from '@/lib/notifications'
+import { useErrorNotification, useVideoFallbackNotifications } from '@/lib/notifications'
 import { compactWindowSize, PHONE_TOOLBAR_WIDTH } from './compactWindowSize'
 import { useDeviceRuntimeNotification, useInitializedDevice } from '@/devices/DeviceMetrics'
+import { WindowScaleButton } from './WindowScaleButton'
+import { PreviewAudio } from '@/media/PreviewAudio'
+import { useCompactTarget } from './useCompactTarget'
 
 type CompactWorkbenchProps = { initialDeviceId: string | null; initialMode: string | null }
 
 export function CompactWorkbench({ initialDeviceId, initialMode }: CompactWorkbenchProps) {
+  const target = useCompactTarget(initialDeviceId, initialMode)
+  const [scale, setScale] = useState<number | null>(null)
   const { session, loading: authLoading, error: authError } = useAuth()
   const devicesQuery = useDevices()
   const events = usePlatformEvents()
-  const invalidMode = initialMode !== null && initialMode !== 'readonly' && initialMode !== 'control'
-  const device = devicesQuery.data?.find(item => item.deviceId === initialDeviceId)
-  const mode: SessionMode = initialMode === 'control' ? 'control' : 'readonly'
+  const globalVideo = useGlobalVideoSettings()
+  useErrorNotification('无法读取全局画质', globalVideo.error)
+  useVideoFallbackNotifications(globalVideo.data?.fallbacks, devicesQuery.data, target.deviceId ?? undefined)
+  const invalidMode = target.mode !== null && target.mode !== 'readonly' && target.mode !== 'control'
+  const device = devicesQuery.data?.find(item => item.deviceId === target.deviceId)
+  const mode: SessionMode = target.mode === 'control' ? 'control' : 'readonly'
   useErrorNotification('设备状态通知异常', events.error)
   useErrorNotification('无法读取设备', devicesQuery.error)
 
@@ -30,21 +38,23 @@ export function CompactWorkbench({ initialDeviceId, initialMode }: CompactWorkbe
     document.title = device && !invalidMode ? `${deviceName(device)}${mode === 'control' ? '' : ' · 只读'}` : '页面不可用'
   }, [device, invalidMode, mode])
 
-  if (invalidMode || !initialDeviceId) return <Unavailable invalidMode={invalidMode} />
+  if (invalidMode || !target.deviceId) return <Unavailable invalidMode={invalidMode} />
   if (authLoading || (!!session && devicesQuery.isPending)) return <main className="grid h-svh place-items-center p-4"><p className="text-sm text-muted-foreground">正在验证会话并读取设备…</p></main>
   if (!session) return <Unavailable invalidMode={false} message={authError || '此独立窗口没有有效管理员会话，请登录后从设备池重新打开。'} />
   if (devicesQuery.isError) return <Unavailable invalidMode={false} message={errorMessage(devicesQuery.error)} />
   if (!device) return <Unavailable invalidMode={false} message="没有找到指定设备，请从设备池选择设备。" />
 
-  return <CompactSession key={device.deviceId} device={device} mode={mode} />
+  return <CompactSession key={`${device.deviceId}:${mode}`} device={device} mode={mode} scale={scale} onScaleChange={setScale} />
 }
 
 function Unavailable({ invalidMode, message }: { invalidMode: boolean; message?: string }) {
   return <main className="p-4"><Empty className="border"><EmptyHeader><EmptyMedia variant="icon"><Unplug /></EmptyMedia><EmptyTitle>无法打开工作台</EmptyTitle><EmptyDescription>{message || (invalidMode ? '查看模式无效，请从设备池重新打开。' : '没有找到指定设备，请从设备池选择设备。')}</EmptyDescription></EmptyHeader><EmptyContent><Button nativeButton={false} render={<a href="/" />} variant="outline">返回设备池</Button></EmptyContent></Empty></main>
 }
 
-function CompactSession({ device, mode }: { device: Device; mode: SessionMode }) {
+function CompactSession({ device, mode, scale, onScaleChange }: { device: Device; mode: SessionMode; scale: number | null; onScaleChange: (value: number) => void }) {
   const [sessionAllowed, setSessionAllowed] = useState(true)
+  const preferences = useSystemPreferences()
+  useErrorNotification('无法读取小窗设置', preferences.error)
   useDeviceRuntimeNotification(device)
   const initialized = useInitializedDevice(device)
   const needsVerification = deviceNeedsVerification(device)
@@ -74,10 +84,12 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
 
   useEffect(() => () => cancelResize.current?.(), [])
 
-  const resizeWindow = useCallback((fraction: number, targetRatio = ratio) => {
-    if (!targetRatio) return
+  const resizeWindow = useCallback((nextScale: number, width = session.width || savedSize?.width || 0, height = session.height || savedSize?.height || 0) => {
+    if (!width || !height) return
     cancelResize.current?.()
-    const size = compactWindowSize(targetRatio, fraction)
+    const size = compactWindowSize(width, height, nextScale)
+    onScaleChange(nextScale)
+    if (size.fitted) toast.add({ title: '小窗已完整适配桌面', description: `${nextScale}×超过可用桌面，已等比缩放。`, type: 'warning' })
     if (size.innerHeight < 120) {
       toast.add({ title: '无法调整小窗尺寸', description: '当前屏幕可用空间不足。', type: 'error', timeout: 0 })
       return
@@ -97,12 +109,12 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
     window.addEventListener('resize', observeResize)
     window.resizeTo(size.innerWidth + size.chromeWidth, size.innerHeight + size.chromeHeight)
     observeResize()
-  }, [ratio])
+  }, [session.width, session.height, savedSize?.width, savedSize?.height, onScaleChange])
   useEffect(() => {
-    if (initializedSize.current || !savedRatio) return
+    if (initializedSize.current || !savedSize || !preferences.data) return
     initializedSize.current = true
-    resizeWindow(0.8, savedRatio)
-  }, [savedRatio, resizeWindow])
+    resizeWindow(scale ?? preferences.data.windowScales[0], savedSize.width, savedSize.height)
+  }, [savedSize, preferences.data, resizeWindow, scale])
 
   const runCommand = async (type: string) => {
     if (!canControl || busy) return
@@ -129,11 +141,10 @@ function CompactSession({ device, mode }: { device: Device; mode: SessionMode })
             <div className="phone-toolbar-actions">
             <Button size="icon-sm" variant="ghost" disabled={!session.sessionId} aria-label="截图" title="截图" onClick={() => void screenshot()}><Camera /></Button>
             <Button size="icon-sm" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={() => { setSessionAllowed(false); window.setTimeout(() => setSessionAllowed(true), 0) }}><RotateCw /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="小窗口" title="小窗口" onClick={() => resizeWindow(0.6)}><ZoomOut /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="标准窗口" title="标准窗口" onClick={() => resizeWindow(0.8)}><Expand /></Button>
-            <Button size="icon-sm" variant="ghost" disabled={!ratio} aria-label="大窗口" title="大窗口" onClick={() => resizeWindow(1)}><ZoomIn /></Button>
+            {preferences.data && <WindowScaleButton scales={preferences.data.windowScales} value={scale ?? preferences.data.windowScales[0]} disabled={!ratio} onChange={resizeWindow} />}
             </div>
             <div className="phone-toolbar-navigation">
+            <PreviewAudio session={session} mode={mode} />
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="返回" title="返回" onClick={() => void runCommand('back')}><ChevronLeft /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="Home" title="Home" onClick={() => void runCommand('home')}><Circle /></Button>
             <Button size="icon-sm" variant="ghost" disabled={!canControl || busy} aria-label="最近任务" title="最近任务" onClick={() => void runCommand('recent')}><Square /></Button>

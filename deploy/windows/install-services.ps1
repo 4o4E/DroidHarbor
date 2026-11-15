@@ -118,7 +118,7 @@ try {
     # The platform reads its runtime settings from one dotenv file.
     # Its database/admin/transfer paths must point to the directories granted below.
     $serveArgs = @('serve', '--env-file', (Join-Path $ConfigDirectory '.env'))
-    $adbArgsWithoutSeed = @('adb-serve', '--adb', $AdbExecutable, '--listen', $AdbListen, '--log-file', (Join-Path $adbLogDirectory 'adb.jsonl'))
+    $adbArgsWithoutSeed = @('adb-serve', '--adb', $AdbExecutable, '--listen', $AdbListen, '--log-file', (Join-Path $adbLogDirectory 'adb.log'))
     $adbArgs = @($adbArgsWithoutSeed)
     if ($seedStage) { $adbArgs += @('--auth-seed-dir', $seedStage) }
     $binary = Quote-WindowsArgument $BinaryPath

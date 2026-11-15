@@ -210,3 +210,19 @@ func (s *Server) recoverDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(204)
 }
+
+func (s *Server) removeDevice(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.authorize(w, r, true)
+	if !ok {
+		return
+	}
+	var body devices.Removal
+	if !s.decode(w, r, &body, false) {
+		return
+	}
+	if err := s.Devices.Remove(r.Context(), actor, r.PathValue("id"), body); err != nil {
+		s.domainError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

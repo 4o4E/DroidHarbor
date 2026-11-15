@@ -18,6 +18,7 @@ import (
 const (
 	controlChannelLabel = "droidharbor.control.v1"
 	h264Fmtp            = "profile-level-id=42001f;packetization-mode=1;level-asymmetry-allowed=1"
+	opusFmtp            = "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxplaybackrate=48000"
 )
 
 var h264Feedback = []webrtc.RTCPFeedback{
@@ -36,6 +37,7 @@ type Callbacks struct {
 	Ready             func()
 	Closed            func(error)
 	KeyFrameRequested func()
+	AudioFailed       func(error)
 }
 
 type Endpoint struct {
@@ -86,6 +88,10 @@ func New(config Config) (*Endpoint, error) {
 	if err = media.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
 		_ = mux.Close()
 		return nil, fmt.Errorf("register H.264 codec: %w", err)
+	}
+	if err = media.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: opusFmtp}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil {
+		_ = mux.Close()
+		return nil, fmt.Errorf("register Opus codec: %w", err)
 	}
 	registry := &interceptor.Registry{}
 	if err = webrtc.RegisterDefaultInterceptors(media, registry); err != nil {
@@ -227,6 +233,20 @@ func (e *Endpoint) Accept(ctx context.Context, offer string, callbacks Callbacks
 		return nil, fmt.Errorf("add send-only H.264 track: %w", err)
 	}
 	peer := newPeer(e, pc, track, transceiver.Sender(), callbacks)
+	if strings.Contains(offer, "\nm=audio ") {
+		peer.audioTrack, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: opusFmtp}, "audio", "droidharbor")
+		if err == nil {
+			var audio *webrtc.RTPTransceiver
+			audio, err = pc.AddTransceiverFromTrack(peer.audioTrack, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendonly})
+			if err == nil {
+				peer.audioSender = audio.Sender()
+			}
+		}
+		if err != nil {
+			_ = peer.Close()
+			return nil, fmt.Errorf("create Opus track: %w", err)
+		}
+	}
 	if err = e.register(peer); err != nil {
 		_ = peer.Close()
 		return nil, err
@@ -308,7 +328,7 @@ func validateOffer(offer string) error {
 	if err := description.UnmarshalString(offer); err != nil {
 		return fmt.Errorf("parse WebRTC offer: %w", err)
 	}
-	var video, application *sdp.MediaDescription
+	var video, audio, application *sdp.MediaDescription
 	for _, media := range description.MediaDescriptions {
 		if media.MediaName.Port.Value == 0 {
 			return fmt.Errorf("rejected %s media sections are not supported", media.MediaName.Media)
@@ -319,6 +339,11 @@ func validateOffer(offer string) error {
 				return errors.New("WebRTC offer must contain exactly one video section")
 			}
 			video = media
+		case "audio":
+			if audio != nil {
+				return errors.New("WebRTC offer must contain at most one audio section")
+			}
+			audio = media
 		case "application":
 			if application != nil {
 				return errors.New("WebRTC offer must contain exactly one DataChannel section")
@@ -336,6 +361,25 @@ func validateOffer(offer string) error {
 	}
 	if !hasCompatibleH264Payload(video) {
 		return errors.New("WebRTC video offer does not include packetization-mode=1 H.264")
+	}
+	if audio != nil {
+		if effectiveDirection(description.Attributes, audio.Attributes) != "recvonly" {
+			return errors.New("WebRTC audio offer direction must be recvonly")
+		}
+		opus := false
+		for _, attribute := range audio.Attributes {
+			fields := strings.Fields(attribute.Value)
+			if attribute.Key == "rtpmap" && len(fields) == 2 && strings.EqualFold(fields[1], "opus/48000/2") {
+				for _, format := range audio.MediaName.Formats {
+					if format == fields[0] {
+						opus = true
+					}
+				}
+			}
+		}
+		if !opus {
+			return errors.New("WebRTC audio offer must include stereo Opus at 48000 Hz")
+		}
 	}
 	return nil
 }

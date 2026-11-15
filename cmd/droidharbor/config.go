@@ -84,7 +84,7 @@ func loadServeOptions(path string) (serveOptions, error) {
 	options.rtcListen = get("DROIDHARBOR_RTC_LISTEN", "0.0.0.0:8081")
 	options.rtcAdvertisedIP = strings.TrimSpace(get("DROIDHARBOR_RTC_ADVERTISED_IP", ""))
 	options.transferTempDir = localPath("DROIDHARBOR_TRANSFER_TEMP_DIR", "data/transfers")
-	options.logFile = localPath("DROIDHARBOR_LOG_FILE", "logs/platform.jsonl")
+	options.logFile = localPath("DROIDHARBOR_LOG_FILE", "logs/platform.log")
 	options.logLevel = get("DROIDHARBOR_LOG_LEVEL", "info")
 	options.web = localPath("DROIDHARBOR_WEB_DIR", "")
 	options.scrcpyServer = localPath("DROIDHARBOR_SCRCPY_SERVER", "")
@@ -145,7 +145,7 @@ DROIDHARBOR_RTC_LISTEN=0.0.0.0:8081
 DROIDHARBOR_RTC_ADVERTISED_IP=
 DROIDHARBOR_DATABASE=data/droidharbor.db
 DROIDHARBOR_TRANSFER_TEMP_DIR=data/transfers
-DROIDHARBOR_LOG_FILE=logs/platform.jsonl
+DROIDHARBOR_LOG_FILE=logs/platform.log
 DROIDHARBOR_LOG_LEVEL=info
 DROIDHARBOR_ADMIN_SESSION_TTL=12h
 DROIDHARBOR_ADB_TIMEOUT=10s

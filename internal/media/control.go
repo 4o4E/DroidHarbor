@@ -88,6 +88,7 @@ func rtcCallbacks(s *session) rtc.Callbacks {
 		Ready:             s.onPeerReady,
 		Closed:            func(err error) { s.beginEnd(err) },
 		KeyFrameRequested: s.requestKeyFrame,
+		AudioFailed:       func(err error) { go s.hub.audioPeerFailed(s, err) },
 	}
 }
 

@@ -63,6 +63,8 @@ type ClaimRequest struct {
 	TaskSecret     string
 	IdempotencyKey string
 	RequiredTags   []string
+	DeviceID       string
+	DeviceName     string
 }
 
 // Error is the stable domain error contract consumed by the HTTP layer.

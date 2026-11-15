@@ -37,7 +37,7 @@ func (r *Registry) ReadLink(ctx context.Context, deviceID string) (leases.Link, 
 		return leases.Link{}, nil, err
 	}
 	var exists int
-	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM devices WHERE id=?`, deviceID).Scan(&exists)
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM devices WHERE id=? AND removed_at IS NULL`, deviceID).Scan(&exists)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return leases.Link{}, nil, ctxErr
 	}

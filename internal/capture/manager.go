@@ -53,6 +53,7 @@ type Manager struct {
 	resourceFailure func(context.Context, string) error
 	closed          bool
 	controlOnly     bool
+	audioOnly       bool
 	videoOwner      *Manager
 	streams         map[string]*Stream
 	recovering      map[string]*recoveryFlight
@@ -103,6 +104,7 @@ type Stream struct {
 	live             bool
 	stopRequested    atomic.Bool
 	journaled        atomic.Bool
+	videoUnsupported atomic.Bool
 }
 
 func New(ctx context.Context, db *sql.DB, client *adb.Client, source Source, config Config, logger *slog.Logger) (*Manager, error) {
@@ -270,6 +272,9 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		stopLink()
 		if registered {
 			s.failAndClose(nil)
+			if s.videoUnsupported.Load() {
+				startErr = errors.Join(startErr, ErrVideoParametersUnsupported)
+			}
 		} else {
 			s.requestStop(nil)
 			m.remove(s)
@@ -317,6 +322,8 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	var cmd string
 	if m.controlOnly {
 		cmd, err = startupPowerCommand(jar, gateNonce, scid)
+	} else if m.audioOnly {
+		cmd, err = startupAudioCommand(jar, gateNonce, scid)
 	} else {
 		cmd, err = startupCommand(jar, gateNonce, scid, settings)
 	}
@@ -361,6 +368,10 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 		_ = m.markFailureBounded(s, "GO_UNCERTAIN")
 		return nil, err
 	}
+	// Drain diagnostics before reading the video preamble: a rejected encoder
+	// can exit before publishing metadata.
+	s.workers.Add(1)
+	go s.drainShell()
 	stage = "socket_ready"
 	for i := 0; i < 40; i++ {
 		if err := ioCtx.Err(); err != nil {
@@ -408,7 +419,12 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	if err := scrcpy.ReadDummy(first); err != nil {
 		return nil, err
 	}
-	if !m.controlOnly {
+	if m.audioOnly {
+		stage = "audio_preamble"
+		if err := readAudioPreamble(first); err != nil {
+			return nil, err
+		}
+	} else if !m.controlOnly {
 		stage = "open_control"
 		control, err := m.adb.Open(s.ctx, link.TransportID, "localabstract:"+socket, authorized)
 		if err != nil {
@@ -433,13 +449,14 @@ func (m *Manager) Start(ctx context.Context, deviceID string, settings Settings,
 	if err := m.activate(ioCtx, s); err != nil {
 		return nil, err
 	}
-	s.workers.Add(2)
 	if !m.controlOnly {
 		s.workers.Add(1)
 		go s.readFrames()
 	}
-	go s.readMessages()
-	go s.drainShell()
+	if !m.audioOnly {
+		s.workers.Add(1)
+		go s.readMessages()
+	}
 	stage = "deliver"
 	stopStartup()
 	if err := startCtx.Err(); err != nil {

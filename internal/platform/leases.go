@@ -120,14 +120,29 @@ func (s *Server) claimLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		TaskID       string   `json:"taskId"`
-		TaskSecret   string   `json:"taskSecret"`
-		RequiredTags []string `json:"requiredTags"`
+		TaskID       string          `json:"taskId"`
+		TaskSecret   string          `json:"taskSecret"`
+		RequiredTags []string        `json:"requiredTags"`
+		DeviceID     json.RawMessage `json:"deviceId"`
+		DeviceName   json.RawMessage `json:"deviceName"`
 	}
 	if !s.decode(w, r, &body, false) {
 		return
 	}
-	lease, err := s.Leases.Claim(r.Context(), secret, leases.ClaimRequest{TaskID: body.TaskID, TaskSecret: body.TaskSecret, RequiredTags: body.RequiredTags, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	request := leases.ClaimRequest{TaskID: body.TaskID, TaskSecret: body.TaskSecret, RequiredTags: body.RequiredTags, IdempotencyKey: r.Header.Get("Idempotency-Key")}
+	if body.DeviceID != nil {
+		if err := json.Unmarshal(body.DeviceID, &request.DeviceID); err != nil || strings.TrimSpace(request.DeviceID) == "" {
+			s.domainError(w, r, leases.ErrInvalidRequest)
+			return
+		}
+	}
+	if body.DeviceName != nil {
+		if err := json.Unmarshal(body.DeviceName, &request.DeviceName); err != nil || strings.TrimSpace(request.DeviceName) == "" {
+			s.domainError(w, r, leases.ErrInvalidRequest)
+			return
+		}
+	}
+	lease, err := s.Leases.Claim(r.Context(), secret, request)
 	if err != nil {
 		s.domainError(w, r, err)
 		return
