@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Camera, ChevronDown, ChevronLeft, Circle, FlipHorizontal2, Monitor, Pause, Play, Power, RefreshCw, RotateCcw, RotateCw, Smartphone, Square, Unplug } from 'lucide-react'
+import { Camera, ChevronLeft, Circle, FlipHorizontal2, Monitor, Pause, Play, Power, RefreshCw, RotateCcw, RotateCw, Smartphone, Square, Unplug } from 'lucide-react'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
@@ -96,9 +96,6 @@ export function PhoneView({ device, mode, session, availableArea, stateLabel, on
       <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label={mirrored ? '取消镜像显示' : '镜像显示'} aria-pressed={mirrored} title="镜像显示" onClick={() => setMirrored(current => !current)}><FlipHorizontal2 /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!session.ready} aria-label={paused ? '继续画面' : '暂停画面'} aria-pressed={paused} title={paused ? '继续画面' : '暂停画面'} onClick={() => setPaused(current => !current)}>{paused ? <Play /> : <Pause />}</Button>
       <Button size="icon-sm" variant="ghost" disabled={!session.sessionId} aria-label="截图" title="截图" onClick={() => void takeScreenshot()}><Camera /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="通知面板" title="通知面板" onClick={() => void runCommand('notification')}><Unplug /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="系统设置" title="系统设置" onClick={() => void runCommand('settings')}><Monitor /></Button>
-      <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="收起通知面板" title="收起通知面板" onClick={() => void runCommand('collapse')}><ChevronDown /></Button>
       <Button size="icon-sm" variant="ghost" disabled={!canControl || actionBusy} aria-label="重置视频" title="重置视频" onClick={() => void runCommand('resetVideo')}><RefreshCw /></Button>
       <Button size="icon-sm" variant="ghost" disabled={device.connectionState !== 'online'} aria-label="重新连接视频" title="重新连接视频" onClick={onReconnect}><RotateCw /></Button>
       </div>
