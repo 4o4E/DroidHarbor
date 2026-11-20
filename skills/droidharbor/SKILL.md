@@ -29,18 +29,19 @@ Set these values in the harness's live environment/configuration (not as secrets
 ```text
 <cli> version
 <cli> capabilities --server <server-address> --credential-file <caller-JSON>
-<cli> devices --server <server-address> --credential-file <caller-JSON>
 <cli> claim --server <server-address> --credential-file <caller-JSON> --task-dir <private-task-dir> --task-id <task-id> --tag <required-tag> [--tag <another-required-tag>]
 <cli> status --task-dir <private-task-dir>
 ```
 
 Confirm API major 1 and `remoteAdb` capability before connecting. `devices` returns enrolled device IDs, exact display names, tags, connection/allocation states, and discovery readiness without management endpoints or task identities. When the user specifies a phone, use `claim ... --device-name <exact-name>` or `claim ... --device-id <complete-device-id>` (mutually exclusive). A duplicate name returns `DEVICE_NAME_AMBIGUOUS` with candidate IDs; list devices and choose the intended complete ID. A missing, offline, occupied, disabled, or tag-mismatched selected phone fails explicitly; never silently claim another phone. Each supplied `--tag` is required, including with a device selector.
 
+When the user names one or more device tags, pass every required `--tag` in the **first** claim. Use `devices` only when you need to disambiguate a device or diagnose a failure, not as a substitute for an atomic tagged claim. On `NO_MATCHING_DEVICE` or `DEVICE_UNAVAILABLE`, report the result and keep the selection criteria. Do not claim without the tags or start looking for an APK on another device.
+
 A claim gets a 900-second lease. Save the task directory and original claim inputs. If claim returns result-unknown (exit 6), preserve the directory, caller credential, task ID, tags, device selector, and request ID. `status` cannot query the lease until a lease ID is saved; if it reports that the initial claim result is unknown, explicitly rerun the identical `claim` with the same directory, server, credential, task ID, tags, and device selector. The CLI reuses the saved task secret and idempotency key and the server returns the original lease/terminal result; never change the parameters, create another task directory, or use a new key.
 
 ## Connect and operate
 
-Run `connect` in the foreground of an ordinary OS terminal and leave that process alive for all device work. It emits one readiness JSON line only once the native ADB target is online, then stays running. Use a second terminal for `env`, `renew`, `disconnect`, and `release`; no agent notification, plugin, lifecycle hook, or helper script is required. A harness may use its normal background-process facility only if it keeps this same foreground process alive and captures its stdout JSON line.
+Keep the foreground `connect` process alive for all device work. Wait for its one stdout readiness JSON line (`status: "active"`), emitted after ADB reports `device`, the platform confirms the same connection is active, and the task directory lock is released. Use the harness's standard output-wait facility or a second terminal; do not use a fixed sleep or wait for process exit as a readiness signal. If the process fails or no readiness arrives by the caller's deadline, inspect its error; do not proceed on a guessed port. No plugin, lifecycle hook, or helper script is required.
 
 ```text
 <cli> connect --task-dir <private-task-dir> --adb-bin <absolute-native-adb-path>
@@ -71,58 +72,38 @@ A newly claimed phone may retain its previous application, screen, login, and ba
 
 Do not assume apps were closed, accounts logged out, or UI reset. Platform lease cleanup revokes task access; it does not reset application state or guarantee that a program already started on the phone stops running. Consider possible continuing side effects.
 
-### Observe, launch and navigate an app
+### Launch, find and act with evidence
 
-Use the app package requested by the task. Resolve its current launcher instead of assuming a launcher icon position or a version-specific Activity:
+Use `app` through the bundled CLI on the live task connection. It resolves the current verified task ADB environment internally. Use the app's actual package: Taobao `com.taobao.taobao`, Pinduoduo `com.xunmeng.pinduoduo`, Xianyu `com.taobao.idlefish`. Use app-specific search/navigation rules from the relevant business Skill, not from this device tool.
 
-```text
-<adbBinary> <adbArgs...> shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p <package>
-<adbBinary> <adbArgs...> shell am start -W -n <resolved-package/activity>
-```
+| Command | What it proves |
+| --- | --- |
+| `app open --package <package>` | Resolves the installed launcher, starts it once, and returns the actual foreground and a first-screen PNG. Missing launcher is a stop, not a reason to guess an Activity or install an APK. `foregroundVerified` means the app got focus, not that its business page loaded. |
+| `app find --package <package> --target <selector>` | Checks a single current observation. Returns the matching controls only. Multiple candidates mean no unique locator; refine by class, text, description, ID, or state. |
+| `app tap --package <package> --target <selector> <expectation>` | Confirms one current clickable target, taps once, then waits for the given outcome. An already-satisfied condition does not prove a new action. |
+| `app input --package <package> --target <selector> --text <value>` | Confirms the focused editable control. To replace text, it first confirms the old value was fully selected, sends the edit once, then reads back the exact value from the same editor. It never submits. If the field already contains the verified value, it sends no keys. |
+| `app wait --package <package> <expectation>` | Observes only. Useful after an explicitly chosen native action or to verify a page after launch. With no additional condition it waits for the package to get focus. |
 
-Common package identities: Taobao `com.taobao.taobao`, Pinduoduo `com.xunmeng.pinduoduo`, Xianyu `com.taobao.idlefish`. A successful `am start` means Android accepted the launch, not that the intended app page or search results are ready. Read the foreground window and the actual page before the next action.
+Each command requires `--task-dir <private-task-dir>`. `--timeout` is 12s by default (2s–60s); this is a deadline, not a delay. A selector is one JSON object; keys `id`, `class`, `text`, `description`, `enabled`, `focused`, `clickable`, and `selected` match exactly and are ANDed. Form the expectation with `--expect-activity '<package>/Activity'`, `--expect-package <destination-package>`, and/or `--expect-node <selector>`; every repeated `--expect-node` must be present in the same current observation. Use `--expect-node` on `open` to also verify a specific page (`pageVerified`). For in-app navigation, use a destination title/control rather than the app's unchanged package. Include a query/model marker when the previous result page can display the same title.
 
-If the phone is asleep, explicitly wake it when the task permits, then observe the restored interface before clicking:
-
-```text
-<adbBinary> <adbArgs...> shell input keyevent KEYCODE_WAKEUP
-<adbBinary> <adbArgs...> shell dumpsys power
-<adbBinary> <adbArgs...> shell dumpsys window
-```
-
-An immediate click can arrive before wake-up finishes. A black screenshot may represent a sleeping display; check current power/window state rather than treating a valid PNG as proof of a usable app screen. A credential lock requires the user's unlock action.
-
-Android's built-in `uiautomator dump` is usable through native shell and is distinct from the unsupported uiautomator2 framework. Choose a unique task-owned XML path:
+Examples show shell quoting for POSIX shells and modern PowerShell native argument passing; an argument-vector tool passes the JSON as one argument without the surrounding single quotes:
 
 ```text
-<adbBinary> <adbArgs...> shell uiautomator dump --compressed /data/local/tmp/droidharbor-<task-owned-random>-ui.xml
-<adbBinary> <adbArgs...> shell -T cat /data/local/tmp/droidharbor-<task-owned-random>-ui.xml
-<adbBinary> <adbArgs...> shell rm -f /data/local/tmp/droidharbor-<task-owned-random>-ui.xml
+<cli> app open --task-dir <task-dir> --package com.example.catalog
+<cli> app find --task-dir <task-dir> --package com.example.catalog --target '{"id":"com.example.catalog:id/query"}'
+<cli> app input --task-dir <task-dir> --package com.example.catalog --target '{"id":"com.example.catalog:id/query"}' --text RTX5090
+<cli> app tap --task-dir <task-dir> --package com.example.catalog --target '{"text":"Search","clickable":true}' --expect-node '{"text":"Results"}' --expect-node '{"description":"Results for RTX5090"}'
 ```
 
-Verify that the XML exists and parses; an idle-state failure can occur without a useful nonzero `uiautomator` exit status. Animated pages can exceed the idle wait. Use a fresh screenshot to observe such a page rather than repeating an input or changing global animation settings. Keep hierarchy/screenshot data private, extract only task-relevant nodes, and remove only this task's XML files.
+Windows PowerShell 5.1 native command invocation requires backslash-escaped inner quotes, e.g. `--target '{\"text\":\"Search\"}'`. Keep actual locators grounded in the current app; the example package is illustrative.
 
-Select controls from current text/content descriptions, class and bounds. Resource IDs are not always unique or present: Pinduoduo can reuse one ID across controls, and Xianyu's custom-rendered pages may expose descriptions without IDs. Use coordinates derived from the current observation for one action, then observe again. Dismiss a promotion only through its verified close control; distinguish it from coupon, purchase and chat actions.
+Read JSON on stdout on success and `details` in stderr JSON on failure. `dispatch: "not_sent"` means no mutating action was issued; `"sent"` with `verified: false` means the command was issued but the result was not proven; `"delivery_unknown"` means the command may already have reached Android. A timeout includes the last observed foreground/matches and their timestamp where available. Waits only observe; use the last evidence to reconcile the outcome before deciding on any next action. `APP_TARGET_AMBIGUOUS` includes the match count and a bounded candidate list, and does not choose a target.
 
-For example, native ASCII input and a tap are:
+If controls are not exposed or the UI tree cannot be read reliably, use the returned current `screenshot.path` as visual evidence; the tool has **not** automatically verified the condition. An access error may instead leave `screenshotError`. Keep PNGs within the private task directory and remove the task's copies when finished. Do not replace a screenshot with a stale one or repeatedly pull the XML. If a visually grounded step needs native input, use the live `adbBinary` and `adbArgs` above, issue it once, and verify against the resulting screen or `app wait`. Do not treat a visual guess as a matched control or proven field value.
 
-```text
-<adbBinary> <adbArgs...> shell input text usb
-<adbBinary> <adbArgs...> shell input tap <current-x> <current-y>
-```
+If the phone is asleep, an authorized explicit native wake-up (`shell input keyevent KEYCODE_WAKEUP`) must be followed by observation before clicking. A black PNG is not proof of a usable display; diagnose with `dumpsys power/window` when needed. A credential lock or app login gate requires the user's action. A device tag does not prove an installed app or valid login. Browsing authorization does not authorize orders, payments, messages, account switching, or coupon redemption.
 
-Before submitting a search, read back the actual input field. The active IME can transform multiword input, and `input text` is not a general Unicode/Chinese input channel. Use ASCII only when it satisfies the requested query; required Chinese input needs an explicitly approved input method/channel. Preserve the user's keyboard settings and account state.
-
-Inspect the submitted query, visible product results and opened product details separately. App-specific deep links need the same page-level verification; successful intent resolution/launch alone does not prove the query was applied. If search or browsing reaches a login/authorization gate, request the user's login action and report that path as blocked. Device tags do not prove that an app login is still valid. Browsing authorization alone does not authorize orders, payments, messages, account switching or coupon redemption.
-
-### Keep the observation loop efficient
-
-- Resolve the launcher once per app/task and reuse it until the installed app changes or launch fails. Do not repeat package discovery before each navigation.
-- Start with a screenshot when page identity or visual state is the question. Request a UI hierarchy only when text, descriptions or bounds are needed; parse task-relevant nodes rather than printing the entire tree.
-- Reuse a verified locator while the same page, orientation and layout remain valid. Re-observe after navigation, overlays, scrolling or rotation; do not reuse stale coordinates across those changes.
-- Prefer one purposeful action followed by the smallest observation that proves its result. A search needs the actual input field checked before submit, then results checked; it does not need repeated full `dumpsys` output between each tap.
-- On a dynamic page where a hierarchy dump fails its idle wait, inspect a fresh screenshot instead of polling `uiautomator dump`. Do not replay the previous action or change animation settings to obtain a tree.
-- Query power/window state when a black image, wake-up or unexpected foreground page requires diagnosis, not on every step. Avoid fixed sleeps and repeated identical screenshots when the required state is already observable.
+`app input` uses Android native input for printable ASCII (not literal `%s`). Submit only after `verified: true` and the actual `fieldValue` exactly equals the requested query. Raw node text can be a placeholder, not proof. Do not install or change an IME to work around a rejected input; required Chinese or other Unicode needs an explicitly approved channel. The built-in `uiautomator dump` used for evidence is not the unsupported uiautomator2 framework.
 
 
 ### Binary-safe screenshot and files

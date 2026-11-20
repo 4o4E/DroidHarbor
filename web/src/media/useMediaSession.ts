@@ -89,7 +89,7 @@ function rtpIsAtOrAfter(timestamp: number, boundary: number): boolean {
   return ((timestamp - boundary) >>> 0) < 0x8000_0000
 }
 
-export function useMediaSession(deviceId: string, mode: SessionMode, enabled: boolean, onClipboard?: (text: string, source: 'phone' | 'browser') => void, presence?: { active: boolean; after?: Promise<void> }): MediaSession {
+export function useMediaSession(deviceId: string, mode: SessionMode, enabled: boolean, onClipboard?: (text: string) => void, presence?: { active: boolean; after?: Promise<void> }): MediaSession {
   const foreground = presence?.active ?? true
   const activationBarrier = presence?.after
   const clipboardCallback = useRef(onClipboard)
@@ -207,8 +207,6 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
         epochBound: type !== 'suspend' && type !== 'resume' && type !== 'ping',
         resolve: reply => {
           window.clearTimeout(timeout)
-          if (type === 'clipboard.paste' && reply.status === 'acknowledged' && typeof payload?.text === 'string') clipboardCallback.current?.(payload.text, 'browser')
-          if (type === 'clipboard.get' && reply.status === 'received' && typeof reply.payload?.text === 'string') clipboardCallback.current?.(reply.payload.text, 'phone')
           resolve(reply)
         },
         reject: cause => {
@@ -488,7 +486,7 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
           void teardown('failed', '收到无效的剪贴板消息')
           return
         }
-        clipboardCallback.current?.(reply.payload.text, 'phone')
+        clipboardCallback.current?.(reply.payload.text)
         return
       }
       if (typeof reply.sequence !== 'number' || !Number.isSafeInteger(reply.sequence)) return
@@ -768,6 +766,8 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     status: sameScope ? reportedStatus : enabled ? 'connecting' : 'closed',
     error: [sameScope ? sessionError : '', cleanupError].filter(Boolean).join('；'),
     ready: sameScope && enabled && foreground && present && ready,
+    // File and app APIs require a foreground control session, not a video frame.
+    canUseDeviceTools: sameScope && enabled && foreground && present && status === 'connected' && mode === 'control',
     hasFrame: sameScope && enabled && hasFrame,
     canRetain: sameScope && enabled && status === 'connected' && hasDecodedVideo,
     epoch: sameScope ? epoch : 0,
@@ -780,5 +780,5 @@ export function useMediaSession(deviceId: string, mode: SessionMode, enabled: bo
     release,
     suspend,
     close,
-  }), [sameScope, enabled, foreground, present, sessionId, reportedStatus, sessionError, cleanupError, ready, hasFrame, hasDecodedVideo, epoch, dimensions, framesPerSecond, command, release, suspend, close, currentRuntime, audioState])
+  }), [sameScope, enabled, foreground, present, sessionId, reportedStatus, sessionError, cleanupError, ready, hasFrame, status, mode, hasDecodedVideo, epoch, dimensions, framesPerSecond, command, release, suspend, close, currentRuntime, audioState])
 }

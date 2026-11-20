@@ -39,6 +39,9 @@ func TestEnvPathsAreLocalToConfigAndEnvironmentOverridesFile(t *testing.T) {
 	if options.database != filepath.Join(dir, "database folder/state.db") || options.adbAddress != "127.0.0.1:15037" || options.rtcAdvertisedIP != "127.0.0.1" {
 		t.Fatalf("configuration ignored file base, BOM/CRLF or environment precedence: %+v", options)
 	}
+	if options.cacheDir != filepath.Join(dir, "database folder", "cache") {
+		t.Fatalf("cache must default to the writable database directory: %s", options.cacheDir)
+	}
 }
 
 func TestEnvErrorsNameSettingWithoutExposingValues(t *testing.T) {

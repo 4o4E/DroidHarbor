@@ -1124,13 +1124,249 @@ paths:
         '422': {$ref: '#/components/responses/Error'}
         '502': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/files:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: listSessionFiles
+      summary: 浏览本人当前控制会话的手机目录
+      security: [{adminSession: []}]
+      parameters:
+        - in: query
+          name: path
+          schema: {type: string, default: /sdcard}
+          description: 设备绝对目录；共享存储外仅已有 root 的链路可读
+      responses:
+        '200':
+          description: 当前目录及直接子项
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [path, rootAvailable, writable, entries]
+                properties:
+                  path: {type: string}
+                  rootAvailable: {type: boolean}
+                  writable: {type: boolean}
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, kind, size, modifiedAt]
+                      properties:
+                        name: {type: string}
+                        kind: {type: string, enum: [directory, file, link, other]}
+                        size: {type: integer, format: int64, minimum: 0, description: 条目字节数；目录大小不是子项合计}
+                        modifiedAt: {type: integer, format: int64, description: 最后修改时间，Unix 秒}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/files/preview:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: previewSessionFile
+      summary: 只读预览本人当前控制会话的手机普通文件
+      description: 不追踪文件链接。返回至多 64 KiB UTF-8 文本、完整且至多 2 MiB 的常见位图，或最多 4096 字节的十六进制查看页。
+      security: [{adminSession: []}]
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: {type: string}
+          description: 设备绝对文件路径；共享存储外仅已有 root 的链路可读
+        - in: query
+          name: offset
+          schema: {type: integer, format: int64, minimum: 0, multipleOf: 4096, default: 0}
+          description: 大于 0 时读取对应偏移的二进制页
+      responses:
+        '200':
+          description: 受限的文件预览
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind, size]
+                properties:
+                  kind: {type: string, enum: [text, image, binary]}
+                  size: {type: integer, format: int64, minimum: 0}
+                  text: {type: string}
+                  mime: {type: string, enum: [image/png, image/jpeg, image/gif, image/webp]}
+                  image: {type: string, format: byte}
+                  truncated: {type: boolean}
+                  version: {type: string, pattern: '^[a-f0-9]{64}$', description: 完整文本的 SHA-256，发送到文件保存接口以防覆盖外部修改}
+                  bytes: {type: string, format: byte, description: 二进制页的原始字节}
+                  offset: {type: integer, format: int64, minimum: 0}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/files/trash:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: listFileTrash
+      summary: 列出当前链路共享存储的 DroidHarbor 回收站
+      security: [{adminSession: []}]
+      responses:
+        '200':
+          description: 保留在手机上的已移入条目
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, originalPath, kind, deletedAt]
+                  properties:
+                    id: {type: string}
+                    originalPath: {type: string}
+                    kind: {type: string, enum: [directory, file]}
+                    deletedAt: {type: integer, format: int64, description: 移入时间，Unix 秒}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/files/actions:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: mutateSessionFiles
+      summary: 在本人当前控制会话的共享存储操作文件或目录
+      description: mkdir 使用父目录 path 与 name；rename 使用源 path 与新 name；trash 使用源 path；restore 使用回收站 id；delete 与 purge 分别使用 path 或 id，并必须 confirmed 为 true。移入或还原不覆盖。未知结果不重放。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action: {type: string, enum: [mkdir, rename, trash, restore, delete, purge]}
+                path: {type: string}
+                name: {type: string}
+                id: {type: string}
+                confirmed: {type: boolean}
+      responses:
+        '204': {description: 手机操作终态已核实}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/apps:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    get:
+      operationId: listSessionApps
+      summary: 列出本人当前控制会话上 Android 当前用户安装的应用
+      security: [{adminSession: []}]
+      parameters:
+        - in: query
+          name: scope
+          description: 用户应用或包括系统应用的全部应用
+          schema: {type: string, enum: [user, all], default: all}
+      responses:
+        '200':
+          description: 已安装包、Android 返回的名称和 PNG 图标，以及可卸载资格
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userId, apps]
+                properties:
+                  userId: {type: integer, minimum: 0}
+                  apps:
+                    type: array
+                    items:
+                      type: object
+                      required: [packageName, thirdParty]
+                      properties:
+                        packageName: {type: string}
+                        thirdParty: {type: boolean}
+                        name: {type: string, description: Android 本地化名称；包记录已变化时可缺失}
+                        icon: {type: string, format: byte, description: Android 缩放后的 PNG}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /api/v1/sessions/{id}/apps/uninstall:
+    parameters:
+      - $ref: '#/components/parameters/ID'
+    post:
+      operationId: uninstallSessionApps
+      summary: 对本人控制会话的 Android 当前用户逐项卸载选中的第三方包
+      description: 先核对用户和包清单；已开始的批次返回逐项真实结果，不回滚、不重放。
+      security: [{adminSession: []}]
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - $ref: '#/components/parameters/CSRFToken'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [userId, packages]
+              properties:
+                userId: {type: integer, minimum: 0}
+                packages:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  uniqueItems: true
+                  items: {type: string}
+      responses:
+        '200':
+          description: 依据当前用户实际安装状态核对的逐包结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [packageName, state]
+                      properties:
+                        packageName: {type: string}
+                        state: {type: string, enum: [succeeded, failed, unknown, not_started]}
+                        message: {type: string}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '410': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /api/v1/sessions/{id}/transfers:
     parameters:
       - $ref: '#/components/parameters/ID'
     post:
       operationId: createTransfer
       summary: 为本人控制会话创建文件上传或 APK 安装任务
-      description: 只读拒绝。普通文件默认目标为 /sdcard/Download/，同名覆盖须明确设置 overwrite；APK 按 scrcpy 默认使用 pm install -r，允许替换同包应用，忽略 overwrite 且不接受 targetPath。容量由 capabilities 公布，不承诺无限队列。
+      description: 普通文件默认目标为 /sdcard/Download/，目标目录实际必须在设备共享存储内。手机端暂存达声明大小后才替换目标，同名覆盖须明确设置 overwrite。APK 使用 pm install -r --user current，只为当前 Android 用户安装；同包升级使用 Android 的共享包版本。不接受 targetPath。只读拒绝，容量由 capabilities 公布。
       security: [{adminSession: []}]
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -1149,6 +1385,7 @@ paths:
                 size: {type: integer, minimum: 0, maximum: 1073741824}
                 targetPath: {type: string}
                 overwrite: {type: boolean, default: false, description: 仅控制普通文件覆盖；APK 忽略该字段}
+                ifMatch: {type: string, pattern: '^[a-fA-F0-9]{64}$', description: 普通文件编辑保存前核对原内容 SHA-256，要求 overwrite 为 true}
       responses:
         '201':
           description: 创建 staging 任务，不代表已接收或写入设备

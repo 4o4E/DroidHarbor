@@ -48,7 +48,7 @@ if [[ -n "$remaining" ]]; then
 fi
 mkdir -m 700 -- "$backup"
 mkdir -m 700 -- "$backup/platform-data" "$backup/config" "$backup/adb-auth"
-cp -a -- "$platform_data/." "$backup/platform-data/"
+find "$platform_data" -mindepth 1 -maxdepth 1 ! -name cache -exec cp -a --target-directory="$backup/platform-data" -- {} +
 cp -a -- "$config_dir/." "$backup/config/"
 cp -a -- "$adb_auth/." "$backup/adb-auth/"
 "$binary" version >"$backup/platform-version.json"

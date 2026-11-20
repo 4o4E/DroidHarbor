@@ -3,6 +3,7 @@ package transfers
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,6 +76,7 @@ type CreateRequest struct {
 	Purpose    string `json:"purpose"`
 	TargetPath string `json:"targetPath,omitempty"`
 	Overwrite  bool   `json:"overwrite"`
+	IfMatch    string `json:"ifMatch,omitempty"`
 	Size       int64  `json:"size"`
 }
 
@@ -127,6 +129,7 @@ type transfer struct {
 	deviceID   string
 	path       string
 	locator    string
+	ifMatch    string
 	scope      media.Scope
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -353,7 +356,7 @@ func (m *Manager) Create(ctx context.Context, owner, sessionID string, req Creat
 		return Transfer{}, err
 	}
 	now := time.Now().UTC()
-	t := &transfer{owner: owner, sessionID: sessionID, deviceID: scope.DeviceID, path: path, locator: string(locatorData), scope: scope, done: make(chan struct{}), uploadDone: make(chan struct{})}
+	t := &transfer{owner: owner, sessionID: sessionID, deviceID: scope.DeviceID, path: path, ifMatch: req.IfMatch, locator: string(locatorData), scope: scope, done: make(chan struct{}), uploadDone: make(chan struct{})}
 	t.ctx, t.cancel = context.WithCancel(scope.Context)
 	t.value = Transfer{ID: id, FileName: req.FileName, Purpose: req.Purpose, TargetPath: req.TargetPath, Overwrite: req.Overwrite, Size: req.Size, State: StateUploading, CreatedAt: now, UpdatedAt: now}
 	m.mu.Lock()
@@ -451,15 +454,21 @@ func validateMetadata(req *CreateRequest) error {
 		if req.TargetPath == "" {
 			req.TargetPath = "/sdcard/Download/" + req.FileName
 		}
-		if !utf8.ValidString(req.TargetPath) || strings.IndexByte(req.TargetPath, 0) >= 0 || len(req.TargetPath) > 1024 {
-			return problem(422, "INVALID_TARGET_PATH", "设备目标路径无效", nil)
+		if !adb.ValidDevicePath(req.TargetPath) || !strings.HasPrefix(req.TargetPath, adb.SharedStorage+"/") || adb.IsSharedTrashPath(req.TargetPath) {
+			return problem(422, "INVALID_TARGET_PATH", "文件只能上传到手机共享存储下的绝对路径", nil)
+		}
+		if req.IfMatch != "" {
+			if digest, err := hex.DecodeString(req.IfMatch); err != nil || len(digest) != 32 || !req.Overwrite {
+				return problem(422, "INVALID_FILE_VERSION", "编辑保存需要原内容版本与覆盖权限", nil)
+			}
+			req.IfMatch = strings.ToLower(req.IfMatch)
 		}
 	} else {
 		if req.Size == 0 || !strings.EqualFold(filepath.Ext(req.FileName), ".apk") {
 			return problem(422, "INVALID_APK", "APK 文件名或大小无效", nil)
 		}
-		if req.TargetPath != "" {
-			return problem(422, "INVALID_TARGET_PATH", "APK 安装不接受目标文件路径", nil)
+		if req.TargetPath != "" || req.IfMatch != "" {
+			return problem(422, "INVALID_TARGET_PATH", "APK 安装不接受目标文件路径或文件版本", nil)
 		}
 		req.Overwrite = false
 	}

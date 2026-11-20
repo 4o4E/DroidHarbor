@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,13 +37,17 @@ func newAPI(origin string) (*apiClient, *commandFailure) {
 }
 
 func (a *apiClient) do(method, path string, body io.Reader, headers map[string]string) ([]byte, int, string, error) {
+	return a.doContext(context.Background(), method, path, body, headers)
+}
+
+func (a *apiClient) doContext(ctx context.Context, method, path string, body io.Reader, headers map[string]string) ([]byte, int, string, error) {
 	u := *a.base
 	endpoint, err := url.Parse("/api/v1" + path)
 	if err != nil {
 		return nil, 0, "", err
 	}
 	u.Path, u.RawPath = endpoint.Path, endpoint.RawPath
-	request, err := http.NewRequest(method, u.String(), body)
+	request, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return nil, 0, "", err
 	}

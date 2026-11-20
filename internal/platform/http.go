@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"droidharbor/internal/adb"
 	"droidharbor/internal/connections"
 	"droidharbor/internal/devices"
 	"droidharbor/internal/diagnostics"
@@ -35,6 +36,7 @@ type Server struct {
 	Admin       identity.AdminCredential
 	SessionTTL  time.Duration
 	Logger      *slog.Logger
+	ADB         *adb.Client
 	Leases      *leases.Manager
 	Devices     *devices.Registry
 	Connections *connections.Manager
@@ -42,6 +44,7 @@ type Server struct {
 	Previews    *previews.Manager
 	Media       *media.Manager
 	Transfers   *transfers.Manager
+	Cache       *Cache
 }
 
 type requestKey struct{}
@@ -83,6 +86,12 @@ func (s *Server) Handler(static http.Handler) http.Handler {
 	mux.HandleFunc("GET /api/v1/sessions/{id}/volume", s.sessionVolume)
 	mux.HandleFunc("PATCH /api/v1/sessions/{id}/volume", s.sessionVolume)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/screenshot", s.originalScreenshot)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/files", s.listSessionFiles)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/files/preview", s.previewSessionFile)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/files/trash", s.listFileTrash)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/files/actions", s.mutateSessionFiles)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/apps", s.listSessionApps)
+	mux.HandleFunc("POST /api/v1/sessions/{id}/apps/uninstall", s.uninstallSessionApps)
 	mux.HandleFunc("POST /api/v1/sessions/{id}/transfers", s.createTransfer)
 	mux.HandleFunc("PUT /api/v1/transfers/{id}/content", s.uploadTransfer)
 	mux.HandleFunc("GET /api/v1/transfers/{id}", s.getTransfer)

@@ -351,16 +351,16 @@ func runConnect(args []string) (failure *commandFailure) {
 		return failure
 	}
 	control.setReady(true)
-	ready := publicEnvironment(state, connection)
-	if err = json.NewEncoder(os.Stdout).Encode(ready); err != nil {
+	if err = unlock(); err != nil {
+		locked = false
+		control.setReady(false)
+		return &commandFailure{Code: "TASK_LOCK_ERROR", Message: "无法在输出就绪信号前释放任务目录锁：" + err.Error(), exitCode: 2}
+	}
+	locked = false
+	if err = json.NewEncoder(os.Stdout).Encode(publicEnvironment(state, connection)); err != nil {
 		control.setReady(false)
 		return &commandFailure{Code: "OUTPUT_FAILED", Message: err.Error(), exitCode: 1}
 	}
-	if err = unlock(); err != nil {
-		locked = false
-		return &commandFailure{Code: "TASK_LOCK_ERROR", Message: "ready 已输出，但连接目录锁无法关闭：" + err.Error(), exitCode: 2}
-	}
-	locked = false
 
 	select {
 	case <-rootContext.Done():
@@ -497,34 +497,36 @@ func (r *connectResources) cleanup() *commandFailure {
 	return nil
 }
 
-func envCommand(args []string) (result json.RawMessage, failure *commandFailure) {
+func envCommand(args []string) (*publicConnectionEnvironment, *commandFailure) {
 	options, failure := parseConnectionFlags("env", args, false)
 	if failure != nil {
 		return nil, failure
 	}
-	directory, unlock, failure := lockedConnectionDir(options.taskDir)
+	_, _, environment, failure := activeADBConnection(context.Background(), options.taskDir)
+	return environment, failure
+}
+
+func activeADBConnection(ctx context.Context, taskDir string) (directory string, state *connectionState, environment *publicConnectionEnvironment, failure *commandFailure) {
+	directory, unlock, failure := lockedConnectionDir(taskDir)
 	if failure != nil {
-		return nil, failure
+		return "", nil, nil, failure
 	}
-	locked := true
 	defer func() {
-		if locked {
-			if err := unlock(); err != nil {
-				result = nil
-				failure = appendFailure(failure, "TASK_LOCK_ERROR", "连接目录锁关闭失败", err, 2)
-			}
+		if err := unlock(); err != nil {
+			directory, state, environment = "", nil, nil
+			failure = appendFailure(failure, "TASK_LOCK_ERROR", "连接目录锁关闭失败", err, 2)
 		}
 	}()
 	task, failure := loadTaskState(directory)
 	if failure != nil {
-		return nil, failure
+		return "", nil, nil, failure
 	}
 	connectionState, failure := loadConnectionState(directory, task)
 	if failure != nil {
-		return nil, failure
+		return "", nil, nil, failure
 	}
 	if connectionState == nil || connectionState.Connection == nil || connectionState.LocalCleanupConfirmed {
-		return nil, &commandFailure{Code: "CONNECTION_NOT_ACTIVE", Message: "当前没有经验证的活动连接；不会返回已保存端口", exitCode: 5}
+		return "", nil, nil, &commandFailure{Code: "CONNECTION_NOT_ACTIVE", Message: "当前没有经验证的活动连接；不会返回已保存端口", exitCode: 5}
 	}
 	live, err := processIdentityMatches(connectionState.OwnerPID, connectionState.OwnerBirth)
 	if err != nil || !live {
@@ -532,9 +534,9 @@ func envCommand(args []string) (result json.RawMessage, failure *commandFailure)
 		if err != nil {
 			message += ": " + err.Error()
 		}
-		return nil, &commandFailure{Code: "CONNECTION_UNKNOWN", Message: message, exitCode: 6}
+		return "", nil, nil, &commandFailure{Code: "CONNECTION_UNKNOWN", Message: message, exitCode: 6}
 	}
-	local, err := callLocalControl(connectionState, "status")
+	local, err := callLocalControlContext(ctx, connectionState, "status")
 	if err != nil || local.Status != "active" || local.Environment == nil {
 		message := "本地连接或原生 adb 未确认活动状态"
 		if err != nil {
@@ -542,29 +544,25 @@ func envCommand(args []string) (result json.RawMessage, failure *commandFailure)
 		} else if local.Status != "" {
 			message += fmt.Sprintf(" (status=%q)", local.Status)
 		}
-		return nil, &commandFailure{Code: "CONNECTION_NOT_ACTIVE", Message: message, exitCode: 5}
+		return "", nil, nil, &commandFailure{Code: "CONNECTION_NOT_ACTIVE", Message: message, exitCode: 5}
 	}
 	api, failure := newAPI(task.Server)
 	if failure != nil {
-		return nil, failure
+		return "", nil, nil, failure
 	}
 	defer api.client.CloseIdleConnections()
-	remote, _, requestID, failure := requestRemoteConnection(api, task, http.MethodGet, connectionResourcePath(task.LeaseID, connectionState.Connection.ConnectionID), nil, "")
+	remote, _, requestID, failure := requestRemoteConnectionContext(ctx, api, task, http.MethodGet, connectionResourcePath(task.LeaseID, connectionState.Connection.ConnectionID), nil, "")
 	if failure != nil {
-		return nil, failure
+		return "", nil, nil, failure
 	}
-	environment := local.Environment
+	environment = local.Environment
 	if remote.Status != "active" || environment.ConnectionID != remote.ConnectionID || environment.LeaseID != remote.LeaseID ||
 		environment.DeviceID != remote.DeviceID || environment.Generation != remote.Generation || environment.BootID != remote.BootID {
-		return nil, &commandFailure{Code: "CONNECTION_NOT_ACTIVE", Message: "平台与本地 control 未共同确认同一 active 连接", RequestID: requestID, exitCode: 5}
+		return "", nil, nil, &commandFailure{Code: "CONNECTION_NOT_ACTIVE", Message: "平台与本地 control 未共同确认同一 active 连接", RequestID: requestID, exitCode: 5}
 	}
 	// Renewal changes the authoritative expiry without restarting the transport.
 	environment.ExpiresAt = remote.ExpiresAt
-	encoded, err := json.Marshal(local.Environment)
-	if err != nil {
-		return nil, &commandFailure{Code: "OUTPUT_FAILED", Message: err.Error(), exitCode: 1}
-	}
-	return encoded, nil
+	return directory, connectionState, environment, nil
 }
 
 func disconnectCommand(args []string) (result json.RawMessage, failure *commandFailure) {

@@ -244,6 +244,7 @@ type hub struct {
 	sourceReadyClosed                 bool
 	clipboardRead                     *clipboardRequest
 	clipboardWrites                   map[uint64]*clipboardRequest
+	clipboardEchoes                   [64]clipboardEcho
 	nextClipboardSequence             uint64
 }
 

@@ -14,6 +14,7 @@ export type MediaSession = {
   status: 'connecting' | 'recovering' | 'connected' | 'closed' | 'failed'
   error: string
   ready: boolean
+  canUseDeviceTools: boolean
   hasFrame: boolean
   canRetain: boolean
   epoch: number

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/maphash"
 	"image"
 	"image/png"
 	"testing"
@@ -206,6 +207,25 @@ func TestUnknownCaptureOutcomeIsNotReportedAsFailed(t *testing.T) {
 	}
 	if response.Status != "unknown" || response.ErrorCode != "RESULT_UNKNOWN" {
 		t.Fatalf("uncertain capture result was reported as a definite failure: %#v", response)
+	}
+}
+
+func TestPhoneClipboardHistoryExcludesPastesBeforeAndAfterAcknowledgement(t *testing.T) {
+	h := &hub{clipboardWrites: map[uint64]*clipboardRequest{2: {}}}
+	h.clipboardEchoes[1] = clipboardEcho{sequence: 1, text: maphash.String(clipboardEchoSeed, "第一次粘贴")}
+	h.clipboardEchoes[2] = clipboardEcho{sequence: 2, text: maphash.String(clipboardEchoSeed, "第二次粘贴")}
+	if h.phoneClipboardChange("第二次粘贴") {
+		t.Fatal("included a desktop echo before acknowledgement")
+	}
+	if !h.phoneClipboardChange("手机先复制") || h.phoneClipboardChange("第一次粘贴") {
+		t.Fatal("a phone notification must not clear protection for in-flight writes")
+	}
+	clear(h.clipboardWrites)
+	if h.phoneClipboardChange("第二次粘贴") {
+		t.Fatal("included a delayed desktop echo after acknowledgement")
+	}
+	if !h.phoneClipboardChange("手机后来复制") || !h.phoneClipboardChange("第二次粘贴") {
+		t.Fatal("a subsequent independent phone copy did not reset clipboard origin")
 	}
 }
 

@@ -21,6 +21,7 @@ services:
       DROIDHARBOR_RTC_LISTEN: 0.0.0.0:${DH_RTC_PORT:?set shared UDP port}
       DROIDHARBOR_RTC_ADVERTISED_IP: ${DH_RTC_ADVERTISED_IP:?set browser-reachable IPv4}
       DROIDHARBOR_TRANSFER_TEMP_DIR: /var/lib/droidharbor/transfers
+      DROIDHARBOR_CACHE_DIR: /var/lib/droidharbor/cache
       DROIDHARBOR_LOG_FILE: /var/lib/droidharbor/logs/platform.log
     volumes:
       - type: bind

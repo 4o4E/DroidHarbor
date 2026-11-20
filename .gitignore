@@ -6,6 +6,7 @@ web/dist/
 *.db
 *.db-shm
 *.db-wal
+/data/cache/
 .env.local
 .workspace/
 internal/bundle/frontend/

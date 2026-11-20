@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -253,32 +254,9 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 			m.logOperationFailure(t, "STAGING_CLOSE_FAILED", err)
 		}
 	}()
-	if t.value.Purpose == "file" && t.value.Overwrite {
-		err = m.adb.Push(ctx, t.scope.Link.TransportID, t.value.TargetPath, 0644, t.value.CreatedAt, file, t.scope.Check, func(n int64) {
-			m.update(t, func(v *Transfer) { v.BytesTransferred = n })
-		})
-		if err != nil {
-			m.logOperationFailure(t, "DEVICE_PUSH_FAILED", err)
-			code := "DEVICE_RESULT_UNKNOWN"
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				code = "TRANSFER_CANCELLED_RESULT_UNKNOWN"
-			}
-			return finishOutcome{StateUnknown, code, "推送中断，设备端结果未知", "", nil}
-		}
-		if err := t.scope.Check(); err != nil {
-			m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
-			return finishOutcome{StateUnknown, "DEVICE_RESULT_UNKNOWN", "设备端结果未知", "", nil}
-		}
-		return finishOutcome{StateSucceeded, "", "", "", nil}
-	}
 	command := ""
 	if t.value.Purpose == "file" {
-		quoted, err := adb.ShellQuote(t.value.TargetPath)
-		if err != nil {
-			m.logOperationFailure(t, "INVALID_TARGET_PATH", err)
-			return finishOutcome{StateFailed, "INVALID_TARGET_PATH", "设备目标路径无效", "", nil}
-		}
-		command = "umask 022; set -C; cat > " + quoted
+		command = fileWriteCommand(t.value.TargetPath, t.value.Size, t.value.Overwrite, t.ifMatch)
 	} else {
 		if err := m.setStatus(t, StateInstalling, "", ""); err != nil {
 			m.logOperationFailure(t, "RESULT_JOURNAL_FAILED", err)
@@ -288,7 +266,8 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 			m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
 			return finishOutcome{StateFailed, "DEVICE_OPERATION_NOT_AUTHORIZED", "安装操作未授权", "", nil}
 		}
-		command = "pm install -r -S " + fmt.Sprint(t.value.Size) + " -"
+		// With -S and no path, Package Manager consumes the APK from stdin.
+		command = "pm install -r --user current -S " + fmt.Sprint(t.value.Size)
 	}
 	if err := t.scope.Check(); err != nil {
 		m.logOperationFailure(t, "DEVICE_OPERATION_NOT_AUTHORIZED", err)
@@ -320,6 +299,15 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 		}
 		return finishOutcome{StateUnknown, "PACKAGE_MANAGER_RESULT_UNKNOWN", "Package Manager 未返回可确认的结果", shellResultText(result), &result.ExitCode}
 	}
+	if result.ExitCode == 73 {
+		return finishOutcome{StateFailed, "DEVICE_FILE_EXISTS", "设备已存在同名项目，未覆盖", "", &result.ExitCode}
+	}
+	if result.ExitCode == 75 {
+		return finishOutcome{StateFailed, "DEVICE_FILE_CHANGED", "手机上的原文件已变化，未覆盖，请核对后重新编辑", "", &result.ExitCode}
+	}
+	if result.ExitCode == 66 || result.ExitCode == 67 {
+		return finishOutcome{StateFailed, "DEVICE_DIRECTORY_FORBIDDEN", "目标目录不存在或不在共享存储内，未写入", "", &result.ExitCode}
+	}
 	if result.ExitCode != 0 {
 		return finishOutcome{StateFailed, "DEVICE_WRITE_FAILED", "设备未能写入目标文件", shellResultText(result), &result.ExitCode}
 	}
@@ -328,6 +316,42 @@ func (m *Manager) execute(t *transfer) finishOutcome {
 		return finishOutcome{StateUnknown, "DEVICE_RESULT_UNKNOWN", "设备端结果未知", "", &result.ExitCode}
 	}
 	return finishOutcome{StateSucceeded, "", "", "", &result.ExitCode}
+}
+
+func fileWriteCommand(target string, size int64, overwrite bool, match string) string {
+	// Work from the verified physical cwd, not through an earlier path alias.
+	dir, _ := adb.ShellQuote(path.Dir(target))
+	name, _ := adb.ShellQuote("./" + path.Base(target))
+	setup := adb.SharedDirectorySetup + "cd -P " + dir + " 2>/dev/null || exit 66\n" + adb.SharedUserDirectoryCheck + "file=" + name + "\numask 022\n"
+	const noTarget = `[ ! -e "$file" ] && [ ! -L "$file" ] || exit 73
+`
+	const regularTarget = `if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then exit 73; fi
+`
+	// A closed ADB stream can look like EOF to cat. Publish only the declared
+	// byte count, and keep incomplete bytes out of the destination name.
+	stage := `tmp=$(mktemp ./.droidharbor-upload.XXXXXXXX) || exit 1
+trap 'rm -f -- "$tmp" || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
+cat > "$tmp" && chmod 0644 "$tmp" || exit 1
+[ "$(stat -c %s -- "$tmp")" = ` + fmt.Sprint(size) + ` ] || exit 1
+`
+	if !overwrite {
+		return setup + noTarget + stage + `mv -nT -- "$tmp" "$file" || exit 1
+[ ! -e "$tmp" ] || exit 73
+`
+	}
+	return setup + regularTarget + stage + regularTarget + fileVersionCheck(match) + `mv -fT -- "$tmp" "$file"
+`
+}
+
+func fileVersionCheck(match string) string {
+	if match == "" {
+		return ""
+	}
+	return `[ ! -L "$file" ] && [ -f "$file" ] || exit 75
+digest=$(sha256sum < "$file") || exit 75
+[ "${digest%% *}" = '` + match + `' ] || exit 75
+`
 }
 
 func (m *Manager) logOperationFailure(t *transfer, code string, cause error) {

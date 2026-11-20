@@ -11,8 +11,10 @@ function Require-Directory([string]$Path, [string]$Name) {
         throw "$Name must be an existing absolute directory."
     }
 }
-function Copy-Tree([string]$Source, [string]$Destination) {
-    & robocopy.exe $Source $Destination /E /COPYALL /DCOPY:DAT /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+function Copy-Tree([string]$Source, [string]$Destination, [switch]$ExcludeCache) {
+    $copyOptions = @('/E', '/COPYALL', '/DCOPY:DAT', '/XJ', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
+    if ($ExcludeCache) { $copyOptions += @('/XD', (Join-Path $Source 'cache')) }
+    & robocopy.exe $Source $Destination @copyOptions | Out-Null
     if ($LASTEXITCODE -ge 8) { throw 'A backup component could not be copied.' }
 }
 function Get-AdbServiceAndroidDirectory {
@@ -68,7 +70,7 @@ try {
         throw 'Services did not stop; backup aborted.'
     }
     New-Item -ItemType Directory -Path (Join-Path $BackupDestination 'platform-data'), (Join-Path $BackupDestination 'config'), (Join-Path $BackupDestination 'adb-auth') | Out-Null
-    Copy-Tree $PlatformDataDirectory (Join-Path $BackupDestination 'platform-data')
+    Copy-Tree $PlatformDataDirectory (Join-Path $BackupDestination 'platform-data') -ExcludeCache
     Copy-Tree $ConfigDirectory (Join-Path $BackupDestination 'config')
     Copy-Tree $adbAndroidDirectory (Join-Path (Join-Path $BackupDestination 'adb-auth') '.android')
     $versionLines = & $DroidHarborBinary version

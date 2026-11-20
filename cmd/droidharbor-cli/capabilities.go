@@ -8,9 +8,10 @@ import (
 )
 
 type commandFailure struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	RequestID string `json:"requestId,omitempty"`
+	Code      string     `json:"code"`
+	Message   string     `json:"message"`
+	RequestID string     `json:"requestId,omitempty"`
+	Details   *appResult `json:"details,omitempty"`
 	exitCode  int
 }
 

@@ -5,12 +5,14 @@ import (
 	"os"
 )
 
+const commandsMessage = "支持命令：version、capabilities、devices、claim、status、renew、release、connect、env、disconnect、app"
+
 func main() {
 	var result any
 	var failure *commandFailure
 	foreground := false
 	if len(os.Args) < 2 {
-		failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: "支持命令：version、capabilities、devices、claim、status、renew、release、connect、env、disconnect", exitCode: 2}
+		failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: commandsMessage, exitCode: 2}
 	} else {
 		switch os.Args[1] {
 		case "version":
@@ -38,8 +40,10 @@ func main() {
 			result, failure = envCommand(os.Args[2:])
 		case "disconnect":
 			result, failure = disconnectCommand(os.Args[2:])
+		case "app":
+			result, failure = appCommand(os.Args[2:])
 		default:
-			failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: "支持命令：version、capabilities、devices、claim、status、renew、release、connect、env、disconnect", exitCode: 2}
+			failure = &commandFailure{Code: "INVALID_ARGUMENT", Message: commandsMessage, exitCode: 2}
 		}
 	}
 	if failure == nil && !foreground {

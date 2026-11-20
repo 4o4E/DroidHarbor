@@ -94,6 +94,7 @@ type serveOptions struct {
 	adbTimeout                                                         time.Duration
 	scrcpyServer, rtcListen, rtcAdvertisedIP, transferTempDir, logFile string
 	logLevel                                                           string
+	cacheDir                                                           string
 	transferMaxUpload                                                  int64
 	transferMaxActive                                                  int
 	transferMaxOutput                                                  int64
@@ -129,8 +130,8 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if options.sessionTTL <= 0 {
 		return errors.New("DROIDHARBOR_ADMIN_SESSION_TTL 必须是正数时长")
 	}
-	if options.adbAddress == "" || options.rtcListen == "" || options.transferTempDir == "" {
-		return errors.New("请在 .env 配置 ADB、WebRTC UDP 监听地址和文件暂存目录")
+	if options.adbAddress == "" || options.rtcListen == "" || options.transferTempDir == "" || options.cacheDir == "" {
+		return errors.New("请在 .env 配置 ADB、WebRTC UDP 监听地址、文件暂存目录和缓存目录")
 	}
 	if err = os.MkdirAll(options.transferTempDir, 0700); err != nil {
 		return fmt.Errorf("创建文件暂存目录失败：%w", err)
@@ -176,6 +177,12 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	if err != nil {
 		return errors.Join(err, processLock.Close())
 	}
+	stage = "open_cache"
+	cache, err := platform.OpenCache(options.cacheDir)
+	if err != nil {
+		return errors.Join(fmt.Errorf("初始化运行缓存失败：%w", err), db.Close(), processLock.Close())
+	}
+	defer func() { runErr = errors.Join(runErr, cache.Close()) }()
 	logger.Info("database_ready", "database", options.database, "schemaVersion", storage.SchemaVersion)
 	stage = "revoke_previous_admin_sessions"
 	if _, err = db.ExecContext(ctx, `UPDATE admin_sessions SET revoked_at=? WHERE revoked_at IS NULL AND admin_credential_version<>?`, time.Now().UnixMilli(), credential.Version); err != nil {
@@ -323,7 +330,7 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	app := &platform.Server{
 		DB: db, Admin: credential, SessionTTL: options.sessionTTL, Logger: logger,
 		Leases: manager, Devices: registry, Connections: tunnels, Events: stateEvents, Previews: previewManager,
-		Media: mediaManager, Transfers: transferManager,
+		ADB: adbClient, Media: mediaManager, Transfers: transferManager, Cache: cache,
 	}
 	server := &http.Server{
 		Addr:              options.listen,

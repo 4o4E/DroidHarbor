@@ -24,6 +24,15 @@ func TestValidateMetadataAppliesFileTargetAndRejectsUnsafeNames(t *testing.T) {
 	}
 }
 
+func TestValidateMetadataConfinesFileTargetToSharedStorage(t *testing.T) {
+	for _, path := range []string{"/report.txt", "/data/local/tmp/report.txt", "/sdcard/../data/report.txt", "/sdcard-copy/report.txt", "/sdcard"} {
+		req := CreateRequest{FileName: "report.txt", Purpose: "file", Size: 12, TargetPath: path}
+		if err := validateMetadata(&req); err == nil {
+			t.Errorf("accepted target outside a shared-storage directory: %q", path)
+		}
+	}
+}
+
 func TestValidateMetadataRequiresAPKAndForbidsTargetPath(t *testing.T) {
 	valid := CreateRequest{FileName: "app.apk", Purpose: "apk", Size: 1, Overwrite: true}
 	if err := validateMetadata(&valid); err != nil {

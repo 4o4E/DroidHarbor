@@ -258,6 +258,10 @@ func savedControlClient(state *connectionState) (*http.Client, string, error) {
 }
 
 func callLocalControl(state *connectionState, command string) (localControlResponse, error) {
+	return callLocalControlContext(context.Background(), state, command)
+}
+
+func callLocalControlContext(ctx context.Context, state *connectionState, command string) (localControlResponse, error) {
 	live, err := processIdentityMatches(state.OwnerPID, state.OwnerBirth)
 	if err != nil {
 		return localControlResponse{}, fmt.Errorf("连接进程身份无法核验：%w", err)
@@ -275,7 +279,7 @@ func callLocalControl(state *connectionState, command string) (localControlRespo
 	if command == "stop" {
 		method = http.MethodPost
 	}
-	request, err := http.NewRequest(method, resource, nil)
+	request, err := http.NewRequestWithContext(ctx, method, resource, nil)
 	if err != nil {
 		return localControlResponse{}, err
 	}

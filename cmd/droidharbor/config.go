@@ -84,6 +84,7 @@ func loadServeOptions(path string) (serveOptions, error) {
 	options.rtcListen = get("DROIDHARBOR_RTC_LISTEN", "0.0.0.0:8081")
 	options.rtcAdvertisedIP = strings.TrimSpace(get("DROIDHARBOR_RTC_ADVERTISED_IP", ""))
 	options.transferTempDir = localPath("DROIDHARBOR_TRANSFER_TEMP_DIR", "data/transfers")
+	options.cacheDir = localPath("DROIDHARBOR_CACHE_DIR", filepath.Join(filepath.Dir(options.database), "cache"))
 	options.logFile = localPath("DROIDHARBOR_LOG_FILE", "logs/platform.log")
 	options.logLevel = get("DROIDHARBOR_LOG_LEVEL", "info")
 	options.web = localPath("DROIDHARBOR_WEB_DIR", "")

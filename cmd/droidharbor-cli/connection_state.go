@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -288,6 +289,10 @@ func readRemoteConnection(data []byte, leaseID string) (remoteConnection, error)
 }
 
 func requestRemoteConnection(api *apiClient, task *taskState, method, resource string, body []byte, idempotencyKey string) (remoteConnection, int, string, *commandFailure) {
+	return requestRemoteConnectionContext(context.Background(), api, task, method, resource, body, idempotencyKey)
+}
+
+func requestRemoteConnectionContext(ctx context.Context, api *apiClient, task *taskState, method, resource string, body []byte, idempotencyKey string) (remoteConnection, int, string, *commandFailure) {
 	headers := map[string]string{"Authorization": "Bearer " + task.TaskSecret}
 	if idempotencyKey != "" {
 		headers["Idempotency-Key"] = idempotencyKey
@@ -296,7 +301,7 @@ func requestRemoteConnection(api *apiClient, task *taskState, method, resource s
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	data, status, requestID, err := api.do(method, resource, reader, headers)
+	data, status, requestID, err := api.doContext(ctx, method, resource, reader, headers)
 	if err != nil {
 		code, exitCode, message := "CONNECTION_FAILED", 4, err.Error()
 		if method == http.MethodPost || method == http.MethodDelete {

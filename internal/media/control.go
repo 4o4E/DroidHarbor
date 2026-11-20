@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"hash/maphash"
 	"io"
 	"math"
 	"time"
@@ -805,6 +806,34 @@ func asciiText(text string) bool {
 	return true
 }
 
+// scrcpy's clipboard notification carries only text; Android can send it after
+// the write acknowledgement. Keep bounded, capture-local fingerprints instead
+// of attributing an indistinguishable notification to a phone copy.
+type clipboardEcho struct {
+	sequence uint64
+	text     uint64
+}
+
+var clipboardEchoSeed = maphash.MakeSeed()
+
+// Caller holds h.mu. A distinct clipboard change reestablishes phone origin
+// once no desktop write is in flight. Until then, equal values are ambiguous.
+func (h *hub) phoneClipboardChange(text string) bool {
+	if h.clipboardEchoes == ([64]clipboardEcho{}) {
+		return true
+	}
+	sum := maphash.String(clipboardEchoSeed, text)
+	for _, echo := range h.clipboardEchoes {
+		if echo.sequence != 0 && echo.text == sum {
+			return false
+		}
+	}
+	if len(h.clipboardWrites) == 0 {
+		clear(h.clipboardEchoes[:])
+	}
+	return true
+}
+
 func (s *session) sendDevice(ctx context.Context, epoch uint64, message scrcpy.ControlMessage) error {
 	h := s.hub
 	h.inputMu.Lock()
@@ -816,7 +845,33 @@ func (s *session) sendDevice(ctx context.Context, epoch uint64, message scrcpy.C
 	}
 	source := h.source
 	h.mu.Unlock()
-	return source.Send(ctx, message, func() error { return s.check(ctx, true) })
+	if message.Type != scrcpy.ControlSetClipboard {
+		return source.Send(ctx, message, func() error { return s.check(ctx, true) })
+	}
+	var previous clipboardEcho
+	index := message.Sequence % uint64(len(h.clipboardEchoes))
+	err := source.Send(ctx, message, func() error {
+		if err := s.check(ctx, true); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		if h.source != source || h.epoch != epoch {
+			h.mu.Unlock()
+			return problem(409, "STALE_CAPTURE_EPOCH", "控制事件属于旧画面代次")
+		}
+		previous = h.clipboardEchoes[index]
+		h.clipboardEchoes[index] = clipboardEcho{sequence: message.Sequence, text: maphash.String(clipboardEchoSeed, message.Text)}
+		h.mu.Unlock()
+		return nil
+	})
+	if err != nil && !errors.Is(err, capture.ErrResultUnknown) {
+		h.mu.Lock()
+		if h.source == source && h.epoch == epoch && h.clipboardEchoes[index].sequence == message.Sequence {
+			h.clipboardEchoes[index] = previous
+		}
+		h.mu.Unlock()
+	}
+	return err
 }
 
 func (s *session) queueClipboardRead(ctx context.Context, sequence, epoch uint64) error {
@@ -979,8 +1034,10 @@ func (h *hub) deviceMessage(source *capture.Stream, message scrcpy.DeviceMessage
 		return
 	}
 	var deliver *clipboardRequest
+	phoneCopy := false
 	switch message.Type {
 	case scrcpy.DeviceClipboard:
+		phoneCopy = h.phoneClipboardChange(message.Text)
 		request := h.clipboardRead
 		if request != nil {
 			if request.dispatching {
@@ -1019,7 +1076,7 @@ func (h *hub) deviceMessage(source *capture.Stream, message scrcpy.DeviceMessage
 	}
 	epoch := h.epoch
 	var listeners []*session
-	if message.Type == scrcpy.DeviceClipboard {
+	if phoneCopy {
 		for _, member := range h.members {
 			if member.mode == "control" && member.ctx.Err() == nil {
 				listeners = append(listeners, member)
@@ -1088,6 +1145,7 @@ func (h *hub) cancelAllClipboard() {
 		read.timer = nil
 	}
 	h.clipboardRead = nil
+	clear(h.clipboardEchoes[:])
 	writes := make([]*clipboardRequest, 0, len(h.clipboardWrites))
 	for sequence, request := range h.clipboardWrites {
 		if request.timer != nil {

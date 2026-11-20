@@ -122,7 +122,10 @@ export function Workbench({ device, devices, onDeviceChange, mode, onModeChange 
           return item ? <WorkbenchSession key={`${view.key}:${view.instance}`} view={view} device={item} selected={view.key === selectedKey} after={switchBarrier.current} availableArea={videoAreaSize} onSession={registerSession} /> : null
         })}</section>
       </ResizablePanel>
+      <ResizableHandle withHandle aria-label="调整右侧栏宽度" />
+      <ResizablePanel id="tools" defaultSize="320px" minSize="224px" maxSize="55%" groupResizeBehavior="preserve-pixel-size" className="h-full">
+        <WorkbenchTools device={device} mode={mode} session={session} />
+      </ResizablePanel>
     </ResizablePanelGroup>
-    <WorkbenchTools device={device} mode={mode} session={session} />
   </div>
 }
