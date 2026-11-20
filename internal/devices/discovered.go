@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/identity"
 )
 
@@ -55,11 +56,6 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 	if !errors.Is(err, sql.ErrNoRows) {
 		return result, err
 	}
-	var previousEvidence sql.NullString
-	restoreErr := r.db.QueryRowContext(ctx, `SELECT l.device_id,l.id,l.identity_evidence FROM device_links l JOIN devices d ON d.id=l.device_id WHERE l.endpoint=? AND d.removed_at IS NOT NULL`, request.Endpoint).Scan(&result.DeviceID, &result.LinkID, &previousEvidence)
-	if restoreErr != nil && !errors.Is(restoreErr, sql.ErrNoRows) {
-		return result, restoreErr
-	}
 	var evidence *Evidence
 	var screen ScreenGeometry
 	if observed.State == "device" && observed.TransportID != 0 {
@@ -72,18 +68,9 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 		stop()
 		cancel()
 		if err != nil {
-			return DiscoveredRegistration{}, err
+			return DiscoveredRegistration{}, diagnostics.WrapStage("device_discovered."+request.Kind, err)
 		}
 		evidence = &value
-		if previousEvidence.Valid {
-			var expected Evidence
-			if err := json.Unmarshal([]byte(previousEvidence.String), &expected); err != nil {
-				return result, err
-			}
-			if !expected.SameHardware(value) {
-				return result, &Error{Code: "IDENTITY_CONFLICT", Message: "该地址的手机与原登记身份不一致", Status: 409}
-			}
-		}
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -91,7 +78,7 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 	}
 	defer tx.Rollback()
 	if evidence != nil {
-		rows, err := tx.QueryContext(ctx, `SELECT device_id,identity_evidence FROM device_links WHERE identity_evidence IS NOT NULL`)
+		rows, err := tx.QueryContext(ctx, `SELECT l.device_id,l.identity_evidence FROM device_links l JOIN devices d ON d.id=l.device_id WHERE l.identity_evidence IS NOT NULL AND d.removed_at IS NULL`)
 		if err != nil {
 			return result, err
 		}
@@ -136,15 +123,13 @@ func (r *Registry) RegisterDiscovered(ctx context.Context, actorID, endpoint, di
 			return result, err
 		}
 	}
-	if result.Existing {
-		if err := restoreRegistration(ctx, tx, result.DeviceID); err != nil {
-			return result, err
-		}
-	}
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM device_links WHERE device_id=? AND endpoint=?`, result.DeviceID, request.Endpoint).Scan(&result.LinkID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return result, err
 	}
 	if result.LinkID == "" {
+		if err := unusedEndpoint(ctx, tx, request.Endpoint); err != nil {
+			return result, err
+		}
 		result.LinkID = identity.Secret()
 	}
 	var encoded any

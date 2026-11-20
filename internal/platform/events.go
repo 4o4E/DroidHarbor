@@ -27,9 +27,9 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	sub, err := s.Events.Subscribe(scope)
 	if err != nil {
 		if errors.Is(err, events.ErrCapacity) {
-			s.fail(w, r, http.StatusServiceUnavailable, "EVENT_CAPACITY", "事件连接容量已满")
+			s.fail(w, r, http.StatusServiceUnavailable, "EVENT_CAPACITY", "事件连接容量已满", err)
 		} else {
-			s.fail(w, r, http.StatusServiceUnavailable, "FEATURE_UNAVAILABLE", "事件流不可用")
+			s.fail(w, r, http.StatusServiceUnavailable, "FEATURE_UNAVAILABLE", "事件流不可用", err)
 		}
 		return
 	}

@@ -322,14 +322,17 @@ func (m *Manager) Recover(ctx context.Context, deviceID string) (complete bool, 
 			if err == nil && selected == current.link && live && current.ctx.Err() == nil {
 				return true, nil
 			}
-			// Power control follows the selected incarnation. Retire its prior
-			// owner before a replacement; viewing captures remain independent.
-			if err := current.Stop(ctx); err != nil {
-				return false, err
-			}
-			return m.Recover(ctx, deviceID)
+		} else if current.ctx.Err() == nil && m.source.HasLink(current.link) {
+			return live, nil
 		}
-		return live && current.ctx.Err() == nil && m.source.HasLink(current.link), nil
+		// An owner from the lost transport can still be finalizing when
+		// its replacement appears. Join retirement, then check its journal
+		// on the verified link; a deferral on the old link proves nothing
+		// about the resources on the replacement.
+		if err := current.Stop(ctx); err != nil && !errors.Is(err, ErrCleanupDeferred) {
+			return false, err
+		}
+		return m.Recover(ctx, deviceID)
 	}
 	if flight := m.recovering[deviceID]; flight != nil {
 		m.mu.Unlock()

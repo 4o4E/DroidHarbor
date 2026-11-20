@@ -139,7 +139,7 @@ func (s *Server) previewSessionFile(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.ADB.RunShell(scope.Context, scope.Link.TransportID, filePreviewCommand(file, limit, offset), int64(limit)+32, scope.Check)
 	if err != nil {
-		s.fail(w, r, 502, "DEVICE_FILE_PREVIEW_UNAVAILABLE", "未能读取设备文件")
+		s.fail(w, r, 502, "DEVICE_FILE_PREVIEW_UNAVAILABLE", "未能读取设备文件", err)
 		return
 	}
 	switch out.ExitCode {
@@ -155,9 +155,9 @@ func (s *Server) previewSessionFile(w http.ResponseWriter, r *http.Request) {
 		if data, ok := decodeFilePreview(out.Stdout, limit, offset); ok {
 			s.json(w, 200, data)
 		} else {
-			s.fail(w, r, 502, "DEVICE_FILE_PREVIEW_INVALID", "设备文件未完整返回，请刷新预览")
+			s.fail(w, r, 502, "DEVICE_FILE_PREVIEW_INVALID", "设备文件未完整返回，请刷新预览", shellFailure(out, nil))
 		}
 	default:
-		s.fail(w, r, 502, "DEVICE_FILE_PREVIEW_UNAVAILABLE", "未能读取设备文件")
+		s.fail(w, r, 502, "DEVICE_FILE_PREVIEW_UNAVAILABLE", "未能读取设备文件", shellFailure(out, nil))
 	}
 }

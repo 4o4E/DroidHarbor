@@ -12,7 +12,7 @@ func (m *Manager) StopDevice(ctx context.Context, deviceID string) error {
 	current := m.streams[deviceID]
 	m.mu.Unlock()
 	if current != nil {
-		if err := current.Stop(ctx); err != nil {
+		if err := current.Stop(ctx); err != nil && !errors.Is(err, ErrCleanupDeferred) {
 			return err
 		}
 	}

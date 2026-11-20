@@ -124,6 +124,43 @@ func newLeaseTestManager(t *testing.T, deviceCount int) (*Manager, *sql.DB, *tes
 	return manager, db, source, callerID, bearer
 }
 
+func TestDeletingLeasedDeviceRevokesAccessWithoutReplayingClaim(t *testing.T) {
+	ctx := context.Background()
+	manager, db, _, _, bearer := newLeaseTestManager(t, 2)
+	request := ClaimRequest{TaskID: "original", TaskSecret: identity.Secret(), IdempotencyKey: "original-key"}
+	lease, err := manager.Claim(ctx, bearer, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = manager.RevokeForRemoval(ctx, lease.DeviceID, "admin", nil); !errors.Is(err, ErrAllocationConfirmation) {
+		t.Fatalf("unconfirmed active lease: %v", err)
+	}
+	if err = manager.RevokeForRemoval(ctx, lease.DeviceID, "admin", &lease.Generation); err != nil {
+		t.Fatal(err)
+	}
+	if err = manager.Check(lease.ID, lease.Generation, lease.BootID); !errors.Is(err, ErrLeaseEnded) {
+		t.Fatalf("old access survived lease revocation: %v", err)
+	}
+	if err = manager.PurgeRemovedDevice(ctx, lease.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err = db.QueryRow(`SELECT count(*) FROM leases WHERE id=?`, lease.ID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("deleted device lease still exists: count=%d err=%v", remaining, err)
+	}
+	if _, err = manager.Claim(ctx, bearer, request); !errors.Is(err, ErrLeaseEnded) {
+		t.Fatalf("the original request could reclaim another available device: %v", err)
+	}
+	request.TaskID = "other"
+	if _, err = manager.Claim(ctx, bearer, request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("another request reused the old idempotency key: %v", err)
+	}
+	fresh := claimForTest(t, manager, bearer, "fresh", identity.Secret(), "fresh-key")
+	if fresh.DeviceID == lease.DeviceID {
+		t.Fatal("fresh claim selected the deleted device")
+	}
+}
+
 func claimForTest(t *testing.T, manager *Manager, bearer, externalTaskID, secret, key string, tags ...string) Lease {
 	t.Helper()
 	lease, err := manager.Claim(context.Background(), bearer, ClaimRequest{TaskID: externalTaskID, TaskSecret: secret, IdempotencyKey: key, RequiredTags: tags})

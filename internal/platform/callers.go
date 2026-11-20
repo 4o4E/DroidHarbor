@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/identity"
 )
@@ -68,7 +69,7 @@ func (s *Server) createCaller(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Events != nil {
 		if _, err := s.Events.Publish(events.Change{EntityType: "caller", EntityID: id}); err != nil && !errors.Is(err, events.ErrClosed) {
-			s.Logger.Error("state_notification_failed", "entityType", "caller")
+			s.Logger.Error("state_notification_failed", "requestId", r.Context().Value(requestKey{}), "entityType", "caller", "callerId", id, "cause", diagnostics.Cause(err))
 		}
 	}
 	s.Logger.Info("caller_created", "requestId", r.Context().Value(requestKey{}), "callerId", id, "actorId", adminID)

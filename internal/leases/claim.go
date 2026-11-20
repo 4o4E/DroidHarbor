@@ -102,6 +102,18 @@ func (m *Manager) Claim(ctx context.Context, bearer string, request ClaimRequest
 		return existing.lease, nil
 	}
 
+	var retiredHash string
+	err = tx.QueryRowContext(ctx, `SELECT safe_details FROM operation_records WHERE id=? AND kind='lease.claim_retired'`, retiredClaimID(principal.CallerID, request.IdempotencyKey)).Scan(&retiredHash)
+	if err == nil {
+		if subtle.ConstantTimeCompare([]byte(retiredHash), []byte(hex.EncodeToString(requestHash[:]))) != 1 {
+			return empty, ErrConflict
+		}
+		return empty, ErrLeaseEnded
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return empty, domain(ErrStorage, err)
+	}
+
 	var taskID string
 	var storedHash []byte
 	err = tx.QueryRowContext(ctx, `SELECT id,task_secret_hash FROM tasks WHERE caller_id=? AND external_task_id=?`, principal.CallerID, request.TaskID).Scan(&taskID, &storedHash)
@@ -299,6 +311,74 @@ func claimRequestHash(taskID string, secretHash []byte, tags []string, deviceID,
 		return [32]byte{}, err
 	}
 	return sha256.Sum256(encoded), nil
+}
+
+func retiredClaimID(callerID, key string) string {
+	return hex.EncodeToString(identity.Digest("retired-claim\x00" + callerID + "\x00" + key))
+}
+
+// PurgeRemovedDevice deletes the registration and all device-linked records
+// after access is withdrawn. A detached fingerprint only rejects claim replay.
+func (m *Manager) PurgeRemovedDevice(ctx context.Context, deviceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain(ErrStorage, err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT caller_id,claim_idempotency_key,lower(hex(claim_request_hash)) FROM leases WHERE device_id=? AND status='ended'`, deviceID)
+	if err != nil {
+		return domain(ErrStorage, err)
+	}
+	type retiredClaim struct{ id, hash string }
+	var claims []retiredClaim
+	for rows.Next() {
+		var callerID, key, hash string
+		if err = rows.Scan(&callerID, &key, &hash); err != nil {
+			return domain(ErrStorage, errors.Join(err, rows.Close()))
+		}
+		claims = append(claims, retiredClaim{retiredClaimID(callerID, key), hash})
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return domain(ErrStorage, err)
+	}
+	now := m.now().UTC().UnixMilli()
+	for _, claim := range claims {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO operation_records(id,actor_kind,actor_id,kind,status,created_at,result_code,safe_details) VALUES(?,'system','','lease.claim_retired','ended',?,'LEASE_ENDED',?)`, claim.id, now, claim.hash); err != nil {
+			return domain(ErrStorage, err)
+		}
+	}
+	for _, statement := range [...]string{
+		`DELETE FROM operation_records WHERE device_id=?1 OR lease_id IN (SELECT id FROM leases WHERE device_id=?1)`,
+		`DELETE FROM leases WHERE device_id=? AND status='ended'`,
+		`DELETE FROM owned_resources WHERE device_id=?`,
+		`DELETE FROM device_tags WHERE device_id=?`,
+		`DELETE FROM device_links WHERE device_id=?`,
+	} {
+		if _, err = tx.ExecContext(ctx, statement, deviceID); err != nil {
+			return domain(ErrStorage, err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE id=? AND maintenance_requested=1`, deviceID)
+	if err != nil {
+		return domain(ErrStorage, err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return domain(ErrStorage, err)
+	} else if n != 1 {
+		return ErrConflict
+	}
+	if err = tx.Commit(); err != nil {
+		return domain(ErrStorage, err)
+	}
+	delete(m.blockedDevices, deviceID)
+	delete(m.pendingRecovery, deviceID)
+	delete(m.resourceFailures, deviceID)
+	return nil
 }
 
 type idempotentLease struct {

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/transfers"
 )
 
@@ -87,12 +88,12 @@ func (s *Server) uploadTransfer(w http.ResponseWriter, r *http.Request) {
 	}
 	controller := http.NewResponseController(w)
 	if err := controller.SetReadDeadline(time.Now().Add(time.Minute)); err != nil {
-		s.fail(w, r, 503, "UPLOAD_UNAVAILABLE", "无法限定上传连接的闲置等待时间")
+		s.fail(w, r, 503, "UPLOAD_UNAVAILABLE", "无法限定上传连接的闲置等待时间", err)
 		return
 	}
 	defer func() {
 		if err := controller.SetReadDeadline(time.Time{}); err != nil {
-			s.Logger.Info("upload_deadline_reset_failed", "requestId", r.Context().Value(requestKey{}))
+			s.Logger.Info("upload_deadline_reset_failed", "requestId", r.Context().Value(requestKey{}), "cause", diagnostics.Cause(err))
 		}
 	}()
 	value, err := s.Transfers.Upload(r.Context(), owner, r.PathValue("id"), r.ContentLength, &uploadBody{ReadCloser: r.Body, controller: controller})

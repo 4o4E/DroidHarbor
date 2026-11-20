@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/media"
 )
 
@@ -63,10 +64,10 @@ func (s *Server) readAppMetadata(w http.ResponseWriter, r *http.Request, scope m
 			s.fail(w, r, 409, "ANDROID_USER_CHANGED", "Android 当前用户已切换，请重新读取应用")
 			return nil, false
 		case err == nil && out.ExitCode == 74:
-			s.fail(w, r, 502, "APP_METADATA_CLEANUP_FAILED", "未能清理手机上的临时应用查询组件")
+			s.fail(w, r, 502, "APP_METADATA_CLEANUP_FAILED", "未能清理手机上的临时应用查询组件", shellFailure(out, nil))
 			return nil, false
 		case err != nil || out.ExitCode != 0:
-			s.fail(w, r, 502, "APP_METADATA_UNAVAILABLE", "未能读取手机上的应用版本、名称或图标")
+			s.fail(w, r, 502, "APP_METADATA_UNAVAILABLE", "未能读取手机上的应用版本、名称或图标", diagnostics.WrapStage("app_metadata."+mode, shellFailure(out, err)))
 			return nil, false
 		}
 		if err := scope.Check(); err != nil {
@@ -77,8 +78,16 @@ func (s *Server) readAppMetadata(w http.ResponseWriter, r *http.Request, scope m
 			UserID int                      `json:"userId"`
 			Apps   []androidAppPresentation `json:"apps"`
 		}
-		if json.Unmarshal(out.Stdout, &data) != nil || data.UserID != user || data.Apps == nil {
-			s.fail(w, r, 502, "APP_METADATA_INVALID", "手机返回的应用信息不完整")
+		if err := json.Unmarshal(out.Stdout, &data); err != nil {
+			s.fail(w, r, 502, "APP_METADATA_INVALID", "手机返回的应用信息不完整", diagnostics.WrapStage("app_metadata.decode", err), shellFailure(out, nil))
+			return nil, false
+		}
+		if data.UserID != user || data.Apps == nil {
+			reason := "app metadata has no apps array"
+			if data.UserID != user {
+				reason = "app metadata belongs to a different Android user"
+			}
+			s.fail(w, r, 502, "APP_METADATA_INVALID", "手机返回的应用信息不完整", diagnostics.New(reason), shellFailure(out, nil))
 			return nil, false
 		}
 		for _, app := range data.Apps {
@@ -121,17 +130,17 @@ func (s *Server) applyAppMetadata(w http.ResponseWriter, r *http.Request, scope 
 			current.Apps[i].version = version.Version
 		}
 	}
-	cacheFailed := func() bool {
-		s.fail(w, r, 503, "APP_CACHE_UNAVAILABLE", "无法读取或更新运行目录中的应用图标缓存")
+	cacheFailed := func(stage string, err error) bool {
+		s.fail(w, r, 503, "APP_CACHE_UNAVAILABLE", "无法读取或更新运行目录中的应用图标缓存", diagnostics.WrapStage(stage, err))
 		return false
 	}
 	file, err := s.Cache.appFile(scope.DeviceID, current.UserID)
 	if err != nil {
-		return cacheFailed()
+		return cacheFailed("app_cache.resolve", err)
 	}
 	entries, err := s.Cache.readApps(file)
 	if err != nil {
-		return cacheFailed()
+		return cacheFailed("app_cache.read", err)
 	}
 	missing := fillCachedAppPresentations(current.Apps, current.locale, entries)
 	if len(missing) > 0 {
@@ -153,7 +162,7 @@ func (s *Server) applyAppMetadata(w http.ResponseWriter, r *http.Request, scope 
 			return false
 		}
 		if err := s.Cache.mergeApps(file, additions); err != nil {
-			return cacheFailed()
+			return cacheFailed("app_cache.commit", err)
 		}
 		for i := range current.Apps {
 			app := &current.Apps[i]

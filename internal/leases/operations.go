@@ -473,6 +473,16 @@ func (m *Manager) RevokeCaller(ctx context.Context, callerID, adminSessionID str
 // SetMaintenance requires confirmation of the current AI lease before revoking it.
 // DeviceSource.Recover must preserve independent human-session resources.
 func (m *Manager) SetMaintenance(ctx context.Context, deviceID string, requested bool, adminSessionID string, confirmedGeneration *int64) error {
+	return m.setMaintenance(ctx, deviceID, requested, adminSessionID, confirmedGeneration, false)
+}
+
+// RevokeForRemoval blocks claims and durably ends the confirmed lease without
+// requiring device-side recovery.
+func (m *Manager) RevokeForRemoval(ctx context.Context, deviceID, adminSessionID string, confirmedGeneration *int64) error {
+	return m.setMaintenance(ctx, deviceID, true, adminSessionID, confirmedGeneration, true)
+}
+
+func (m *Manager) setMaintenance(ctx context.Context, deviceID string, requested bool, adminSessionID string, confirmedGeneration *int64, removing bool) error {
 	if ctx == nil || deviceID == "" || adminSessionID == "" || (!requested && confirmedGeneration != nil) {
 		return ErrInvalidRequest
 	}
@@ -575,7 +585,11 @@ func (m *Manager) SetMaintenance(ctx context.Context, deviceID string, requested
 		maintenanceValue = 1
 		resultCode = "MAINTENANCE_REQUESTED"
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE devices SET maintenance_requested=?,allocation_state='reclaiming',last_error=NULL WHERE id=?`, maintenanceValue, deviceID); err != nil {
+	allocation := "reclaiming"
+	if removing {
+		allocation = "maintenance"
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE devices SET maintenance_requested=?,allocation_state=?,last_error=NULL WHERE id=?`, maintenanceValue, allocation, deviceID); err != nil {
 		return fail(domain(ErrStorage, err))
 	}
 	if err = recordOperation(ctx, tx, PrincipalAdmin, adminSessionID, deviceID, "", "device.maintenance", "pending", now, time.Time{}, resultCode); err != nil {
@@ -590,6 +604,9 @@ func (m *Manager) SetMaintenance(ctx context.Context, deviceID string, requested
 	}
 	m.mu.Unlock()
 	m.publishDeviceChange(deviceID, m.EventTask(deviceID))
+	if removing {
+		return nil
+	}
 	return m.recoverDevice(ctx, deviceID)
 }
 

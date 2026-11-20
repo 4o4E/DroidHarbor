@@ -180,7 +180,7 @@ export function DeviceAdministration({ open, onOpenChange, device, onChanged, ad
     </Dialog>
     <Dialog open={open && deletion !== null} onOpenChange={next => { if (!next && !busy) setDeletion(null) }}>
       <DialogContent showCloseButton={!busy}>
-        <DialogHeader><DialogTitle>删除{device?.displayName}？</DialogTitle><DialogDescription>{deletion?.occupied ? '将结束当前 AI 任务及所有平台预览。' : '将关闭该设备的平台预览。'}移除设备登记并回收平台资源，保留手机应用、账号和文件。重新使用需再次添加。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>删除{device?.displayName}？</DialogTitle><DialogDescription>{deletion?.occupied ? '将结束当前 AI 任务并关闭平台预览。' : '将关闭该设备的平台预览。'}永久删除设备登记，保留手机应用、账号和文件。重新使用时需作为新设备添加。</DialogDescription></DialogHeader>
         <DialogFooter><Button variant="outline" disabled={Boolean(busy)} onClick={() => setDeletion(null)}>取消</Button><Button variant="destructive" disabled={Boolean(busy)} onClick={() => void removeDevice()}>{busy === 'delete' ? '正在删除…' : '删除设备'}</Button></DialogFooter>
       </DialogContent>
     </Dialog>

@@ -14,7 +14,7 @@ import (
 	"droidharbor/internal/storage"
 )
 
-func TestRemovedRegistrationPreservesHistoryAndRequiresExplicitRestore(t *testing.T) {
+func TestRemovedRegistrationIsDeletedAndReaddStartsFresh(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "removed.db"))
 	if err != nil {
@@ -65,20 +65,20 @@ func TestRemovedRegistrationPreservesHistoryAndRequiresExplicitRestore(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored.DeviceID != entry.DeviceID || restored.Verified {
-		t.Fatalf("restore replaced identity or trusted an unauthorized phone: %+v", restored)
+	if restored.DeviceID == entry.DeviceID || restored.LinkID == entry.LinkID || restored.Existing || restored.Verified {
+		t.Fatalf("re-adding inherited the deleted registration or trusted an unauthorized phone: %+v", restored)
 	}
-	var generation, history int
-	var state, tags string
-	if err = db.QueryRow(`SELECT generation,allocation_state,(SELECT group_concat(tag) FROM device_tags WHERE device_id=d.id),(SELECT count(*) FROM operation_records WHERE id='historical') FROM devices d WHERE id=?`, entry.DeviceID).Scan(&generation, &state, &tags, &history); err != nil {
-		t.Fatal(err)
+	views, _, err = registry.List(ctx, true)
+	if err != nil || len(views) != 1 || views[0].AllocationState != "maintenance" || len(views[0].Tags) != 0 || *views[0].LeaseGeneration != 0 {
+		t.Fatalf("new registration inherited prior state: %+v %v", views, err)
 	}
-	if generation != 7 || state != "maintenance" || tags != "keep" || history != 1 {
-		t.Fatalf("restore altered retained history: %d %s %s %d", generation, state, tags, history)
+	var remaining int
+	if err = db.QueryRow(`SELECT (SELECT count(*) FROM devices WHERE id=?1)+(SELECT count(*) FROM device_links WHERE device_id=?1)+(SELECT count(*) FROM device_tags WHERE device_id=?1)+(SELECT count(*) FROM operation_records WHERE device_id=?1)`, entry.DeviceID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("deleted registration data remains: count=%d err=%v", remaining, err)
 	}
 }
 
-func TestUnconfirmedRemovalKeepsManageableRegistration(t *testing.T) {
+func TestOfflineRemovalDiscardsUnconfirmedResources(t *testing.T) {
 	ctx := context.Background()
 	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "pending.db"))
 	if err != nil {
@@ -98,21 +98,20 @@ func TestUnconfirmedRemovalKeepsManageableRegistration(t *testing.T) {
 	}
 	defer manager.Close()
 	registry.manager, registry.bootID = manager, manager.BootID()
+	if _, err = db.Exec(`INSERT INTO owned_resources(id,device_id,owner_kind,owner_id,boot_id,kind,locator,state,created_at) VALUES('capture',?,'device-capture','capture',?,'scrcpy','{}','failed',1)`, entry.DeviceID, manager.BootID()); err != nil {
+		t.Fatal(err)
+	}
 	failure := errors.New("owned process could not be verified")
 	registry.SetRemovalCleanup(func(context.Context, string) (func(), error) { return func() {}, failure })
 	views, _, err := registry.List(ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = registry.Remove(ctx, "admin", entry.DeviceID, Removal{Version: views[0].Version}); !errors.Is(err, failure) {
-		t.Fatalf("missing cleanup failure: %v", err)
-	}
-	views, _, err = registry.List(ctx, true)
-	if err != nil || len(views) != 1 || views[0].AllocationState != "maintenance" {
-		t.Fatalf("failed removal lost manageable blocked record: %+v %v", views, err)
-	}
-	registry.SetRemovalCleanup(func(context.Context, string) (func(), error) { return func() {}, nil })
 	if err = registry.Remove(ctx, "admin", entry.DeviceID, Removal{Version: views[0].Version}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("offline deletion was blocked by unconfirmed resources: %v", err)
+	}
+	var remaining int
+	if err = db.QueryRow(`SELECT (SELECT count(*) FROM devices WHERE id=?1)+(SELECT count(*) FROM owned_resources WHERE device_id=?1)`, entry.DeviceID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("offline device or recovery records remain: count=%d err=%v", remaining, err)
 	}
 }

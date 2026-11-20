@@ -150,34 +150,46 @@ func (s *Server) json(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
-		s.Logger.Warn("response_write_failed", "error", err.Error())
+		s.Logger.Warn("response_write_failed", "requestId", w.Header().Get("X-Request-ID"), "status", status, "cause", diagnostics.Cause(err))
 	}
 }
 
-func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+// message is the deliberately public API reason, never a raw upstream error.
+func (s *Server) fail(w http.ResponseWriter, r *http.Request, status int, code, message string, cause ...error) {
 	id, _ := r.Context().Value(requestKey{}).(string)
 	level := slog.LevelInfo
 	if status >= 500 {
 		level = slog.LevelError
 	}
-	s.Logger.Log(r.Context(), level, "request_rejected", "requestId", id, "method", r.Method, "route", r.Pattern, "code", code, "status", status)
+	attrs := []slog.Attr{
+		slog.String("requestId", id), slog.String("method", r.Method), slog.String("route", r.Pattern),
+		slog.String("code", code), slog.Int("status", status), slog.String("reason", message),
+	}
+	if len(cause) == 1 && cause[0] != nil {
+		attrs = append(attrs, slog.Any("cause", diagnostics.Cause(cause[0])))
+	} else if len(cause) > 1 {
+		attrs = append(attrs, slog.Any("cause", diagnostics.Cause(errors.Join(cause...))))
+	}
+	for _, key := range [...]string{"id", "linkId", "connectionId"} {
+		value := r.PathValue(key)
+		if len(value) != 64 {
+			continue
+		}
+		var decoded [32]byte
+		if _, err := hex.Decode(decoded[:], []byte(value)); err != nil {
+			continue
+		}
+		if key == "id" && strings.Contains(r.Pattern, "/devices/{id}") {
+			key = "deviceId"
+		}
+		attrs = append(attrs, slog.String(key, value))
+	}
+	s.Logger.LogAttrs(r.Context(), level, "request_rejected", attrs...)
 	s.json(w, status, apiError{Code: code, Message: message, RequestID: id})
 }
 
 func (s *Server) internal(w http.ResponseWriter, r *http.Request, err error) {
-	// 数据库错误可能含绑定参数，不把原始错误写入普通运行日志。
-	s.Logger.Error("storage_operation_failed", "requestId", r.Context().Value(requestKey{}), "errorType", fmtErrorType(err), "cause", diagnostics.Cause(err))
-	s.fail(w, r, 503, "STORAGE_UNAVAILABLE", "持久化操作失败")
-}
-
-func fmtErrorType(err error) string {
-	if errors.Is(err, context.Canceled) {
-		return "cancelled"
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return "deadline"
-	}
-	return "database"
+	s.fail(w, r, 503, "STORAGE_UNAVAILABLE", "持久化操作失败", err)
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
@@ -190,11 +202,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
-		s.fail(w, r, 422, "INVALID_REQUEST", "登录请求无效")
+		s.fail(w, r, 422, "INVALID_REQUEST", "登录请求无效", err)
 		return
 	}
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		s.fail(w, r, 422, "INVALID_REQUEST", "登录请求无效")
+		if err == nil {
+			err = diagnostics.New("login JSON contains a second value")
+		}
+		s.fail(w, r, 422, "INVALID_REQUEST", "登录请求无效", err)
 		return
 	}
 	if !s.Admin.Matches(body.Token) {

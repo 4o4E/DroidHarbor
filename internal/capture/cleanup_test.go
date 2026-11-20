@@ -17,6 +17,7 @@ import (
 
 	"droidharbor/internal/adb"
 	"droidharbor/internal/leases"
+	"droidharbor/internal/scrcpy"
 	"droidharbor/internal/storage"
 )
 
@@ -26,11 +27,13 @@ func TestRecoveryWaitsForOwnedCleanupHelper(t *testing.T) {
 		unknownIdentity  bool
 		survivingProcess bool
 		refuseStop       bool
+		retiringOwner    bool
 	}{
 		{name: "helper finishes after parent"},
 		{name: "unconfirmed helper keeps resource pending", unknownIdentity: true},
 		{name: "owned survivor exits after termination", survivingProcess: true},
 		{name: "termination failure keeps resource pending", survivingProcess: true, refuseStop: true},
+		{name: "replacement transport reclaims retiring owner", retiringOwner: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -176,6 +179,23 @@ func TestRecoveryWaitsForOwnedCleanupHelper(t *testing.T) {
 			}
 			link := leases.Link{DeviceID: "device", LinkID: "link", TransportID: 7, Generation: 3}
 			manager := &Manager{db: db, adb: client, source: &testSource{link: link, available: true}, recovering: make(map[string]*recoveryFlight), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			if test.retiringOwner {
+				oldLink := link
+				oldLink.TransportID--
+				oldLink.Generation--
+				streamCtx, stop := context.WithCancel(ctx)
+				stop()
+				started := make(chan struct{})
+				close(started)
+				stream := &Stream{
+					manager: manager, id: "capture", deviceID: "device", link: oldLink, ctx: streamCtx, cancel: stop,
+					started: started, workersDone: make(chan struct{}), done: make(chan struct{}),
+					frames: make(chan scrcpy.Packet), messages: make(chan scrcpy.DeviceMessage),
+				}
+				stream.journaled.Store(true)
+				manager.streams = map[string]*Stream{"device": stream}
+				manager.resourceFailure = func(context.Context, string) error { return nil }
+			}
 			complete, recoveryErr := manager.Recover(ctx, "device")
 			var state string
 			if err := db.QueryRow(`SELECT state FROM owned_resources WHERE id='capture'`).Scan(&state); err != nil {

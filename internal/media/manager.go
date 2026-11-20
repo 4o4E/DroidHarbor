@@ -444,7 +444,7 @@ func errorCode(err error) string {
 func (m *Manager) notifyDevice(id string) {
 	_, err := m.deps.Events.Publish(events.Change{EntityType: "device", EntityID: id, DeviceID: id, TaskID: m.deps.TaskOwner(id)})
 	if err != nil && !errors.Is(err, events.ErrClosed) {
-		m.deps.Logger.Error("media_notification_failed", "deviceId", id)
+		m.deps.Logger.Error("media_notification_failed", "deviceId", id, "cause", diagnostics.Cause(err))
 	}
 }
 

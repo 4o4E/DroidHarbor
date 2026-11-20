@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,15 @@ func (h *patternHandler) Handle(_ context.Context, record slog.Record) error {
 			for range h.groups {
 				buffer = append(buffer, ')')
 			}
+		}
+	}
+	if record.Level >= slog.LevelWarn && record.PC != 0 {
+		frame, _ := runtime.CallersFrames([]uintptr{record.PC}).Next()
+		if frame.Function != "" {
+			buffer = append(buffer, " | "...)
+			buffer = appendLogText(buffer, frame.Function)
+			buffer = append(buffer, ':')
+			buffer = strconv.AppendInt(buffer, int64(frame.Line), 10)
 		}
 	}
 	buffer = append(buffer, '\n')

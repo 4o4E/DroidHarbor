@@ -68,22 +68,21 @@ func (s *Server) previewError(w http.ResponseWriter, r *http.Request, err error)
 	}
 	var deviceErr *devices.Error
 	if errors.As(err, &deviceErr) {
-		s.domainError(w, r, deviceErr)
+		s.domainError(w, r, err)
 		return
 	}
 	switch {
 	case errors.Is(err, previews.ErrNotReady):
-		s.fail(w, r, 404, "PREVIEW_NOT_READY", "设备初始封面尚不可用")
+		s.fail(w, r, 404, "PREVIEW_NOT_READY", "设备初始封面尚不可用", err)
 	case errors.Is(err, previews.ErrRateLimited):
-		s.fail(w, r, 503, "PREVIEW_RATE_LIMITED", "预览采集频率受限，请稍后重试")
+		s.fail(w, r, 503, "PREVIEW_RATE_LIMITED", "预览采集频率受限，请稍后重试", err)
 	case errors.Is(err, previews.ErrCapacity):
-		s.fail(w, r, 503, "PREVIEW_BUSY", "预览处理容量已满")
+		s.fail(w, r, 503, "PREVIEW_BUSY", "预览处理容量已满", err)
 	case errors.Is(err, previews.ErrLinkChanged):
-		s.fail(w, r, 503, "DEVICE_UNAVAILABLE", "设备链路已变化，请重新请求")
+		s.fail(w, r, 503, "DEVICE_UNAVAILABLE", "设备链路已变化，请重新请求", err)
 	case errors.Is(err, previews.ErrInputTooLarge), errors.Is(err, previews.ErrImageTooLarge), errors.Is(err, previews.ErrInvalidImage):
-		s.fail(w, r, 503, "PREVIEW_CAPTURE_FAILED", "设备截图无效或超出预览限制")
+		s.fail(w, r, 503, "PREVIEW_CAPTURE_FAILED", "设备截图无效或超出预览限制", err)
 	default:
-		s.Logger.Warn("preview_capture_failed", "requestId", r.Context().Value(requestKey{}), "deviceId", r.PathValue("id"), "cause", diagnostics.Cause(err))
-		s.fail(w, r, 503, "PREVIEW_CAPTURE_FAILED", "无法获取设备预览")
+		s.fail(w, r, 503, "PREVIEW_CAPTURE_FAILED", "无法获取设备预览", err)
 	}
 }

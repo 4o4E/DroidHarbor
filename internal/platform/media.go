@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/media"
 	"github.com/pion/webrtc/v4"
 )
@@ -48,7 +49,7 @@ func (s *Server) createMediaSession(w http.ResponseWriter, r *http.Request) {
 	snapshot, err := s.Media.Join(ctx, owner, r.PathValue("id"), body.Mode, body.Offer)
 	if err != nil {
 		if r.Context().Err() != nil {
-			s.fail(w, r, http.StatusRequestTimeout, "REQUEST_CANCELED", "观看请求已取消")
+			s.fail(w, r, http.StatusRequestTimeout, "REQUEST_CANCELED", "观看请求已取消", r.Context().Err(), err)
 			return
 		}
 		s.domainError(w, r, err)
@@ -166,7 +167,7 @@ func (s *Server) originalScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := shot.Reader.Close(); err != nil {
-			s.Logger.Info("screenshot_close_failed", "requestId", r.Context().Value(requestKey{}))
+			s.Logger.Info("screenshot_close_failed", "requestId", r.Context().Value(requestKey{}), "cause", diagnostics.Cause(err))
 		}
 	}()
 	if _, ok := s.authorize(w, r, false); !ok {
@@ -174,12 +175,12 @@ func (s *Server) originalScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 	controller := http.NewResponseController(w)
 	if err := controller.SetWriteDeadline(time.Now().Add(15 * time.Second)); err != nil {
-		s.fail(w, r, 503, "SCREENSHOT_DELIVERY_UNAVAILABLE", "无法限定截图下载连接的等待时间")
+		s.fail(w, r, 503, "SCREENSHOT_DELIVERY_UNAVAILABLE", "无法限定截图下载连接的等待时间", err)
 		return
 	}
 	defer func() {
 		if err := controller.SetWriteDeadline(time.Time{}); err != nil {
-			s.Logger.Info("screenshot_deadline_reset_failed", "requestId", r.Context().Value(requestKey{}))
+			s.Logger.Info("screenshot_deadline_reset_failed", "requestId", r.Context().Value(requestKey{}), "cause", diagnostics.Cause(err))
 		}
 	}()
 	w.Header().Set("Content-Type", shot.ContentType)
@@ -189,7 +190,7 @@ func (s *Server) originalScreenshot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-DroidHarbor-Image-Width", strconv.Itoa(shot.Width))
 	w.Header().Set("X-DroidHarbor-Image-Height", strconv.Itoa(shot.Height))
 	if _, err := io.Copy(w, shot.Reader); err != nil {
-		s.Logger.Info("screenshot_delivery_interrupted", "requestId", r.Context().Value(requestKey{}))
+		s.Logger.Info("screenshot_delivery_interrupted", "requestId", r.Context().Value(requestKey{}), "cause", diagnostics.Cause(err))
 		// A partial image is never followed by a JSON success/error body.
 		panic(http.ErrAbortHandler)
 	}

@@ -35,10 +35,7 @@ func (s *Server) domainError(w http.ResponseWriter, r *http.Request, err error) 
 		s.internal(w, r, err)
 		return
 	}
-	if status >= 500 {
-		s.Logger.Error("operation_failed", "requestId", r.Context().Value(requestKey{}), "code", code, "cause", diagnostics.Cause(err))
-	}
-	s.fail(w, r, status, code, message)
+	s.fail(w, r, status, code, message, err)
 }
 
 func (s *Server) bearer(w http.ResponseWriter, r *http.Request) (string, bool) {
@@ -79,11 +76,14 @@ func (s *Server) decodeLimit(w http.ResponseWriter, r *http.Request, value any, 
 		if allowEmpty && errors.Is(err, io.EOF) {
 			return true
 		}
-		s.fail(w, r, 422, "INVALID_REQUEST", "请求正文无效")
+		s.fail(w, r, 422, "INVALID_REQUEST", "请求正文无效", err)
 		return false
 	}
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		s.fail(w, r, 422, "INVALID_REQUEST", "请求包含尾随内容")
+		if err == nil {
+			err = diagnostics.New("request JSON contains a second value")
+		}
+		s.fail(w, r, 422, "INVALID_REQUEST", "请求包含尾随内容", err)
 		return false
 	}
 	return true

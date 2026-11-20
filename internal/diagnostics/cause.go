@@ -2,12 +2,15 @@ package diagnostics
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/http"
 	"syscall"
 )
 
@@ -46,14 +49,23 @@ func Cause(err error) slog.Value {
 		attrs = append(attrs, slog.String("message", value.Error()))
 	case *stageError:
 		attrs = append(attrs, slog.String("stage", value.stage))
+	case *json.SyntaxError:
+		attrs = append(attrs, slog.Int64("offset", value.Offset))
+	case *json.UnmarshalTypeError:
+		attrs = append(attrs, slog.Int64("offset", value.Offset))
+	case *http.MaxBytesError:
+		attrs = append(attrs, slog.Int64("limit", value.Limit))
 	case syscall.Errno:
 		attrs = append(attrs, slog.Int("errno", int(value)), slog.String("message", value.Error()))
 	case *net.OpError:
 		attrs = append(attrs, slog.String("operation", value.Op), slog.String("network", value.Net))
+		if value.Timeout() {
+			attrs = append(attrs, slog.Bool("timeout", true))
+		}
 	case *fs.PathError:
 		attrs = append(attrs, slog.String("operation", value.Op))
 	default:
-		for _, known := range []error{context.Canceled, context.DeadlineExceeded, io.EOF, io.ErrUnexpectedEOF, io.ErrShortWrite, net.ErrClosed, fs.ErrNotExist, fs.ErrPermission, fs.ErrExist} {
+		for _, known := range []error{context.Canceled, context.DeadlineExceeded, io.EOF, io.ErrUnexpectedEOF, io.ErrShortWrite, io.ErrClosedPipe, net.ErrClosed, fs.ErrNotExist, fs.ErrPermission, fs.ErrExist, sql.ErrNoRows, sql.ErrTxDone, http.ErrNotSupported} {
 			if err == known {
 				attrs = append(attrs, slog.String("message", known.Error()))
 				break

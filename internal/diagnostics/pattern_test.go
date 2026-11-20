@@ -46,7 +46,8 @@ func TestPatternKeepsConcurrentContextAndEscapesInjectedLines(t *testing.T) {
 	for i := range writers {
 		matches := 0
 		for _, line := range lines {
-			if strings.Contains(line, fmt.Sprintf("[%08x] failed", i)) && strings.Contains(line, fmt.Sprintf("request-%d)", i)) && strings.Contains(line, `"alpha\nbeta"`) {
+			if strings.Contains(line, fmt.Sprintf("[%08x] failed", i)) && strings.Contains(line, fmt.Sprintf("request-%d)", i)) &&
+				strings.Contains(line, `"alpha\nbeta"`) && strings.Contains(line, "droidharbor/internal/diagnostics.TestPatternKeepsConcurrentContextAndEscapesInjectedLines") {
 				matches++
 			}
 		}

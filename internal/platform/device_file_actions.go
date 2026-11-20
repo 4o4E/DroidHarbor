@@ -103,7 +103,7 @@ func (s *Server) listFileTrash(w http.ResponseWriter, r *http.Request) {
 	defer scope.Close()
 	out, err := s.ADB.RunShell(scope.Context, scope.Link.TransportID, trashListCommand, deviceToolsOutput, scope.Check)
 	if err != nil || out.ExitCode != 0 {
-		s.fail(w, r, 502, "DEVICE_TRASH_UNAVAILABLE", "未能读取手机回收站")
+		s.fail(w, r, 502, "DEVICE_TRASH_UNAVAILABLE", "未能读取手机回收站", shellFailure(out, err))
 		return
 	}
 	if err := scope.Check(); err != nil {
@@ -112,7 +112,7 @@ func (s *Server) listFileTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	entries, ok := decodeTrashEntries(out.Stdout)
 	if !ok {
-		s.fail(w, r, 502, "DEVICE_TRASH_INVALID", "手机回收站索引不完整")
+		s.fail(w, r, 502, "DEVICE_TRASH_INVALID", "手机回收站索引不完整", shellFailure(out, nil))
 		return
 	}
 	s.json(w, 200, entries)
@@ -180,11 +180,11 @@ func (s *Server) readTrashOrigin(w http.ResponseWriter, r *http.Request, scope m
 		return "", false
 	}
 	if err != nil || out.ExitCode != 0 {
-		s.fail(w, r, 502, "DEVICE_TRASH_UNAVAILABLE", "未能核对回收站位置，未派发还原")
+		s.fail(w, r, 502, "DEVICE_TRASH_UNAVAILABLE", "未能核对回收站位置，未派发还原", shellFailure(out, err))
 		return "", false
 	}
 	if _, ok := parseTrashOrigin(string(out.Stdout)); !ok {
-		s.fail(w, r, 502, "DEVICE_TRASH_INVALID", "手机回收站索引不完整")
+		s.fail(w, r, 502, "DEVICE_TRASH_INVALID", "手机回收站索引不完整", shellFailure(out, nil))
 		return "", false
 	}
 	return string(out.Stdout), true
@@ -263,10 +263,10 @@ func (s *Server) mutateSessionFiles(w http.ResponseWriter, r *http.Request) {
 	out, err := s.ADB.RunShell(scope.Context, scope.Link.TransportID, command, 16<<10, scope.Check)
 	switch {
 	case err != nil:
-		s.fail(w, r, 502, "DEVICE_FILE_RESULT_UNKNOWN", "手机未返回操作终态；请刷新核对，不要直接重试")
+		s.fail(w, r, 502, "DEVICE_FILE_RESULT_UNKNOWN", "手机未返回操作终态；请刷新核对，不要直接重试", err)
 	case out.ExitCode == 0:
 		if err := scope.Check(); err != nil {
-			s.fail(w, r, 502, "DEVICE_FILE_RESULT_UNKNOWN", "会话已变化，请核对手机上的操作结果")
+			s.fail(w, r, 502, "DEVICE_FILE_RESULT_UNKNOWN", "会话已变化，请核对手机上的操作结果", err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -277,10 +277,10 @@ func (s *Server) mutateSessionFiles(w http.ResponseWriter, r *http.Request) {
 	case out.ExitCode == 73:
 		s.fail(w, r, 409, "DEVICE_FILE_EXISTS", "目标位置有同名项目，没有覆盖")
 	case out.ExitCode == 74:
-		s.fail(w, r, 502, "DEVICE_TRASH_CLEANUP_FAILED", "回收站索引清理不完整，请刷新核对")
+		s.fail(w, r, 502, "DEVICE_TRASH_CLEANUP_FAILED", "回收站索引清理不完整，请刷新核对", shellFailure(out, nil))
 	case out.ExitCode == 71:
-		s.fail(w, r, 502, "DEVICE_FILE_RESULT_UNKNOWN", "未确认操作完整完成；请刷新核对，不要直接重试")
+		s.fail(w, r, 502, "DEVICE_FILE_RESULT_UNKNOWN", "未确认操作完整完成；请刷新核对，不要直接重试", shellFailure(out, nil))
 	default:
-		s.fail(w, r, 502, "DEVICE_FILE_ACTION_FAILED", "手机拒绝了文件操作")
+		s.fail(w, r, 502, "DEVICE_FILE_ACTION_FAILED", "手机拒绝了文件操作", shellFailure(out, nil))
 	}
 }

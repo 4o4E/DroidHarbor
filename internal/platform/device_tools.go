@@ -3,6 +3,7 @@ package platform
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
@@ -12,10 +13,20 @@ import (
 	"unicode/utf8"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/media"
 )
 
 const deviceToolsOutput = 512 << 10
+
+// Shell results are diagnostic only by exit code and byte counts: output can
+// contain file contents, package data or paths.
+func shellFailure(out adb.ShellResult, err error) error {
+	if err != nil {
+		return err
+	}
+	return diagnostics.New(fmt.Sprintf("shell_v2 exit %d, stdout %d bytes, stderr %d bytes", out.ExitCode, len(out.Stdout), len(out.Stderr)))
+}
 
 func (s *Server) deviceToolsScope(w http.ResponseWriter, r *http.Request, ctx context.Context) (media.Scope, bool) {
 	owner, ok := s.mediaAdmin(w, r, r.Method == http.MethodPost)
@@ -168,7 +179,7 @@ func (s *Server) listSessionFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.ADB.RunShell(scope.Context, scope.Link.TransportID, deviceListCommand(directory), deviceToolsOutput, scope.Check)
 	if err != nil {
-		s.fail(w, r, 502, "DEVICE_DIRECTORY_UNAVAILABLE", "未能读取设备目录")
+		s.fail(w, r, 502, "DEVICE_DIRECTORY_UNAVAILABLE", "未能读取设备目录", err)
 		return
 	}
 	switch out.ExitCode {
@@ -183,12 +194,12 @@ func (s *Server) listSessionFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		value, valid := decodeDeviceDirectory(directory, out.Stdout)
 		if !valid {
-			s.fail(w, r, 502, "DEVICE_DIRECTORY_INVALID", "设备未返回完整目录")
+			s.fail(w, r, 502, "DEVICE_DIRECTORY_INVALID", "设备未返回完整目录", shellFailure(out, nil))
 			return
 		}
 		s.json(w, 200, value)
 	default:
-		s.fail(w, r, 502, "DEVICE_DIRECTORY_UNAVAILABLE", "未能读取设备目录")
+		s.fail(w, r, 502, "DEVICE_DIRECTORY_UNAVAILABLE", "未能读取设备目录", shellFailure(out, nil))
 	}
 }
 
@@ -318,7 +329,7 @@ func (s *Server) sessionApps(w http.ResponseWriter, r *http.Request, scope media
 		return deviceApps{}, false
 	}
 	if err != nil || out.ExitCode != 0 {
-		s.fail(w, r, 502, "DEVICE_APPS_UNAVAILABLE", "无法读取当前 Android 用户的应用")
+		s.fail(w, r, 502, "DEVICE_APPS_UNAVAILABLE", "无法读取当前 Android 用户的应用", shellFailure(out, err))
 		return deviceApps{}, false
 	}
 	if err := scope.Check(); err != nil {
@@ -327,7 +338,7 @@ func (s *Server) sessionApps(w http.ResponseWriter, r *http.Request, scope media
 	}
 	value, ok := decodeDeviceApps(out.Stdout, versions)
 	if !ok {
-		s.fail(w, r, 502, "DEVICE_APPS_INVALID", "设备未返回完整应用列表")
+		s.fail(w, r, 502, "DEVICE_APPS_INVALID", "设备未返回完整应用列表", shellFailure(out, nil))
 	}
 	return value, ok
 }
@@ -452,6 +463,11 @@ func (s *Server) uninstallSessionApps(w http.ResponseWriter, r *http.Request) {
 				item.State, item.Message = "failed", "Android 拒绝卸载，应用仍在当前用户中"
 			default:
 				item.State, item.Message, stopped = "unknown", "未能核对卸载结果，未重试", true
+			}
+			if item.State != "succeeded" {
+				s.Logger.Warn("app_uninstall_item_incomplete", "requestId", r.Context().Value(requestKey{}),
+					"deviceId", scope.DeviceID, "sessionId", r.PathValue("id"), "itemNumber", len(results)+1,
+					"state", item.State, "reason", item.Message, "cause", diagnostics.Cause(shellFailure(out, err)))
 			}
 		}
 		results = append(results, item)

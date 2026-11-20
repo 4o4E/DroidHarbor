@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"droidharbor/internal/diagnostics"
 )
 
 const (
@@ -109,7 +111,7 @@ func parseDevices(payload []byte) ([]Device, error) {
 		return []Device{}, nil
 	}
 	if payload[len(payload)-1] != '\n' {
-		return nil, errors.New("ADB server returned an incomplete device list")
+		return nil, diagnostics.New("ADB server returned an incomplete device list")
 	}
 	lines := strings.Split(strings.TrimSuffix(string(payload), "\n"), "\n")
 	devices := make([]Device, 0, len(lines))
@@ -123,13 +125,13 @@ func parseDevices(payload []byte) ([]Device, error) {
 		fields := strings.Fields(deviceLine)
 		if serial == "" {
 			if len(fields) < 2 || strings.ContainsRune(fields[0], '\x00') {
-				return nil, errors.New("ADB server returned a malformed device entry")
+				return nil, diagnostics.New("ADB server returned a malformed device entry")
 			}
 			serial = fields[0]
 			fields = fields[1:]
 		}
 		if len(fields) == 0 {
-			return nil, errors.New("ADB server returned a malformed device entry")
+			return nil, diagnostics.New("ADB server returned a malformed device entry")
 		}
 		noPermissions := fields[0] == "no" && len(fields) > 1 && fields[1] == "permissions"
 		propertyStart := len(fields)
@@ -156,7 +158,7 @@ func parseDevices(payload []byte) ([]Device, error) {
 			}
 		}
 		if propertyStart == 0 {
-			return nil, errors.New("ADB server returned a malformed device state")
+			return nil, diagnostics.New("ADB server returned a malformed device state")
 		}
 		d := Device{
 			Serial:     serial,
@@ -166,16 +168,16 @@ func parseDevices(payload []byte) ([]Device, error) {
 		for _, field := range fields[propertyStart:] {
 			key, value, ok := strings.Cut(field, ":")
 			if !ok || key == "" {
-				return nil, errors.New("ADB server returned a malformed device property")
+				return nil, diagnostics.New("ADB server returned a malformed device property")
 			}
 			if _, exists := d.Properties[key]; exists {
-				return nil, errors.New("ADB server returned a duplicate device property")
+				return nil, diagnostics.New("ADB server returned a duplicate device property")
 			}
 			d.Properties[key] = value
 			if key == "transport_id" {
 				transportID, err := strconv.ParseUint(value, 10, 64)
 				if err != nil || transportID == 0 {
-					return nil, errors.New("ADB server returned an invalid transport id")
+					return nil, diagnostics.New("ADB server returned an invalid transport id")
 				}
 				d.TransportID = transportID
 			}
@@ -233,7 +235,7 @@ func (t *DeviceTracker) Next() ([]Device, error) {
 		if t.ctx.Err() != nil {
 			return nil, t.ctx.Err()
 		}
-		return nil, fmt.Errorf("read ADB device tracker snapshot: %w", err)
+		return nil, diagnostics.WrapStage("adb.track.read_snapshot", err)
 	}
 	devices, err := parseDevices(payload)
 	if err != nil {
@@ -269,7 +271,7 @@ func (c *Client) Open(ctx context.Context, transportID uint64, service string, a
 	}
 	conn, err := c.dial(ctx)
 	if err != nil {
-		return nil, err
+		return nil, diagnostics.WrapStage("adb.open.dial", err)
 	}
 	conn = GuardWrites(conn, func() error {
 		if err := ctx.Err(); err != nil {
@@ -284,19 +286,19 @@ func (c *Client) Open(ctx context.Context, transportID uint64, service string, a
 		return nil, err
 	}
 	if err := setHandshakeDeadline(ctx, conn, c.timeout); err != nil {
-		return fail(err)
+		return fail(diagnostics.WrapStage("adb.open.handshake_deadline", err))
 	}
 	if err := writeService(conn, fmt.Sprintf("host:transport-id:%d", transportID)); err != nil {
-		return fail(err)
+		return fail(diagnostics.WrapStage("adb.open.write_transport", err))
 	}
 	if err := readStatus(conn); err != nil {
-		return fail(err)
+		return fail(diagnostics.WrapStage("adb.open.select_transport", err))
 	}
 	if err := writeService(conn, service); err != nil {
-		return fail(err)
+		return fail(diagnostics.WrapStage("adb.open.write_service", err))
 	}
 	if err := readStatus(conn); err != nil {
-		return fail(err)
+		return fail(diagnostics.WrapStage("adb.open.select_service", err))
 	}
 	if err := ctx.Err(); err != nil {
 		return fail(err)
@@ -349,7 +351,7 @@ func (c *Client) hostAction(ctx context.Context, service, action string) (string
 			return "", ctx.Err()
 		}
 		if action == "pair" {
-			return "", errors.New("ADB pairing request failed")
+			return "", diagnostics.WrapStage("adb.pair.request", err)
 		}
 		return "", err
 	}
@@ -361,14 +363,14 @@ func (c *Client) hostAction(ctx context.Context, service, action string) (string
 			return result, nil
 		}
 		if result == "" {
-			return "", errors.New("ADB server returned an empty connect result")
+			return "", diagnostics.New("ADB server returned an empty connect result")
 		}
-		return "", fmt.Errorf("ADB connect failed: %s", result)
+		return "", diagnostics.New("ADB connect was not confirmed by the server")
 	case "pair":
 		if strings.HasPrefix(lower, "successfully paired to ") {
 			return result, nil
 		}
-		return "", errors.New("ADB pairing failed")
+		return "", diagnostics.New("ADB pairing was not confirmed by the server")
 	default:
 		return "", errors.New("unsupported ADB host action")
 	}
@@ -377,21 +379,25 @@ func (c *Client) hostAction(ctx context.Context, service, action string) (string
 func (c *Client) request(ctx context.Context, service string) ([]byte, error) {
 	conn, err := c.dial(ctx)
 	if err != nil {
-		return nil, err
+		return nil, diagnostics.WrapStage("adb.host.dial", err)
 	}
 	defer conn.Close()
 	stopCancel := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stopCancel()
 	if err = setHandshakeDeadline(ctx, conn, c.timeout); err != nil {
-		return nil, err
+		return nil, diagnostics.WrapStage("adb.host.handshake_deadline", err)
 	}
 	if err = writeService(conn, service); err != nil {
-		return nil, err
+		return nil, diagnostics.WrapStage("adb.host.write_service", err)
 	}
 	if err = readStatus(conn); err != nil {
-		return nil, err
+		return nil, diagnostics.WrapStage("adb.host.status", err)
 	}
-	return readLengthPayload(conn, maxHostPayload)
+	payload, err := readLengthPayload(conn, maxHostPayload)
+	if err != nil {
+		return nil, diagnostics.WrapStage("adb.host.read_payload", err)
+	}
+	return payload, nil
 }
 
 func (c *Client) dial(ctx context.Context) (net.Conn, error) {
@@ -433,11 +439,23 @@ func readStatus(conn net.Conn) error {
 	case "FAIL":
 		message, err := readLengthPayload(conn, 4096)
 		if err != nil {
-			return errors.New("ADB server returned malformed failure response")
+			return diagnostics.WrapStage("adb.status.malformed_fail", err)
 		}
-		return fmt.Errorf("ADB server rejected request: %s", strings.TrimSpace(string(message)))
+		// FAIL payloads can echo addresses, commands or secrets. Classify
+		// common transport failures without retaining the payload.
+		reason := strings.TrimSpace(string(message))
+		switch {
+		case reason == "device offline":
+			return diagnostics.New("ADB rejected request: device offline")
+		case reason == "device unauthorized." || strings.HasPrefix(reason, "device unauthorized. "):
+			return diagnostics.New("ADB rejected request: device unauthorized")
+		case reason == "no devices/emulators found" || (strings.HasPrefix(reason, "device '") && strings.HasSuffix(reason, "' not found")):
+			return diagnostics.New("ADB rejected request: device not found")
+		default:
+			return diagnostics.New("ADB returned FAIL (details withheld)")
+		}
 	default:
-		return errors.New("ADB server returned an invalid status")
+		return diagnostics.New("ADB server returned a status other than OKAY or FAIL")
 	}
 }
 
@@ -449,15 +467,15 @@ func readLengthPayload(r io.Reader, max int) ([]byte, error) {
 	for _, digit := range header {
 		if !(digit >= '0' && digit <= '9') && !(digit >= 'a' && digit <= 'f') &&
 			!(digit >= 'A' && digit <= 'F') {
-			return nil, errors.New("ADB server returned an invalid length")
+			return nil, diagnostics.New("ADB server returned a non-hexadecimal length")
 		}
 	}
 	length, err := strconv.ParseUint(string(header[:]), 16, 16)
 	if err != nil {
-		return nil, errors.New("ADB server returned an invalid length")
+		return nil, diagnostics.New("ADB server returned an invalid length")
 	}
 	if length > uint64(max) {
-		return nil, errors.New("ADB server response exceeds size limit")
+		return nil, diagnostics.New(fmt.Sprintf("ADB response length %d exceeds limit %d", length, max))
 	}
 	payload := make([]byte, int(length))
 	if _, err := io.ReadFull(r, payload); err != nil {

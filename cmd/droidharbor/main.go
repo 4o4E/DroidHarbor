@@ -315,16 +315,10 @@ func runServe(ctx context.Context, ready func(), options serveOptions) (runErr e
 	previewManager = previews.New(runtimeCtx, registry, adbClient)
 	runtimeManager = deviceruntime.New(runtimeCtx, registry, powerCaptureManager, previewManager, adbClient, logger)
 	registry.SetRemovalCleanup(func(ctx context.Context, id string) (func(), error) {
-		releaseMedia, err := mediaManager.BlockDevice(ctx, id)
-		if err != nil {
-			return releaseMedia, err
-		}
-		releasePower, err := runtimeManager.PauseDevice(ctx, id)
+		releaseMedia, mediaErr := mediaManager.BlockDevice(ctx, id)
+		releasePower, powerErr := runtimeManager.PauseDevice(ctx, id)
 		release := func() { releasePower(); releaseMedia() }
-		if err != nil {
-			return release, err
-		}
-		return release, errors.Join(captureManager.StopDevice(ctx, id), powerCaptureManager.StopDevice(ctx, id), audioCaptureManager.StopDevice(ctx, id), tunnels.Recover(ctx, id))
+		return release, errors.Join(mediaErr, powerErr, captureManager.StopDevice(ctx, id), powerCaptureManager.StopDevice(ctx, id), audioCaptureManager.StopDevice(ctx, id), tunnels.Recover(ctx, id))
 	})
 	registry.Start(manager)
 	app := &platform.Server{

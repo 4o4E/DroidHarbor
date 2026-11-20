@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -27,10 +28,11 @@ type Evidence struct {
 	SDK          string `json:"sdk"`
 }
 
-// A link must agree on a hardware serial and independent product properties.
+// Hardware identity is the serial, model and product code. Manufacturer and
+// Android version fields are informational, not proof of link ownership.
 // Addresses and transport IDs are routing information, never device identity.
 func (e Evidence) SameHardware(other Evidence) bool {
-	return e.Serial == other.Serial && e.Manufacturer == other.Manufacturer && e.Model == other.Model && e.Product == other.Product
+	return e.Serial == other.Serial && e.Model == other.Model && e.Product == other.Product
 }
 
 type Error struct {
@@ -44,11 +46,12 @@ func (e *Error) Error() string { return e.Message }
 func (e *Error) Unwrap() error { return e.Cause }
 
 type liveLink struct {
-	link     leases.Link
-	serial   string
-	evidence Evidence
-	ctx      context.Context
-	cancel   context.CancelFunc
+	link           leases.Link
+	serial         string
+	evidence       Evidence
+	ctx            context.Context
+	cancel         context.CancelFunc
+	displayPending bool
 }
 
 type inventoryUpdate struct {
@@ -352,162 +355,223 @@ func (r *Registry) setLinkStateLocked(link registeredLink, state string) {
 
 func (r *Registry) verifyInventory() {
 	defer r.wg.Done()
+	var update inventoryUpdate
+	var timer *time.Timer
+	var retryAt <-chan time.Time
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
-		case update := <-r.updates:
-			if err := r.verifySnapshot(update); err != nil && r.ctx.Err() == nil {
-				r.logger.Error("device_identity_refresh_failed", "code", "IDENTITY_UNAVAILABLE", "cause", diagnostics.Cause(err))
+		case update = <-r.updates:
+			if timer != nil {
+				timer.Stop()
 			}
+		case <-retryAt:
+		}
+		retryAt = nil
+		retry, err := r.verifySnapshot(update)
+		if err != nil && update.epoch.Err() == nil {
+			r.logger.Error("device_identity_refresh_failed", "code", "IDENTITY_UNAVAILABLE", "cause", diagnostics.Cause(err))
+		}
+		// During Android boot the ADB transport can be ready before the
+		// identity and display services. Their recovery need not emit a new ADB snapshot.
+		if retry && update.epoch.Err() == nil {
+			if timer == nil {
+				timer = time.NewTimer(2 * time.Second)
+			} else {
+				timer.Reset(2 * time.Second)
+			}
+			retryAt = timer.C
 		}
 	}
 }
 
-func (r *Registry) verifySnapshot(update inventoryUpdate) error {
+func (r *Registry) verifySnapshot(update inventoryUpdate) (retry bool, err error) {
 	rows, err := r.db.QueryContext(update.epoch, `SELECT id,device_id,endpoint,coalesce(observed_serial,endpoint),identity_evidence,enabled FROM device_links WHERE device_id IN (SELECT id FROM devices WHERE removed_at IS NULL) ORDER BY id`)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var registered []registeredLink
 	for rows.Next() {
 		var link registeredLink
 		if err = rows.Scan(&link.id, &link.deviceID, &link.endpoint, &link.serial, &link.evidence, &link.enabled); err != nil {
 			rows.Close()
-			return err
+			return false, err
 		}
 		registered = append(registered, link)
 	}
 	err = errors.Join(rows.Err(), rows.Close())
 	if err != nil {
-		return err
+		return false, err
 	}
 	for _, link := range registered {
-		r.mu.RLock()
-		if r.version != update.version {
-			r.mu.RUnlock()
-			return nil
+		r.mu.Lock()
+		if r.version != update.version || update.epoch.Err() != nil {
+			r.mu.Unlock()
+			return false, nil
 		}
 		observed, found := r.discovered[link.serial]
 		ambiguous := r.ambiguous[link.serial]
-		old := r.live[link.id]
+		current := r.live[link.id]
 		state := "offline"
-		if !r.ready {
+		switch {
+		case current != nil:
+			state = "online"
+		case !r.ready:
 			state = "unavailable"
-		} else if ambiguous {
+		case ambiguous:
 			state = "identity-conflict"
-		} else if found {
-			switch observed.State {
-			case "device":
-				state = "unverified"
-			case "unauthorized", "authorizing":
-				state = "unauthorized"
+		case found && (observed.State == "unauthorized" || observed.State == "authorizing"):
+			state = "unauthorized"
+		case found && observed.State == "device":
+			state = "unverified"
+			// Keep the last probe outcome until this transport is rechecked.
+			if r.linkStates[link.id] == "identity-conflict" {
+				state = "identity-conflict"
 			}
 		}
-		if old != nil && old.ctx.Err() == nil {
-			state = "online"
-		}
-		r.mu.RUnlock()
-		r.mu.Lock()
-		if r.version == update.version {
-			r.setLinkStateLocked(link, state)
-		}
+		r.setLinkStateLocked(link, state)
 		r.mu.Unlock()
 		if !link.enabled || !link.evidence.Valid || !found || ambiguous || observed.State != "device" || observed.TransportID == 0 {
 			continue
 		}
-		if old != nil && old.link.TransportID == observed.TransportID && old.ctx.Err() == nil {
-			continue
-		}
-		var expected Evidence
-		if err = json.Unmarshal([]byte(link.evidence.String), &expected); err != nil {
-			return &Error{Code: "IDENTITY_INVALID", Message: "设备身份记录无效", Status: 503, Cause: err}
-		}
-		actual, probeErr := r.probe(update.epoch, observed.TransportID)
-		if probeErr == nil && !expected.SameHardware(actual) {
-			probeErr = &Error{Code: "IDENTITY_CONFLICT", Message: "设备身份与登记记录不一致", Status: 409}
-		}
-		if probeErr != nil {
+		newLink := current == nil
+		if newLink {
+			var expected Evidence
+			if err = json.Unmarshal([]byte(link.evidence.String), &expected); err != nil {
+				return retry, &Error{Code: "IDENTITY_INVALID", Message: "设备身份记录无效", Status: 503, Cause: err}
+			}
+			actual, probeErr := r.probe(update.epoch, observed.TransportID)
 			r.mu.Lock()
-			if r.version == update.version {
-				r.issues[link.id] = "设备身份尚未通过校验"
-				var identityErr *Error
-				if errors.As(probeErr, &identityErr) && identityErr.Code == "IDENTITY_CONFLICT" {
-					r.setLinkStateLocked(link, "identity-conflict")
-				} else {
-					r.setLinkStateLocked(link, "unauthorized")
+			if r.version != update.version || update.epoch.Err() != nil {
+				r.mu.Unlock()
+				return false, nil
+			}
+			if probeErr != nil {
+				if r.issues[link.id] != "暂时无法读取设备身份" {
+					r.logger.Warn("device_identity_probe_unavailable", "deviceId", link.deviceID, "linkId", link.id, "cause", diagnostics.Cause(probeErr))
+					r.issues[link.id] = "暂时无法读取设备身份"
+					r.notifyLocked(link.deviceID)
+				}
+				retry = true
+				r.mu.Unlock()
+				continue
+			}
+			if !expected.SameHardware(actual) {
+				r.issues[link.id] = "设备身份与登记记录不一致"
+				r.setLinkStateLocked(link, "identity-conflict")
+				r.mu.Unlock()
+				continue
+			}
+			r.nextLink++
+			linkCtx, cancel := context.WithCancel(update.epoch)
+			current = &liveLink{link: leases.Link{DeviceID: link.deviceID, LinkID: link.id, TransportID: observed.TransportID, Generation: r.nextLink}, serial: link.serial, evidence: actual, ctx: linkCtx, cancel: cancel, displayPending: true}
+			r.live[link.id] = current
+			delete(r.issues, link.id)
+			r.setLinkStateLocked(link, "online")
+			r.mu.Unlock()
+			if _, err = r.db.ExecContext(linkCtx, `UPDATE device_links SET last_seen_at=? WHERE id=?`, time.Now().UTC().UnixMilli(), link.id); err != nil {
+				if linkCtx.Err() != nil {
+					continue
+				}
+				return retry, err
+			}
+			var reclaiming bool
+			if err = r.db.QueryRowContext(linkCtx, `SELECT allocation_state='reclaiming' FROM devices WHERE id=?`, link.deviceID).Scan(&reclaiming); err != nil {
+				if linkCtx.Err() != nil {
+					continue
+				}
+				return retry, err
+			}
+			if reclaiming {
+				if err = r.manager.RetryRecovery(linkCtx, link.deviceID); err != nil && linkCtx.Err() == nil && !errors.Is(err, leases.ErrConflict) {
+					r.logger.Error("device_recovery_recheck_failed", "deviceId", link.deviceID, "code", "RECLAIM_FAILED", "cause", diagnostics.Cause(err))
 				}
 			}
-			r.mu.Unlock()
-			if update.epoch.Err() != nil {
-				return update.epoch.Err()
-			}
+		}
+		if !current.displayPending {
 			continue
 		}
-		screen, displayErr := r.readDisplay(update.epoch, actual.Serial, observed.TransportID)
-		if displayErr != nil {
-			r.logger.Error("device_display_info_failed", "deviceId", link.deviceID, "linkId", link.id, "code", "DISPLAY_INFO_UNAVAILABLE", "cause", diagnostics.Cause(displayErr))
-			if update.epoch.Err() != nil {
-				return update.epoch.Err()
-			}
+		screen, displayErr := r.readDisplay(current.ctx, current.evidence.Serial, current.link.TransportID)
+		if current.ctx.Err() != nil {
+			continue
 		}
 		if displayErr == nil {
-			if err := saveScreenGeometry(update.epoch, r.db, link.deviceID, screen); err != nil {
-				return err
+			if err := saveScreenGeometry(current.ctx, r.db, link.deviceID, screen); err != nil {
+				if current.ctx.Err() != nil {
+					continue
+				}
+				return true, err
 			}
-		}
-		if _, err = r.db.ExecContext(update.epoch, `UPDATE device_links SET last_seen_at=? WHERE id=?`, time.Now().UTC().UnixMilli(), link.id); err != nil {
-			return err
 		}
 		r.mu.Lock()
-		if r.version != update.version || !r.ready || update.epoch.Err() != nil {
-			r.mu.Unlock()
-			return nil
-		}
-		r.nextLink++
-		linkCtx, cancel := context.WithCancel(update.epoch)
-		r.live[link.id] = &liveLink{link: leases.Link{DeviceID: link.deviceID, LinkID: link.id, TransportID: observed.TransportID, Generation: r.nextLink}, serial: link.serial, evidence: actual, ctx: linkCtx, cancel: cancel}
-		if displayErr != nil {
-			r.issues[link.id] = "读取屏幕尺寸失败"
-		} else {
-			delete(r.issues, link.id)
-		}
-		r.setLinkStateLocked(link, "online")
-		r.mu.Unlock()
-		var reclaiming bool
-		if err = r.db.QueryRowContext(update.epoch, `SELECT allocation_state='reclaiming' FROM devices WHERE id=?`, link.deviceID).Scan(&reclaiming); err != nil {
-			return err
-		}
-		if reclaiming {
-			if err = r.manager.RetryRecovery(update.epoch, link.deviceID); err != nil {
-				r.logger.Error("device_recovery_recheck_failed", "deviceId", link.deviceID, "code", "RECLAIM_FAILED", "cause", diagnostics.Cause(err))
+		if r.version == update.version && current.ctx.Err() == nil {
+			switch {
+			case displayErr == nil:
+				current.displayPending = false
+				delete(r.issues, link.id)
+				r.notifyLocked(link.deviceID)
+			case r.issues[link.id] == "":
+				r.logger.Error("device_display_info_failed", "deviceId", link.deviceID, "linkId", link.id, "code", "DISPLAY_INFO_UNAVAILABLE", "cause", diagnostics.Cause(displayErr))
+				r.issues[link.id] = "读取屏幕尺寸失败"
+				r.notifyLocked(link.deviceID)
 			}
 		}
+		r.mu.Unlock()
+		retry = retry || displayErr != nil
 	}
-	return nil
+	return retry, nil
 }
+
+var identityProperties = [...]string{"ro.serialno", "ro.product.manufacturer", "ro.product.model", "ro.product.device", "ro.build.version.release", "ro.build.version.sdk"}
+
+var identityService = "exec:getprop " + strings.Join(identityProperties[:], "; getprop ")
 
 func (r *Registry) probe(ctx context.Context, transportID uint64) (Evidence, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	stream, err := r.client.Open(probeCtx, transportID, "exec:getprop ro.serialno; getprop ro.product.manufacturer; getprop ro.product.model; getprop ro.product.device; getprop ro.build.version.release; getprop ro.build.version.sdk", probeCtx.Err)
-	if err != nil {
-		return Evidence{}, &Error{Code: "IDENTITY_UNAVAILABLE", Message: "无法读取设备身份", Status: 503, Cause: err}
+	const responseLimit = 4096
+	failure := func(message, stage string, cause error) error {
+		return &Error{Code: "IDENTITY_UNAVAILABLE", Message: message, Status: 503,
+			Cause: diagnostics.WrapStage(fmt.Sprintf("identity.%s (transport %d)", stage, transportID), cause)}
 	}
-	data, readErr := io.ReadAll(io.LimitReader(stream, 4097))
+	stream, err := r.client.Open(probeCtx, transportID, identityService, probeCtx.Err)
+	if err != nil {
+		return Evidence{}, failure("无法读取设备身份", "open", errors.Join(err, probeCtx.Err()))
+	}
+	data, readErr := io.ReadAll(io.LimitReader(stream, responseLimit+1))
 	closeErr := stream.Close()
-	if readErr != nil || closeErr != nil || len(data) > 4096 {
-		return Evidence{}, &Error{Code: "IDENTITY_UNAVAILABLE", Message: "设备身份响应不完整", Status: 503, Cause: errors.Join(readErr, closeErr)}
+	if readErr != nil || closeErr != nil {
+		return Evidence{}, failure("设备身份响应不完整", "read", errors.Join(readErr, closeErr, probeCtx.Err()))
+	}
+	if len(data) > responseLimit {
+		return Evidence{}, failure("设备身份响应不完整", "size", diagnostics.New(fmt.Sprintf("identity response exceeded %d bytes", responseLimit)))
 	}
 	values := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-	if len(values) != 6 {
-		return Evidence{}, &Error{Code: "IDENTITY_UNAVAILABLE", Message: "设备身份响应格式无效", Status: 503}
+	if len(values) != len(identityProperties) {
+		return Evidence{}, failure("设备身份响应格式无效", "shape",
+			diagnostics.New(fmt.Sprintf("expected %d property lines, got %d (%d bytes)", len(identityProperties), len(values), len(data))))
 	}
+	var invalid []string
 	for i := range values {
 		values[i] = strings.TrimSpace(values[i])
-		if values[i] == "" || values[i] == "unknown" {
-			return Evidence{}, &Error{Code: "IDENTITY_UNAVAILABLE", Message: "设备未提供足够的可信身份属性", Status: 503}
+	}
+	for _, i := range [...]int{0, 2, 3} {
+		property := identityProperties[i]
+		switch values[i] {
+		case "":
+			invalid = append(invalid, property+" (empty)")
+		case "unknown":
+			invalid = append(invalid, property+" (unknown)")
 		}
+	}
+	if len(invalid) > 0 {
+		return Evidence{}, failure("设备未提供足够的可信身份属性", "properties", diagnostics.New(strings.Join(invalid, ", ")))
 	}
 	return Evidence{Serial: values[0], Manufacturer: values[1], Model: values[2], Product: values[3], Android: values[4], SDK: values[5]}, nil
 }

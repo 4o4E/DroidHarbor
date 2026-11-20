@@ -3,7 +3,6 @@ package adb
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"strings"
 
@@ -33,7 +32,7 @@ type ShellPacket struct {
 func ReadShellPacket(r io.Reader, scratch []byte, maxBytes uint32) (ShellPacket, error) {
 	var header [shellPacketHeader]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return ShellPacket{}, fmt.Errorf("read shell_v2 header: %w", err)
+		return ShellPacket{}, diagnostics.WrapStage("shell_v2.read_header", err)
 	}
 	id := header[0]
 	if id != shellStdin && id != shellStdout && id != shellStderr && id != shellExit && id != shellCloseStdin && id != shellWindowSize {
@@ -55,7 +54,7 @@ func ReadShellPacket(r io.Reader, scratch []byte, maxBytes uint32) (ShellPacket,
 		scratch = scratch[:int(n)]
 	}
 	if _, err := io.ReadFull(r, scratch); err != nil {
-		return ShellPacket{}, fmt.Errorf("read shell_v2 payload: %w", err)
+		return ShellPacket{}, diagnostics.WrapStage("shell_v2.read_payload", err)
 	}
 	return ShellPacket{ID: id, Data: scratch}, nil
 }
@@ -85,7 +84,7 @@ func (c *Client) RunShell(ctx context.Context, transportID uint64, command strin
 	}
 	defer conn.Close()
 	if err := writeAll(conn, []byte{shellCloseStdin, 0, 0, 0, 0}); err != nil {
-		return ShellResult{}, err
+		return ShellResult{}, diagnostics.WrapStage("shell_v2.close_stdin", err)
 	}
 	result := ShellResult{Stdout: make([]byte, 0), Stderr: make([]byte, 0)}
 	var scratch []byte

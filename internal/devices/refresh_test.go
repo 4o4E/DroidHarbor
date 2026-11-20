@@ -215,7 +215,7 @@ func TestManualRefreshRepairsOnlineDisplayMetadataWithoutInterruptingLiveLink(t 
 	if _, err = registry.Verify(ctx, "admin", registered.DeviceID, registered.LinkID); err != nil {
 		t.Fatal(err)
 	}
-	if err = registry.verifySnapshot(inventoryUpdate{version: registry.version, epoch: ctx}); err != nil {
+	if _, err = registry.verifySnapshot(inventoryUpdate{version: registry.version, epoch: ctx}); err != nil {
 		t.Fatal(err)
 	}
 	links := registry.OnlineLinks()

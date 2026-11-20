@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/events"
 	"droidharbor/internal/leases"
 	"droidharbor/internal/storage"
@@ -88,7 +89,7 @@ func TestUnverifiedRegisteredLinksPublishObservableState(t *testing.T) {
 			registry.mu.RLock()
 			update := inventoryUpdate{version: registry.version, epoch: ctx}
 			registry.mu.RUnlock()
-			if err := registry.verifySnapshot(update); err != nil {
+			if _, err := registry.verifySnapshot(update); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -103,7 +104,7 @@ func TestUnverifiedRegisteredLinksPublishObservableState(t *testing.T) {
 			registry.mu.RLock()
 			update = inventoryUpdate{version: registry.version, epoch: ctx}
 			registry.mu.RUnlock()
-			if err := registry.verifySnapshot(update); err != nil {
+			if _, err := registry.verifySnapshot(update); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -282,6 +283,27 @@ func identityFixture(t *testing.T, properties map[uint64]string, displays map[ui
 		t.Fatal(err)
 	}
 	return client
+}
+
+func TestIdentityFailureLogsMissingFieldsWithoutDeviceValues(t *testing.T) {
+	ctx := context.Background()
+	client := identityFixture(t, map[uint64]string{19: "private-hardware\nunknown\n\nunknown\n\n\n"}, nil)
+	registry := New(ctx, nil, client, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Second)
+	defer registry.Close()
+	_, err := registry.probe(ctx, 19)
+	var problem *Error
+	if !errors.As(err, &problem) || problem.Code != "IDENTITY_UNAVAILABLE" {
+		t.Fatalf("invalid identity was not rejected: %v", err)
+	}
+	cause := diagnostics.Cause(err).String()
+	for _, detail := range []string{"identity.properties (transport 19)", "ro.product.model (empty)", "ro.product.device (unknown)"} {
+		if !strings.Contains(cause, detail) {
+			t.Errorf("missing %q in diagnostic: %s", detail, cause)
+		}
+	}
+	if strings.Contains(cause, "private-") || strings.Contains(cause, "ro.product.manufacturer") || strings.Contains(cause, "ro.build.version") {
+		t.Fatalf("diagnostic leaked raw values or checked descriptive fields: %s", cause)
+	}
 }
 
 func TestWirelessAddressChangePreservesIdentityAndWithdrawsOldTransport(t *testing.T) {
@@ -536,7 +558,7 @@ func TestDiscoveredEnrollmentDeduplicatesHardwareAndKeepsUntrustedLinksDisabled(
 	}
 	defer db.Close()
 	client := identityFixture(t, map[uint64]string{
-		1: "one-phone\nMaker\nPhone\nproduct\n15\n35\n",
+		1: "one-phone\nunknown\nPhone\nproduct\nunknown\n\n",
 		2: "one-phone\nMaker\nPhone\nproduct\n15\n35\n",
 		3: "one-phone\nMaker\nDifferent\nproduct\n15\n35\n",
 	}, nil)
@@ -556,8 +578,8 @@ func TestDiscoveredEnrollmentDeduplicatesHardwareAndKeepsUntrustedLinksDisabled(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usb.DeviceID != wifi.DeviceID || usb.LinkID == wifi.LinkID {
-		t.Fatal("USB and Wi-Fi became separate physical devices or overwrote one link")
+	if !usb.Verified || !wifi.Verified || usb.DeviceID != wifi.DeviceID || usb.LinkID == wifi.LinkID {
+		t.Fatal("two links of the same phone did not verify and reuse one registration")
 	}
 	pending, err := registry.Discover(ctx)
 	if err != nil {
@@ -649,7 +671,7 @@ func TestRestartDisplayFailureDoesNotBlockOtherPersistedDevices(t *testing.T) {
 	restarted := New(ctx, db, identityFixture(t, properties, map[uint64]string{1: "display service unavailable\n"}), logger, time.Second)
 	defer restarted.Close()
 	restarted.publish(inventory, ctx)
-	if err := restarted.verifySnapshot(inventoryUpdate{version: restarted.version, epoch: ctx}); err != nil {
+	if _, err := restarted.verifySnapshot(inventoryUpdate{version: restarted.version, epoch: ctx}); err != nil {
 		t.Fatal(err)
 	}
 	links := restarted.OnlineLinks()

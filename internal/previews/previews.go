@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"droidharbor/internal/adb"
+	"droidharbor/internal/diagnostics"
 	"droidharbor/internal/leases"
 	"golang.org/x/image/draw"
 )
@@ -365,11 +366,11 @@ func (m *Manager) Close() error {
 }
 
 var (
-	ErrRateLimited   = errors.New("preview capture rate limited")
-	ErrNotReady      = errors.New("initial device cover is not available")
-	ErrCapacity      = errors.New("preview capacity exhausted")
-	ErrLinkChanged   = errors.New("device link changed during preview")
-	ErrInputTooLarge = errors.New("screenshot exceeds encoded input limit")
-	ErrImageTooLarge = errors.New("screenshot exceeds decoded pixel limit")
-	ErrInvalidImage  = errors.New("invalid PNG screenshot")
+	ErrRateLimited   = diagnostics.New("preview capture rate limited")
+	ErrNotReady      = diagnostics.New("initial device cover is not available")
+	ErrCapacity      = diagnostics.New("preview capacity exhausted")
+	ErrLinkChanged   = diagnostics.New("device link changed during preview")
+	ErrInputTooLarge = diagnostics.New("screenshot exceeds encoded input limit")
+	ErrImageTooLarge = diagnostics.New("screenshot exceeds decoded pixel limit")
+	ErrInvalidImage  = diagnostics.New("invalid PNG screenshot")
 )
