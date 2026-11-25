@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	appUsage              = `用法：droidharbor-cli app <open|find|wait|input|tap> --task-dir <目录> --package <包名> [--timeout 12s] [--target <JSON>] [--text <ASCII>] [--expect-package <包名>] [--expect-activity <包名/Activity>] [--expect-node <JSON>]...`
+	appUsage              = `用法：droidharbor-cli app <open|find|wait|input|tap|read-list> --task-dir <目录> --package <包名> [--timeout <时长>] [--target <JSON>] [--text <ASCII>] [--expect-package <包名>] [--expect-activity <包名/Activity>] [--expect-node <JSON>]；read-list 另需 --item <JSON>，可选 --max-screens <数量>、--end-node <JSON>`
 	appDefaultTimeout     = 12 * time.Second
 	appMinTimeout         = 2 * time.Second
 	appMaxTimeout         = 60 * time.Second
@@ -22,7 +22,7 @@ const (
 	appTreeInterval       = 1100 * time.Millisecond
 	appForegroundInterval = 200 * time.Millisecond
 	appEvidenceLimit      = 6
-	appSelectAll           = "input keycombination -t 50 KEYCODE_CTRL_LEFT KEYCODE_A"
+	appSelectAll          = "input keycombination -t 50 KEYCODE_CTRL_LEFT KEYCODE_A"
 )
 
 // Stock Android XML may put the field's placeholder in its text attribute.
@@ -41,6 +41,8 @@ type appSelector struct {
 	Focused     *bool   `json:"focused"`
 	Clickable   *bool   `json:"clickable"`
 	Selected    *bool   `json:"selected"`
+	Scrollable  *bool   `json:"scrollable"`
+	visibleOnly bool
 }
 
 func (s *appSelector) String() string { return "控件条件 JSON" }
@@ -63,7 +65,8 @@ func (s appSelector) matches(n appNode) bool {
 	return (s.ID == "" || s.ID == n.ID) && (s.Class == "" || s.Class == n.Class) &&
 		(s.Text == nil || *s.Text == n.Text) && (s.Description == nil || *s.Description == n.Description) &&
 		(s.Enabled == nil || *s.Enabled == n.Enabled) && (s.Focused == nil || *s.Focused == n.Focused) &&
-		(s.Clickable == nil || *s.Clickable == n.Clickable) && (s.Selected == nil || *s.Selected == n.Selected)
+		(s.Clickable == nil || *s.Clickable == n.Clickable) && (s.Selected == nil || *s.Selected == n.Selected) &&
+		(s.Scrollable == nil || *s.Scrollable == n.Scrollable) && (!s.visibleOnly || !n.rectangle().Empty())
 }
 
 type appExpectation struct {
@@ -76,6 +79,7 @@ type appOptions struct {
 	target                       appSelector
 	expect                       appExpectation
 	timeout                      time.Duration
+	list                         appListOptions
 }
 
 func parseAppOptions(args []string) (appOptions, error) {
@@ -84,14 +88,23 @@ func parseAppOptions(args []string) (appOptions, error) {
 		return o, errors.New("缺少 app 子命令")
 	}
 	o.action = args[0]
+	o.timeout = appDefaultTimeout
+	if o.action == "read-list" {
+		o.timeout = appListDefaultTimeout
+	}
 	flags := newCommandFlagSet("app " + o.action)
 	flags.StringVar(&o.directory, "task-dir", "", "受保护的任务目录")
 	flags.StringVar(&o.pkg, "package", "", "目标应用包名")
 	flags.StringVar(&o.text, "text", "", "输入的 ASCII 文本")
-	flags.DurationVar(&o.timeout, "timeout", appDefaultTimeout, "端到端截止时间")
+	flags.DurationVar(&o.timeout, "timeout", o.timeout, "端到端截止时间")
 	flags.Var(&o.target, "target", "操作目标控件条件 JSON")
 	flags.StringVar(&o.expect.pkg, "expect-package", "", "预期前台包名")
 	flags.StringVar(&o.expect.activity, "expect-activity", "", "预期前台组件")
+	if o.action == "read-list" {
+		flags.Var(&o.list.item, "item", "列表直属条目控件条件 JSON")
+		flags.Var(&o.list.end, "end-node", "列表末尾标志控件条件 JSON")
+		flags.IntVar(&o.list.maxScreens, "max-screens", appListDefaultScreens, "最多读取的屏数（含当前屏）")
+	}
 	flags.Func("expect-node", "预期控件条件 JSON，可重复", func(value string) error {
 		var s appSelector
 		if len(o.expect.nodes) == appEvidenceLimit {
@@ -100,6 +113,7 @@ func parseAppOptions(args []string) (appOptions, error) {
 		if err := s.Set(value); err != nil {
 			return err
 		}
+		s.visibleOnly = o.action == "read-list"
 		o.expect.nodes = append(o.expect.nodes, s)
 		return nil
 	})
@@ -128,6 +142,12 @@ func parseAppOptions(args []string) (appOptions, error) {
 		if !target || !expect || o.text != "" {
 			return o, errors.New("tap 需要 --target 及预期的前台或控件条件，不接受 --text")
 		}
+	case "read-list":
+		if !target || o.list.item == (appSelector{}) || len(o.expect.nodes) == 0 ||
+			o.text != "" || o.expect.pkg != "" && o.expect.pkg != o.pkg ||
+			o.list.maxScreens < 1 || o.list.maxScreens > appListMaxScreens {
+			return o, errors.New("read-list 需要 --target、--item、至少一个同应用 --expect-node，--max-screens 必须在 1 至 8 内")
+		}
 	default:
 		return o, errors.New("不支持的 app 子命令")
 	}
@@ -141,8 +161,8 @@ func parseAppOptions(args []string) (appOptions, error) {
 	if o.expect.pkg == "" {
 		o.expect.pkg = o.pkg
 	}
-	if !appPackagePattern.MatchString(o.expect.pkg) || o.action == "open" && o.expect.pkg != o.pkg {
-		return o, errors.New("预期包名无效；open 的预期包名必须是启动目标")
+	if !appPackagePattern.MatchString(o.expect.pkg) || (o.action == "open" || o.action == "read-list") && o.expect.pkg != o.pkg {
+		return o, errors.New("预期包名无效；open 和 read-list 的预期包名必须与目标应用一致")
 	}
 	return o, nil
 }
@@ -184,6 +204,7 @@ type appObservation struct {
 	Matches    *appMatches   `json:"matches,omitempty"`
 	Expected   []appMatches  `json:"expected,omitempty"`
 	nodes      []appNode
+	rotation   string
 }
 
 type appScreenshot struct {
@@ -207,6 +228,7 @@ type appResult struct {
 	ScreenshotError    string          `json:"screenshotError,omitempty"`
 	ElapsedMillis      int64           `json:"elapsedMs"`
 	Observations       int             `json:"observations"`
+	List               *appListResult  `json:"list,omitempty"`
 }
 
 type appRun struct {
@@ -261,6 +283,10 @@ func (r *appRun) foreground(ctx context.Context) (appForeground, error) {
 }
 
 func (r *appRun) observe(ctx context.Context, pkg string, tree bool) (*appObservation, error) {
+	return r.observeWithTreeBudget(ctx, pkg, tree, appTreeTimeout)
+}
+
+func (r *appRun) observeWithTreeBudget(ctx context.Context, pkg string, tree bool, treeBudget time.Duration) (*appObservation, error) {
 	r.result.Observations++
 	front, err := r.foreground(ctx)
 	if err != nil {
@@ -270,7 +296,7 @@ func (r *appRun) observe(ctx context.Context, pkg string, tree bool) (*appObserv
 	if !tree || front.Package != pkg {
 		return obs, nil
 	}
-	probe, cancel := context.WithTimeout(ctx, appTreeTimeout)
+	probe, cancel := context.WithTimeout(ctx, treeBudget)
 	treeOut := r.command(probe, appDumpScript)
 	cancel()
 	obs.Hierarchy = "unavailable"
@@ -280,7 +306,7 @@ func (r *appRun) observe(ctx context.Context, pkg string, tree bool) (*appObserv
 	if bytes.Contains(treeOut.stderr, []byte("ERROR:")) {
 		return obs, errors.New("Android 未能导出当前控件树")
 	}
-	nodes, err := parseAppNodes(treeOut.stdout, pkg)
+	nodes, rotation, err := parseAppNodes(treeOut.stdout, pkg)
 	if err != nil || len(nodes) == 0 {
 		return obs, errors.New("界面树不完整，或没有属于当前应用的可见节点")
 	}
@@ -293,6 +319,7 @@ func (r *appRun) observe(ctx context.Context, pkg string, tree bool) (*appObserv
 		return obs, errors.New("取控件树期间前台窗口发生变化")
 	}
 	obs.Hierarchy, obs.nodes = "observed", nodes
+	obs.rotation = rotation
 	return obs, nil
 }
 
@@ -412,6 +439,8 @@ func (r *appRun) execute(root context.Context) *commandFailure {
 	case "wait":
 		e := r.options.expect
 		failure = r.wait(work, e.pkg, len(e.nodes) != 0, e.satisfied)
+	case "read-list":
+		failure = r.readList(work)
 	default:
 		failure = r.withTarget(work)
 	}

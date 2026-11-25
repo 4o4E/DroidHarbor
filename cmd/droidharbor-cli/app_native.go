@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"image"
 	"image/png"
 	"io"
 	"os"
@@ -104,6 +105,8 @@ type appNode struct {
 	Editable    *bool  `json:"editable,omitempty"`
 	ShowingHint bool   `json:"-"`
 	HintKnown   bool   `json:"-"`
+	Scrollable  bool   `json:"scrollable,omitempty"`
+	depth, end  int
 }
 
 func (n appNode) editField() bool {
@@ -118,26 +121,33 @@ func (n appNode) editField() bool {
 	return n.Class == "android.widget.EditText"
 }
 
-func (n appNode) center() (x, y int, ok bool) {
+func (n appNode) rectangle() image.Rectangle {
 	bounds := appNodeBounds.FindStringSubmatch(n.Bounds)
 	if bounds == nil {
-		return 0, 0, false
+		return image.Rectangle{}
 	}
 	var p [4]int
 	for i := range p {
 		v, err := strconv.ParseUint(bounds[i+1], 10, 16)
 		if err != nil {
-			return 0, 0, false
+			return image.Rectangle{}
 		}
 		p[i] = int(v)
 	}
-	return p[0] + (p[2]-p[0])/2, p[1] + (p[3]-p[1])/2, p[0] < p[2] && p[1] < p[3]
+	return image.Rectangle{Min: image.Pt(p[0], p[1]), Max: image.Pt(p[2], p[3])}
 }
 
-func parseAppNodes(data []byte, pkg string) ([]appNode, error) {
+func (n appNode) center() (x, y int, ok bool) {
+	r := n.rectangle()
+	return r.Min.X + r.Dx()/2, r.Min.Y + r.Dy()/2, !r.Empty()
+}
+
+func parseAppNodes(data []byte, pkg string) ([]appNode, string, error) {
 	d := xml.NewDecoder(bytes.NewReader(data))
 	var nodes []appNode
-	depth, visible := 0, 0
+	var ancestors []int
+	var rotation string
+	visible := 0
 	root := false
 	for {
 		token, err := d.Token()
@@ -145,17 +155,23 @@ func parseAppNodes(data []byte, pkg string) ([]appNode, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		switch item := token.(type) {
 		case xml.StartElement:
+			depth, index := len(ancestors), -1
 			if depth == 0 {
 				if root || item.Name.Local != "hierarchy" {
-					return nil, errors.New("界面树根元素无效")
+					return nil, "", errors.New("界面树根元素无效")
 				}
 				root = true
+				for _, attr := range item.Attr {
+					if attr.Name.Local == "rotation" {
+						rotation = attr.Value
+					}
+				}
 			} else if item.Name.Local == "node" {
-				var node appNode
+				node := appNode{depth: depth}
 				for _, attr := range item.Attr {
 					value := attr.Value
 					switch attr.Name.Local {
@@ -181,6 +197,8 @@ func parseAppNodes(data []byte, pkg string) ([]appNode, error) {
 						node.Selected = value == "true"
 					case "password":
 						node.Password = value == "true"
+					case "scrollable":
+						node.Scrollable = value == "true"
 					case "editable":
 						if v, err := strconv.ParseBool(value); err == nil {
 							node.Editable = &v
@@ -193,22 +211,27 @@ func parseAppNodes(data []byte, pkg string) ([]appNode, error) {
 				}
 				visible++
 				if node.Package == pkg && !node.Password {
+					index = len(nodes)
 					nodes = append(nodes, node)
 				}
 			}
-			depth++
+			ancestors = append(ancestors, index)
 		case xml.EndElement:
-			depth--
+			last := len(ancestors) - 1
+			if index := ancestors[last]; index >= 0 {
+				nodes[index].end = len(nodes)
+			}
+			ancestors = ancestors[:last]
 		case xml.CharData:
 			if len(bytes.TrimSpace(item)) > 0 {
-				return nil, errors.New("界面树含有非 XML 数据")
+				return nil, "", errors.New("界面树含有非 XML 数据")
 			}
 		}
 	}
-	if !root || depth != 0 || visible == 0 {
-		return nil, errors.New("界面树为空或未完整返回")
+	if !root || len(ancestors) != 0 || visible == 0 {
+		return nil, "", errors.New("界面树为空或未完整返回")
 	}
-	return nodes, nil
+	return nodes, rotation, nil
 }
 
 type appEditState struct {

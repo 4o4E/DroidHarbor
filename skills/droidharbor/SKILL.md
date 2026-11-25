@@ -83,8 +83,9 @@ Use `app` through the bundled CLI on the live task connection. It resolves the c
 | `app tap --package <package> --target <selector> <expectation>` | Confirms one current clickable target, taps once, then waits for the given outcome. An already-satisfied condition does not prove a new action. |
 | `app input --package <package> --target <selector> --text <value>` | Confirms the focused editable control. To replace text, it first confirms the old value was fully selected, sends the edit once, then reads back the exact value from the same editor. It never submits. If the field already contains the verified value, it sends no keys. |
 | `app wait --package <package> <expectation>` | Observes only. Useful after an explicitly chosen native action or to verify a page after launch. With no additional condition it waits for the package to get focus. |
+| `app read-list --package <package> --target <list-selector> --item <row-selector> --expect-node <page-marker>` | Reads complete visible rows from a vertical list. After each swipe, appends new rows only when the current and previous screens have a unique, consecutive overlap. |
 
-Each command requires `--task-dir <private-task-dir>`. `--timeout` is 12s by default (2s–60s); this is a deadline, not a delay. A selector is one JSON object; keys `id`, `class`, `text`, `description`, `enabled`, `focused`, `clickable`, and `selected` match exactly and are ANDed. Form the expectation with `--expect-activity '<package>/Activity'`, `--expect-package <destination-package>`, and/or `--expect-node <selector>`; every repeated `--expect-node` must be present in the same current observation. Use `--expect-node` on `open` to also verify a specific page (`pageVerified`). For in-app navigation, use a destination title/control rather than the app's unchanged package. Include a query/model marker when the previous result page can display the same title.
+Each command requires `--task-dir <private-task-dir>`. `--timeout` is 12s by default (30s for `read-list`, 2s–60s for all); this is a deadline, not a delay. A selector is one JSON object; keys `id`, `class`, `text`, `description`, `enabled`, `focused`, `clickable`, `selected`, and `scrollable` match exactly and are ANDed. Form the expectation with `--expect-activity '<package>/Activity'`, `--expect-package <destination-package>`, and/or `--expect-node <selector>`; every repeated `--expect-node` must be present in the same current observation. Use `--expect-node` on `open` to also verify a specific page (`pageVerified`). For in-app navigation, use a destination title/control rather than the app's unchanged package. Include a query/model marker when the previous result page can display the same title.
 
 Examples show shell quoting for POSIX shells and modern PowerShell native argument passing; an argument-vector tool passes the JSON as one argument without the surrounding single quotes:
 
@@ -104,6 +105,18 @@ If controls are not exposed or the UI tree cannot be read reliably, use the retu
 If the phone is asleep, an authorized explicit native wake-up (`shell input keyevent KEYCODE_WAKEUP`) must be followed by observation before clicking. A black PNG is not proof of a usable display; diagnose with `dumpsys power/window` when needed. A credential lock or app login gate requires the user's action. A device tag does not prove an installed app or valid login. Browsing authorization does not authorize orders, payments, messages, account switching, or coupon redemption.
 
 `app input` uses Android native input for printable ASCII (not literal `%s`). Submit only after `verified: true` and the actual `fieldValue` exactly equals the requested query. Raw node text can be a placeholder, not proof. Do not install or change an IME to work around a rejected input; required Chinese or other Unicode needs an explicitly approved channel. The built-in `uiautomator dump` used for evidence is not the unsupported uiautomator2 framework.
+
+### Read a list across screens
+
+Start on an already verified results page. `--target` must identify one enabled scrollable list, `--item` selects its direct row controls, and the required `--expect-node` must be visible in every observation. Use a persistent marker such as the actual search term in the results header. Choose selectors from the current app, not from a resource ID guessed from its name. For example, on the observed Taobao results layout for `rtx`:
+
+```text
+<cli> app read-list --task-dir <task-dir> --package com.taobao.taobao --target '{"class":"androidx.recyclerview.widget.RecyclerView","scrollable":true}' --item '{"class":"android.view.ViewGroup"}' --expect-node '{"id":"com.taobao.taobao:id/searchEdit","text":"rtx"}' --max-screens 3
+```
+
+`--max-screens` counts the current screen (default 3, range 1–8). Use `1` to inspect rows without scrolling. `list.items` contains the actual tree text and descriptions grouped by row. Partially visible edge rows are read only once fully visible. The command leaves the list at its current scroll position. It does not OCR the screen or infer a price, store, or field the app does not expose.
+
+Report `list.stopReason` with the results. `reachedEnd: true` means a caller-supplied `--end-node` was observed below the last visible row of a verified list with readable rows; it says nothing about content above the starting position. A footer alone does not verify the row selector. `screen_limit`, `deadline`, `output_limit`, `no_progress`, `overlap_missing`, and `overlap_ambiguous` are bounded or partial reads, even with exit 0. If a command fails after observation, use only its confirmed rows in `details.list`. Stop on a changed page, unreliable tree, or unknown swipe delivery; observe the current page before deciding what to do next, and do not replay the swipe.
 
 
 ### Binary-safe screenshot and files
