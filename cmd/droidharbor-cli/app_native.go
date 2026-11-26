@@ -33,6 +33,7 @@ var (
 	appEditorPackage  = regexp.MustCompile(`(?:^|\s)packageName=([^\s]+)`)
 	appEditorType     = regexp.MustCompile(`(?:^|\s)inputType=(0x[0-9a-fA-F]+|[0-9a-fA-F]+)(?:\s|$)`)
 	appEditorCursor   = regexp.MustCompile(`(?:^|\s)mCursorSel(Start|End)=(-?[0-9]+)`)
+	appServedView     = regexp.MustCompile(`(?:^|\s)mServedView=([^\s{]+\{[0-9a-fA-F]+)(?:[ }\t])`)
 )
 
 func appComponent(value string) (pkg, component string) {
@@ -236,6 +237,7 @@ func parseAppNodes(data []byte, pkg string) ([]appNode, string, error) {
 
 type appEditState struct {
 	identity   string
+	view       string
 	start, end int
 }
 
@@ -252,8 +254,13 @@ func appEditor(data []byte, pkg string) appEditState {
 				return state
 			}
 			active, editor, matchesPackage, textType = false, false, false, false
+			state.view = ""
 		case bytes.HasPrefix(line, []byte("mActive=")):
 			active = bytes.Equal(line, []byte("mActive=true")) || bytes.HasPrefix(line, []byte("mActive=true "))
+		case active && bytes.HasPrefix(line, []byte("mServedView=")):
+			if m := appServedView.FindSubmatch(line); m != nil {
+				state.view = string(m[1])
+			}
 		case bytes.Equal(line, []byte("mCurrentEditorInfo:")), bytes.Equal(line, []byte("mCurrentTextBoxAttribute:")):
 			editor, matchesPackage, textType = active, false, false
 		case bytes.HasPrefix(line, []byte("mServedInputConnection=")), bytes.HasPrefix(line, []byte("mServedInputConnectionWrapper=")):
@@ -261,6 +268,11 @@ func appEditor(data []byte, pkg string) appEditState {
 			connection, _, _ = bytes.Cut(bytes.TrimSpace(connection), []byte(" "))
 			if editor && matchesPackage && textType && len(connection) != 0 && !bytes.Equal(connection, []byte("null")) {
 				state.identity = string(connection)
+				if state.view == "" {
+					if m := appServedView.FindSubmatch(line); m != nil {
+						state.view = string(m[1])
+					}
+				}
 			}
 			editor = false
 		case editor && bytes.HasPrefix(line, []byte("inputType=")):
@@ -293,10 +305,12 @@ func appEditor(data []byte, pkg string) appEditState {
 type appExecResult struct {
 	stdout, stderr []byte
 	started        bool
+	exitCode       int
 	err            error
 }
 
 type appADB func(ctx context.Context, maxBytes int, args ...string) appExecResult
+type appADBScript func(ctx context.Context, script string) appExecResult
 
 type appLimitedBuffer struct {
 	bytes.Buffer
@@ -310,9 +324,9 @@ func (b *appLimitedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
-func taskAppADB(state *connectionState, env *publicConnectionEnvironment) appADB {
+func taskAppADB(state *connectionState, env *publicConnectionEnvironment) (appADB, appADBScript) {
 	adbEnv := connectionADBEnvironment(state.ADBHome, state.ADBKeyPath)
-	return func(ctx context.Context, maxBytes int, args ...string) appExecResult {
+	run := func(ctx context.Context, maxBytes int, stdin io.Reader, args ...string) appExecResult {
 		if err := ctx.Err(); err != nil {
 			return appExecResult{err: err}
 		}
@@ -324,6 +338,7 @@ func taskAppADB(state *connectionState, env *publicConnectionEnvironment) appADB
 		copy(fullArgs[len(env.ADBArgs):], args)
 		command := exec.CommandContext(ctx, env.ADBBinary, fullArgs...)
 		command.Env = adbEnv
+		command.Stdin = stdin
 		out, diagnostic := appLimitedBuffer{limit: maxBytes}, appLimitedBuffer{limit: 16 * 1024}
 		command.Stdout, command.Stderr = &out, &diagnostic
 		if err := command.Start(); err != nil {
@@ -333,8 +348,13 @@ func taskAppADB(state *connectionState, env *publicConnectionEnvironment) appADB
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
-		return appExecResult{stdout: out.Bytes(), stderr: diagnostic.Bytes(), started: true, err: err}
+		return appExecResult{stdout: out.Bytes(), stderr: diagnostic.Bytes(), started: true, err: err, exitCode: command.ProcessState.ExitCode()}
 	}
+	return func(ctx context.Context, maxBytes int, args ...string) appExecResult {
+			return run(ctx, maxBytes, nil, args...)
+		}, func(ctx context.Context, script string) appExecResult {
+			return run(ctx, 1024, strings.NewReader(script), "shell", "-T", "sh -s")
+		}
 }
 
 func appCompletePNG(data []byte) bool {

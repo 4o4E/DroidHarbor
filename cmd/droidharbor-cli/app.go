@@ -5,15 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const (
-	appUsage              = `用法：droidharbor-cli app <open|find|wait|input|tap|read-list> --task-dir <目录> --package <包名> [--timeout <时长>] [--target <JSON>] [--text <ASCII>] [--expect-package <包名>] [--expect-activity <包名/Activity>] [--expect-node <JSON>]；read-list 另需 --item <JSON>，可选 --max-screens <数量>、--end-node <JSON>`
+	appUsage              = `用法：droidharbor-cli app <open|find|wait|input|tap|read-list> --task-dir <目录> --package <包名> [--timeout <时长>] [--target <JSON>] [--text <单行文本>] [--expect-package <包名>] [--expect-activity <包名/Activity>] [--expect-node <JSON>]；read-list 另需 --item <JSON>，可选 --max-screens <数量>、--end-node <JSON>`
 	appDefaultTimeout     = 12 * time.Second
 	appMinTimeout         = 2 * time.Second
 	appMaxTimeout         = 60 * time.Second
@@ -29,7 +32,7 @@ const (
 // Without an explicit hint flag, a cursor at the end proves the editor
 // actually contains text; XML equality alone is insufficient.
 func appFieldEquals(node appNode, text string, selectionEnd int) bool {
-	return node.Text == text && !node.ShowingHint && (node.HintKnown || selectionEnd == len(text))
+	return node.Text == text && !node.ShowingHint && (node.HintKnown || selectionEnd == appUTF16Len(text))
 }
 
 type appSelector struct {
@@ -80,6 +83,7 @@ type appOptions struct {
 	expect                       appExpectation
 	timeout                      time.Duration
 	list                         appListOptions
+	unicodeInput                 bool
 }
 
 func parseAppOptions(args []string) (appOptions, error) {
@@ -95,7 +99,7 @@ func parseAppOptions(args []string) (appOptions, error) {
 	flags := newCommandFlagSet("app " + o.action)
 	flags.StringVar(&o.directory, "task-dir", "", "受保护的任务目录")
 	flags.StringVar(&o.pkg, "package", "", "目标应用包名")
-	flags.StringVar(&o.text, "text", "", "输入的 ASCII 文本")
+	flags.StringVar(&o.text, "text", "", "输入的单行文本")
 	flags.DurationVar(&o.timeout, "timeout", o.timeout, "端到端截止时间")
 	flags.Var(&o.target, "target", "操作目标控件条件 JSON")
 	flags.StringVar(&o.expect.pkg, "expect-package", "", "预期前台包名")
@@ -135,8 +139,17 @@ func parseAppOptions(args []string) (appOptions, error) {
 			return o, errors.New("find 只接受 --target 定位条件，不接受预期条件或 --text")
 		}
 	case "input":
-		if !target || expect || !appInputSupported(o.text) {
-			return o, errors.New("input 需要 --target 和非空可打印 ASCII --text（不支持字面 %s），以精确读回作为预期条件")
+		usesUnicode, supported := appInputMode(o.text)
+		if !target || expect || !supported {
+			return o, errors.New("input 需要 --target 和非空单行 --text（最多 256 个 UTF-16 单元；纯 ASCII 不支持字面 %s）")
+		}
+		o.unicodeInput = usesUnicode
+		if usesUnicode {
+			explicit := false
+			flags.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "timeout" })
+			if !explicit {
+				o.timeout = 20 * time.Second
+			}
 		}
 	case "tap":
 		if !target || !expect || o.text != "" {
@@ -167,16 +180,17 @@ func parseAppOptions(args []string) (appOptions, error) {
 	return o, nil
 }
 
-func appInputSupported(text string) bool {
-	if text == "" || len(text) > 256 || strings.Contains(text, "%s") {
-		return false
+func appInputMode(text string) (usesUnicode, supported bool) {
+	if text == "" || len(text) > 3*256 || !utf8.ValidString(text) || appUTF16Len(text) > 256 {
+		return false, false
 	}
-	for i := range len(text) {
-		if text[i] < 32 || text[i] > 126 {
-			return false
+	for _, c := range text {
+		if unicode.IsControl(c) || c == '\u2028' || c == '\u2029' {
+			return false, false
 		}
+		usesUnicode = usesUnicode || c > unicode.MaxASCII
 	}
-	return true
+	return usesUnicode, usesUnicode || !strings.Contains(text, "%s")
 }
 
 type appMatches struct {
@@ -234,6 +248,7 @@ type appResult struct {
 type appRun struct {
 	options   appOptions
 	adb       appADB
+	adbScript appADBScript
 	directory string
 	result    appResult
 }
@@ -253,7 +268,8 @@ func appCommand(args []string) (any, *commandFailure) {
 	run.result = appResult{Operation: options.action, Dispatch: "not_sent"}
 	directory, state, env, failure := activeADBConnection(ctx, options.directory)
 	if failure == nil {
-		run.directory, run.adb = directory, taskAppADB(state, env)
+		run.directory = directory
+		run.adb, run.adbScript = taskAppADB(state, env)
 		failure = run.execute(ctx)
 	} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		failure = appFail("APP_TIMEOUT", "截止时间内未核验活动任务连接，动作未发出", 5)
@@ -559,6 +575,48 @@ func (r *appRun) input(work context.Context, obs *appObservation, target appNode
 		r.result.AlreadySatisfied = true
 		return nil
 	}
+	var failure *commandFailure
+	if r.options.unicodeInput {
+		failure = r.inputUnicode(work, obs.Foreground, target, text)
+	} else {
+		failure = r.inputASCII(work, obs.Foreground, target, before, text)
+	}
+	if failure != nil {
+		return failure
+	}
+	focused := true
+	scope := appSelector{ID: target.ID, Class: target.Class, Focused: &focused}
+	return r.wait(work, r.options.pkg, true, func(next *appObservation) bool {
+		if next.Foreground != obs.Foreground || next.Hierarchy != "observed" {
+			return false
+		}
+		// The same focused field may resize when its clear button appears.
+		// Verify its served editor identity rather than pinning screen pixels.
+		fields := matchAppNodes(next.nodes, scope)
+		next.Matches = &fields
+		if fields.Count != 1 || !fields.Nodes[0].editField() || fields.Nodes[0].Text != text {
+			return false
+		}
+		field := fields.Nodes[0]
+		if field.ShowingHint {
+			return false
+		}
+		editor := r.command(work, "dumpsys input_method")
+		current := appEditor(editor.stdout, field.Package)
+		sameEditor := current.identity != "" && current.identity == before.identity
+		if r.options.unicodeInput && before.view != "" {
+			// A full-field Android edit can restart IME input on the same view.
+			sameEditor = current.identity != "" && current.view == before.view
+		}
+		if editor.err != nil || !sameEditor || !appFieldEquals(field, text, max(current.start, current.end)) || work.Err() != nil {
+			return false
+		}
+		r.result.FieldValue = field.Text
+		return true
+	})
+}
+
+func (r *appRun) inputASCII(work context.Context, observed appForeground, target appNode, before appEditState, text string) *commandFailure {
 	if target.Text != "" && !target.ShowingHint && !before.selects(target.Text) {
 		help := r.command(work, "input help")
 		if work.Err() != nil {
@@ -589,45 +647,22 @@ func (r *appRun) input(work context.Context, obs *appObservation, target appNode
 	if err != nil {
 		return appObservationFailure(work, err)
 	}
-	if front != obs.Foreground {
+	if front != observed {
 		return appFail("APP_STATE_CHANGED", "派发输入前窗口已改变，动作未发出", 5)
 	}
-	if failure := r.dispatch(work, script.String()); failure != nil {
-		return failure
-	}
-	focused := true
-	scope := appSelector{ID: target.ID, Class: target.Class, Focused: &focused}
-	return r.wait(work, r.options.pkg, true, func(next *appObservation) bool {
-		if next.Foreground != obs.Foreground || next.Hierarchy != "observed" {
-			return false
-		}
-		// The same focused field may resize when its clear button appears.
-		// Verify its served editor identity rather than pinning screen pixels.
-		fields := matchAppNodes(next.nodes, scope)
-		next.Matches = &fields
-		if fields.Count != 1 || !fields.Nodes[0].editField() || fields.Nodes[0].Text != text {
-			return false
-		}
-		field := fields.Nodes[0]
-		if field.ShowingHint {
-			return false
-		}
-		editor := r.command(work, "dumpsys input_method")
-		current := appEditor(editor.stdout, field.Package)
-		if editor.err != nil || current.identity != before.identity || !appFieldEquals(field, text, max(current.start, current.end)) || work.Err() != nil {
-			return false
-		}
-		r.result.FieldValue = field.Text
-		return true
-	})
+	return r.dispatch(work, script.String())
 }
 
-func (s appEditState) selects(text string) bool {
+func appUTF16Len(text string) int {
 	units := 0
 	for _, r := range text {
 		units += utf16.RuneLen(r)
 	}
-	return min(s.start, s.end) == 0 && max(s.start, s.end) == units
+	return units
+}
+
+func (s appEditState) selects(text string) bool {
+	return min(s.start, s.end) == 0 && max(s.start, s.end) == appUTF16Len(text)
 }
 
 func (r *appRun) selectForReplacement(work context.Context, target appNode, before appEditState) *commandFailure {

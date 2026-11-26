@@ -55,6 +55,8 @@ type appFixture struct {
 	selectionAtZero bool
 	selected        bool
 	png             []byte
+	script          appADBScript
+	editor          func(after bool) string
 }
 
 func (f *appFixture) adb(ctx context.Context, _ int, args ...string) appExecResult {
@@ -80,6 +82,9 @@ func (f *appFixture) adb(ctx context.Context, _ int, args ...string) appExecResu
 		}
 		return ok(f.after)
 	case script == "dumpsys input_method":
+		if f.editor != nil {
+			return ok(f.editor(len(f.mutations) != 0))
+		}
 		if f.selectionAtZero {
 			return ok(strings.Replace(fixtureEditor, "mCursorSelStart=7 mCursorSelEnd=7", "mCursorSelStart=0 mCursorSelEnd=0", 1))
 		}
@@ -120,7 +125,7 @@ func runFixtureApp(t *testing.T, f *appFixture, budget time.Duration, action str
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	f.t, f.front, f.png = t, fixtureFront, fixturePNG(t)
-	r := appRun{options: o, adb: f.adb, directory: dir, result: appResult{Operation: action, Dispatch: "not_sent"}}
+	r := appRun{options: o, adb: f.adb, adbScript: f.script, directory: dir, result: appResult{Operation: action, Dispatch: "not_sent"}}
 	failure := r.execute(ctx)
 	for _, s := range []*appScreenshot{r.result.Screenshot, r.result.FirstScreen} {
 		if s != nil {
