@@ -1918,7 +1918,7 @@ components:
             type: object
             required: [stage, code, message]
             properties:
-              stage: {type: string, enum: [power, cover, cpu, memory, battery]}
+              stage: {type: string, enum: [power, cover, cpu, memory, battery, input]}
               code: {type: string}
               message: {type: string}
     Device:

@@ -105,6 +105,20 @@ type Stream struct {
 	stopRequested    atomic.Bool
 	journaled        atomic.Bool
 	videoUnsupported atomic.Bool
+	inputDeniedAt    atomic.Int64
+}
+
+// RecentInputDenial is evidence from this live capture, not a capability
+// attached permanently to a device or transferable to another transport.
+func (m *Manager) RecentInputDenial(link leases.Link) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.streams[link.DeviceID]
+	if s == nil || !s.live || s.link != link || s.ctx.Err() != nil || s.stopRequested.Load() {
+		return false
+	}
+	age := time.Since(time.UnixMilli(s.inputDeniedAt.Load()))
+	return age >= 0 && age < time.Minute
 }
 
 func New(ctx context.Context, db *sql.DB, client *adb.Client, source Source, config Config, logger *slog.Logger) (*Manager, error) {

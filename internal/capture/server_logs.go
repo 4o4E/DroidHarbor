@@ -15,6 +15,7 @@ type serverDiagnostics struct {
 	powerChanged        func(bool)
 	keepActiveFailed    func()
 	encodingFailed      func()
+	inputDenied         func()
 }
 
 // Shell output can contain device/user text. Record severity and known exception
@@ -91,6 +92,14 @@ func (s *serverDiagnostics) observe(line []byte) {
 			}
 			return
 		}
+	}
+	if bytes.Equal(line, []byte(`[server] ERROR: Make sure you have enabled "USB debugging (Security Settings)" and then rebooted your device.`)) {
+		// The pinned server emits this exact line only for INJECT_EVENTS denial.
+		if s.inputDenied != nil {
+			s.inputDenied()
+		}
+		s.logger.Error("scrcpy_input_injection_denied", "deviceId", s.deviceID, "captureId", s.captureID)
+		return
 	}
 	if bytes.HasPrefix(line, []byte("[server] ERROR:")) {
 		s.logger.Error("scrcpy_server_error", "deviceId", s.deviceID, "captureId", s.captureID)

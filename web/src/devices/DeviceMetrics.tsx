@@ -1,14 +1,14 @@
 import { useEffect, useState } from 'react'
 import { Battery, BatteryCharging, Cpu, MemoryStick, Thermometer } from 'lucide-react'
 import { cn } from 'cn'
-import type { Device } from '@/lib/types'
+import { currentLinkError, type Device } from '@/lib/types'
 import { useErrorNotification } from '@/lib/notifications'
 
 export function useDeviceRuntimeNotification(device: Device) {
   const issues = device.connectionState === 'online'
-    ? [...(device.runtime?.issues ?? []).map(issue => issue.message), ...device.links.map(link => link.lastError).filter(Boolean)]
+    ? [...(device.runtime?.issues ?? []).map(issue => issue.message), currentLinkError(device)].filter(Boolean)
     : []
-  useErrorNotification(`${device.displayName}状态初始化失败`, issues.join('；'))
+  useErrorNotification(`${device.displayName}设备诊断`, issues.join('；'))
 }
 
 // Only the initial connection waits for the online controller. A later power

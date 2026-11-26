@@ -12,11 +12,13 @@ import { deviceDisplaySize, deviceName, deviceNeedsVerification, deviceStatus, t
 import { useSystemPreferences } from '@/lib/queries'
 import { useErrorNotification } from '@/lib/notifications'
 import { openCompact } from '@/workbench/openCompact'
+import { DeviceProblemMarker, deviceProblemDetails } from './DeviceProblemMarker'
 
 type Filter = 'all' | 'available' | 'leased' | 'offline' | 'attention'
 
 type Props = {
   devices: Device[]
+  diagnosticsReady: boolean
   onOpen: (device: Device) => void
   onManage: (device: Device) => void
   onAdd: () => void
@@ -27,26 +29,31 @@ type Props = {
 function isOffline(device: Device) {
   return device.connectionState !== 'online' && !deviceNeedsVerification(device)
 }
-function needsAttention(device: Device) {
-  return device.connectionState !== 'online' || device.allocationState === 'reclaiming' || device.allocationState === 'quarantined' || device.links.some(link => Boolean(link.lastError)) || Boolean(device.runtime?.issues.length)
-}
 function badgeVariant(device: Device): 'default' | 'secondary' | 'destructive' | 'outline' {
   if (isOffline(device) || device.allocationState === 'quarantined') return 'destructive'
   if (device.allocationState === 'leased' || device.allocationState === 'reclaiming') return 'secondary'
   return 'outline'
 }
 
-export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDeviceId }: Props) {
+export function DevicePool({ devices, diagnosticsReady, onOpen, onManage, onAdd, onSync, syncingDeviceId }: Props) {
   const preferences = useSystemPreferences()
   useErrorNotification('无法读取小窗设置', preferences.error)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
+  const problems = useMemo(() => {
+    const current = new Map<string, string>()
+    if (diagnosticsReady) for (const device of devices) {
+      const details = deviceProblemDetails(device)
+      if (details) current.set(device.deviceId, details)
+    }
+    return current
+  }, [devices, diagnosticsReady])
   const counts = useMemo(() => ({
     all: devices.length,
     available: devices.filter(device => device.connectionState === 'online' && device.allocationState === 'available').length,
     leased: devices.filter(device => device.allocationState === 'leased').length,
-    attention: devices.filter(needsAttention).length,
-  }), [devices])
+    attention: devices.filter(device => problems.has(device.deviceId) || device.allocationState === 'reclaiming').length,
+  }), [devices, problems])
   const visible = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
     return devices.filter(device => {
@@ -54,11 +61,11 @@ export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDe
         (filter === 'available' && device.connectionState === 'online' && device.allocationState === 'available') ||
         (filter === 'leased' && device.allocationState === 'leased') ||
         (filter === 'offline' && isOffline(device)) ||
-        (filter === 'attention' && needsAttention(device))
+        (filter === 'attention' && (problems.has(device.deviceId) || device.allocationState === 'reclaiming'))
       const searchText = [device.displayName, deviceStatus(device), ...device.tags, ...device.links.map(link => `${link.kind} ${link.endpoint}`)].join(' ').toLocaleLowerCase()
       return matchesFilter && (!normalized || searchText.includes(normalized))
     })
-  }, [devices, filter, query])
+  }, [devices, problems, filter, query])
 
   return (
     <section className="flex flex-col gap-6">
@@ -90,7 +97,9 @@ export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDe
       </div>
 
       {visible.length > 0 ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {visible.map(device => <Card key={device.deviceId} size="sm" className="flex-row gap-0 py-0">
+        {visible.map(device => {
+          const details = problems.get(device.deviceId)
+          return <Card key={device.deviceId} size="sm" className="flex-row gap-0 py-0">
           <Button variant="ghost" className="h-auto w-40 self-stretch overflow-hidden rounded-none p-0" aria-label={`预览${deviceName(device)}的画面`} onClick={() => onOpen(device)}>
             <DevicePreview device={device} compact />
           </Button>
@@ -98,16 +107,20 @@ export function DevicePool({ devices, onOpen, onManage, onAdd, onSync, syncingDe
             <CardHeader>
               <CardTitle className="break-words">{deviceName(device)}</CardTitle>
               {device.tags.length > 0 && <CardDescription>{device.tags.join(' · ')}</CardDescription>}
-              <CardAction className="flex items-center gap-1"><Badge variant={badgeVariant(device)}>{deviceStatus(device)}</Badge><Button variant="ghost" size="icon-sm" aria-label={`打开${deviceName(device)}独立小窗`} title="独立小窗" disabled={!preferences.data || !deviceDisplaySize(device)} onClick={() => { if (preferences.data) openCompact(device, 'control', preferences.data) }}><ExternalLink /></Button></CardAction>
+              <CardAction className="flex items-center gap-1">
+                <Badge variant={badgeVariant(device)}>{deviceStatus(device)}</Badge>
+                {details && <DeviceProblemMarker name={device.displayName} details={details} />}
+                <Button variant="ghost" size="icon-sm" aria-label={`打开${deviceName(device)}独立小窗`} title="独立小窗" disabled={!preferences.data || !deviceDisplaySize(device)} onClick={() => { if (preferences.data) openCompact(device, 'control', preferences.data) }}><ExternalLink /></Button>
+              </CardAction>
             </CardHeader>
             <CardContent><DeviceMetrics device={device} /></CardContent>
             <CardFooter className="mt-auto flex-wrap gap-2">
               <Button size="sm" aria-label={`预览${deviceName(device)}`} onClick={() => onOpen(device)}>预览</Button>
               <Button variant="outline" size="sm" aria-label={`管理${deviceName(device)}`} onClick={() => onManage(device)}>管理</Button>
-              {needsAttention(device) && <Button variant="outline" size="sm" aria-label={`刷新${deviceName(device)}状态`} disabled={syncingDeviceId !== null} onClick={() => onSync(device)}><RefreshCw data-icon="inline-start" className={syncingDeviceId === device.deviceId ? 'animate-spin' : undefined} />{syncingDeviceId === device.deviceId ? '刷新中…' : '刷新'}</Button>}
+              {(details || device.allocationState === 'reclaiming') && <Button variant="outline" size="sm" aria-label={`刷新${deviceName(device)}状态`} disabled={syncingDeviceId !== null} onClick={() => onSync(device)}><RefreshCw data-icon="inline-start" className={syncingDeviceId === device.deviceId ? 'animate-spin' : undefined} />{syncingDeviceId === device.deviceId ? '刷新中…' : '刷新'}</Button>}
             </CardFooter>
           </div>
-        </Card>)}
+        </Card>})}
       </div> : <Empty className="border">
         <EmptyHeader><EmptyMedia variant="icon"><Search /></EmptyMedia><EmptyTitle>{devices.length ? '没有匹配的设备' : '尚无已登记设备'}</EmptyTitle><EmptyDescription>{devices.length ? '试试其他名称、链接地址、标签或状态。' : '通过明确登记添加经授权的设备链路。'}</EmptyDescription></EmptyHeader>
         <EmptyContent>{devices.length ? <Button variant="outline" onClick={() => { setQuery(''); setFilter('all') }}>清除筛选</Button> : <Button onClick={onAdd}><Plus data-icon="inline-start" />添加设备</Button>}</EmptyContent>

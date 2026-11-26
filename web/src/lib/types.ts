@@ -78,6 +78,14 @@ export interface GlobalVideoSnapshot {
 }
 export const deviceName = (device: Device) => device.displayName
 
+// Online means the platform has a verified working route. Only its current
+// runtime link can contribute a link error to device-level diagnostics.
+export function currentLinkError(device: Device) {
+  if (device.connectionState !== 'online' || !device.runtime) return undefined
+  const { linkId } = device.runtime
+  return device.links.find(link => link.linkId === linkId)?.lastError
+}
+
 export function deviceDisplaySize(device: Device): DisplayGeometry | null {
   const { screen, video } = device.displayInfo ?? {}
   if (screen && video) return Date.parse(video.observedAt) >= Date.parse(screen.observedAt) ? video : screen

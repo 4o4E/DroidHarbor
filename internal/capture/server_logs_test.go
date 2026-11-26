@@ -2,11 +2,15 @@ package capture
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
+
+	"droidharbor/internal/leases"
 )
 
 func TestServerDiagnosticsPreserveErrorsAcrossPacketsWithoutRawContent(t *testing.T) {
@@ -61,5 +65,36 @@ func TestOnlyExplicitEncoderConfigurationRejectionAllowsFallback(t *testing.T) {
 				t.Fatalf("fallback classification=%v; want %v", rejected, test.rejected)
 			}
 		})
+	}
+}
+
+func TestInputDenialIsSpecificToLiveCaptureAndRecentObservation(t *testing.T) {
+	link := leases.Link{DeviceID: "phone", LinkID: "usb", Generation: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Stream{link: link, ctx: ctx, live: true}
+	m := &Manager{streams: map[string]*Stream{"phone": s}}
+	log := serverDiagnostics{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), inputDenied: func() { s.inputDeniedAt.Store(time.Now().UnixMilli()) }}
+	log.write(1, []byte("[server] ERROR: java.lang.SecurityException: unrelated\n"))
+	if m.RecentInputDenial(link) {
+		t.Fatal("unrelated security failure became input evidence")
+	}
+	log.write(1, []byte(`[server] ERROR: Make sure you have enabled "USB debugging (Security Settings)" and then rebooted your device.`+"\n"))
+	if !m.RecentInputDenial(link) {
+		t.Fatal("explicit INJECT_EVENTS rejection missing")
+	}
+	next := link
+	next.Generation++
+	if m.RecentInputDenial(next) {
+		t.Fatal("input denial crossed reconnect")
+	}
+	s.inputDeniedAt.Store(time.Now().Add(-time.Minute).UnixMilli())
+	if m.RecentInputDenial(link) {
+		t.Fatal("expired denial reported as current")
+	}
+	s.inputDeniedAt.Store(time.Now().UnixMilli())
+	cancel()
+	if m.RecentInputDenial(link) {
+		t.Fatal("ended capture supplied input evidence")
 	}
 }

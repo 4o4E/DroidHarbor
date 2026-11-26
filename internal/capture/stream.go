@@ -328,6 +328,9 @@ func (s *Stream) drainShell() {
 	if !s.manager.controlOnly {
 		serverLogs.encodingFailed = func() { s.videoUnsupported.Store(true) }
 	}
+	if !s.manager.audioOnly {
+		serverLogs.inputDenied = func() { s.inputDeniedAt.Store(time.Now().UnixMilli()) }
+	}
 	if s.manager.controlOnly {
 		serverLogs.powerChanged = func(on bool) {
 			select {

@@ -27,6 +27,7 @@ type Manager struct {
 	cancel      context.CancelFunc
 	registry    *devices.Registry
 	power       *capture.Manager
+	video       *capture.Manager
 	previews    *previews.Manager
 	adb         *adb.Client
 	logger      *slog.Logger
@@ -54,9 +55,9 @@ type worker struct {
 	coverAttempted bool
 }
 
-func New(ctx context.Context, registry *devices.Registry, power *capture.Manager, preview *previews.Manager, client *adb.Client, logger *slog.Logger) *Manager {
+func New(ctx context.Context, registry *devices.Registry, power, video *capture.Manager, preview *previews.Manager, client *adb.Client, logger *slog.Logger) *Manager {
 	lifetime, cancel := context.WithCancel(ctx)
-	m := &Manager{ctx: lifetime, cancel: cancel, registry: registry, power: power, previews: preview, adb: client, logger: logger, changes: make(chan struct{}, 1), workers: make(map[string]*worker), paused: make(map[string]bool)}
+	m := &Manager{ctx: lifetime, cancel: cancel, registry: registry, power: power, video: video, previews: preview, adb: client, logger: logger, changes: make(chan struct{}, 1), workers: make(map[string]*worker), paused: make(map[string]bool)}
 	registry.BindRuntime(m.View, m.Notify)
 	m.wg.Add(1)
 	go m.loop()
@@ -150,6 +151,13 @@ func (m *Manager) View(deviceID string) *devices.RuntimeInfo {
 	current, _, err := m.registry.ReadLink(m.ctx, deviceID)
 	if err != nil || current != link {
 		return nil
+	}
+	if m.video.RecentInputDenial(link) || m.power.RecentInputDenial(link) {
+		view := *snapshot
+		view.Issues = append(snapshot.Issues[:len(snapshot.Issues):len(snapshot.Issues)], devices.RuntimeIssue{
+			Stage: "input", Code: "INPUT_INJECTION_DENIED", Message: "Android 已拒绝输入事件注入",
+		})
+		return &view
 	}
 	return snapshot
 }
